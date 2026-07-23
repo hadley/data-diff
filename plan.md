@@ -40,7 +40,7 @@ title: data-diff implementation plan
 - [x] **Detect ordering changes.** Implement the deterministic LIS-based minimum
   moved set for identified columns and matched rows, excluding additions and
   drops. Test insertions, deletions, rotations, ties, and already ordered inputs.
-- [ ] **Compare cells.** Compare identified, non-key columns over matched rows;
+- [x] **Compare cells.** Compare identified, non-key columns over matched rows;
   retain every changed cell while avoiding per-cell changes for added/dropped
   rows or columns. Record an evidence-level column edit for every identified
   column with a source-type change or changed cell, including type-only key

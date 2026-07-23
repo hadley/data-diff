@@ -1,5 +1,6 @@
 //! Semantic diffs for tabular data.
 
+mod cells;
 mod compare;
 mod input;
 mod key;
@@ -31,5 +32,6 @@ pub fn diff_tables(
     let rows = rows::match_rows(&key);
     let schema = schema::reconcile_schema(old, new, &key)?;
     let _order = order::detect_order(&schema, &rows);
+    let _cells = cells::compare_cells(old, new, &schema, &rows);
     Err(DiffError::NotImplemented)
 }
