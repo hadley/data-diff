@@ -30,7 +30,7 @@ title: data-diff implementation plan
   missing values, `NaN`, and uniqueness after canonicalization. Cover simple and
   compound keys, including cross-type components. Any duplicate on either side
   fails in the MVP; distinguish a broken old key from unsupported new-side fanout.
-- [ ] **Match rows.** Hash compound keys, verify candidate matches, and classify
+- [x] **Match rows.** Hash compound keys, verify candidate matches, and classify
   rows as added, dropped, or one-to-one matched. Order matched pairs by their old
   row positions and test empty inputs, disjoint keys, and reordered rows.
 - [ ] **Reconcile the MVP schema.** Give same-name columns identities, classify

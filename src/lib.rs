@@ -4,6 +4,7 @@ mod compare;
 mod input;
 mod key;
 mod model;
+mod rows;
 
 use arrow_array::RecordBatch;
 
@@ -24,6 +25,7 @@ pub fn diff_tables(
     options: &DiffOptions,
 ) -> Result<Diff, DiffError> {
     validate_tables(old, new)?;
-    key::resolve_key(old, new, options)?;
+    let key = key::resolve_key(old, new, options)?;
+    let _rows = rows::match_rows(&key);
     Err(DiffError::NotImplemented)
 }
