@@ -439,6 +439,13 @@ observations count.
 **Response:**
 Suggest something. null always equals null for matching.
 
+**Resolution:**
+Require at least 20 aligned one-to-one row pairs before approximate rename
+inference. Every pair counts, including null/null as an agreement and
+null/present as a disagreement. With fewer rows, retain add/drop and report
+`approximate_rename_insufficient_rows`. Keep the minimum tunable and retain the
+existing agreement thresholds.
+
 ### 23. The expected-agreement calculation is underspecified
 
 The frequency domains must use the same normalized equality relation, raising

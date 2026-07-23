@@ -195,6 +195,8 @@ We first look for exact renames. We hash each remaining removed and added column
 
 Next we look for approximate renames among the remaining unmatched removed and added columns. We expect rename-and-modify to be relatively rare, so this is a small, bounded search. We impose fixed limits on both the number of candidate pairs and the number of matched rows examined. If there are too many candidate pairs, we skip approximate inference and ask the user to identify any renames. If there are too many matched rows, we take a deterministic sample based on the key so that repeated runs produce the same result.
 
+We require at least 20 aligned, one-to-one row pairs before attempting approximate inference. All aligned pairs count as observations, including missing values: null/null agrees, while null/present disagrees. If fewer than 20 pairs are available, we retain the columns as additions and removals and record an `approximate_rename_insufficient_rows` issue. The minimum is an implementation parameter that can be tuned with practical experience.
+
 For each compatible pair in the sample, let $p_o$ be the observed proportion of equal values. Raw agreement is less informative for low-cardinality columns, where unrelated columns may often agree by chance, so we also calculate the expected agreement from the two columns' value frequencies:
 
 $$
