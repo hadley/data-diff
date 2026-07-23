@@ -784,3 +784,9 @@ fields, and summary optimality. Added a bounded-result example showing that
 budget exhaustion returns a valid usable result and continues downstream;
 `optimal` describes optimization and `exhaustive` describes inference search,
 rather than calling the result incomplete.
+
+**Resolution 3:**
+Row and column ordering now compare resolved identities with additions, drops,
+and fanouts excluded as appropriate. An LCS/LIS produces the minimum moved set,
+with deterministic old-position tie-breaking and collapsed one-based output
+coordinates. The design includes insertion, deletion, and movement examples.
