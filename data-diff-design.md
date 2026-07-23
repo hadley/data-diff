@@ -371,7 +371,10 @@ For example, an experimental result might look like:
       }
     ]
   },
-  "key": [1],
+  "key": {
+    "basis": "declared",
+    "columns": [1]
+  },
   "rows": {
     "added": [4],
     "dropped": [2],
@@ -379,18 +382,43 @@ For example, an experimental result might look like:
     "fanout": []
   },
   "order": {
-    "columns": null,
-    "rows": null
+    "columns": [],
+    "rows": []
   },
   "cells": [
     [[3, 3], [2, 2]]
   ],
-  "summary": null,
+  "summary": {
+    "optimal": true,
+    "rows": [],
+    "columns": [[3, 2]]
+  },
   "issues": []
 }
 ```
 
 Here old column 3 and new column 2 have the same identity; because their schema names differ, this represents a rename from `value` to `amount`. Their values also changed, so the same identity occurs in `edited` with `values_changed: true`. The example is illustrative rather than a stable public contract: the representation can evolve as we use it for testing and experimentation.
+
+Reaching a computation budget does not suppress a usable result or stop downstream reconciliation. For example, a valid summary returned before exact optimization finishes might look like:
+
+```json
+{
+  "summary": {
+    "optimal": false,
+    "rows": [3],
+    "columns": []
+  },
+  "issues": [
+    {
+      "kind": "budget_exhausted",
+      "stage": "summary",
+      "budget": "elapsed_work"
+    }
+  ]
+}
+```
+
+The summary still covers every changed cell; `optimal: false` means only that a smaller cover might exist. Similarly, partial inference uses `exhaustive: false` to indicate unexamined candidates while retaining usable identities and continuing downstream.
 
 Coordinate-only output avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
 
@@ -400,7 +428,7 @@ Stable hashing uses XXH3-128 with seed 0, identified internally as `stable-hash-
 
 Hash equality is never sufficient for value equality. Hashes form candidate buckets, after which the comparison plan verifies values exactly, so collisions cannot change correctness. Deterministic samples select the smallest stable key hashes and break hash ties by original old-row position.
 
-Expensive stages accept explicit budgets and return the best valid result completed within them. A stage result records whether it is complete and, when incomplete, the exhausted budget and unresolved coordinates or candidates. Downstream stages continue using the partial result and inherit an `incomplete_input` marker when their interpretation may change after more upstream work. Unexamined candidates must never be treated as confirmed non-matches. Increasing a budget or adding a hint reruns the affected stage and its downstream consumers, so partial results may improve or change.
+Expensive stages accept explicit budgets and return the best valid result completed within them. An inference stage records whether its search was exhaustive and, when it was not, the exhausted budget and unresolved coordinates or candidates. An optimization stage such as summarization records whether its valid result is optimal. Downstream stages continue using partial results and inherit an `incomplete_input` marker when their interpretation may change after more upstream work. Unexamined candidates must never be treated as confirmed non-matches. Increasing a budget or adding a hint reruns the affected stage and its downstream consumers, so partial results may improve or change.
 
 ## MVP
 

@@ -777,3 +777,10 @@ sections:
 **Resolution 1:**
 Added an MVP comparison matrix covering compatible type pairs, parsing,
 missing values, hashing, and unsupported type families.
+
+**Resolution 2:**
+Updated the illustrative JSON with key basis, resolved order and summary
+fields, and summary optimality. Added a bounded-result example showing that
+budget exhaustion returns a valid usable result and continues downstream;
+`optimal` describes optimization and `exhaustive` describes inference search,
+rather than calling the result incomplete.
