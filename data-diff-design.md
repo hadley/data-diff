@@ -28,7 +28,7 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 |---|---|
 | `col_add([new1, new2, ...])` | Column added |
 | `col_drop([old1, old2, ...])` | Column removed |
-| `col_edit([old1, old2, ...])` | Values (or type) changed, preserving identity |
+| `col_edit([old1, old2, ...])` | Type, summarized values, or both changed, preserving identity |
 | `col_rename([old1, old2], [new1, new2])` | Column renamed, preserving identity |
 | `col_order()` | Minimum set of identified columns that must move to explain a change in relative order |
 | `row_add()` | Rows added |
@@ -253,6 +253,10 @@ The structured diff records each moved column using its collapsed old/new coordi
 
 Now that we have row keys and consistent column identities, we compare non-key cell values over the one-to-one matched rows. This produces a top-level set of changed cells, `[(row1, col1), (row2, col2), ...]`, scattered across rows and columns. We retain the complete one-to-one cell-level change set for display and later summarization. Changed cells from one-to-many comparisons remain nested inside their fanout events as described above.
 
+`col_edit()` is a semantic event for an identified column with a type change, summarized value changes, or both. Each event records independent `type_changed` and `values_changed` aspects. The original and normalized schemas and complete cell diff remain the evidence for those aspects rather than competing semantic operations. A type change whose normalized values all compare equal is displayed only in the schema section: it has `type_changed: true`, `values_changed: false`, no changed cells, and no value-difference display. A source type change must never manufacture changed cells.
+
+Type changes force their columns into the edit summary before minimum-cover optimization. If such a column does contain changed cells, those cells set `values_changed: true` and are already covered by the forced column event, so we remove them before summarizing the remaining graph. The complete cell set remains available for display.
+
 Key columns are excluded from the top-level changed-cell set because unequal key values identify different rows rather than an edited cell. However, an identified key column still produces a `col_edit()` event when its source type changes or its representation is otherwise transformed while canonical key values remain equal. For example, changing key values from string `"001"` to integer `1` is a column edit even though those values match for row identity. Key-column edits are derived directly from schema or representation differences and do not participate in the row/column minimum-cover graph. A key column may also be renamed; rename and edit are independent semantic facts. The initial implementation only needs to detect key-column edits from source-type changes.
 
 A valid `col_edit()` hint forces a column to be represented as a column event if it contains at least one changed cell. We first select the hinted columns and remove their incident cells from the change set. We then summarize the remaining cells normally. This preserves all observed changes while preventing a hinted column edit from being reinterpreted as a collection of row edits. A type-only edit has no incident changed cells to remove and is already represented by the schema comparison. We ignore and report a `col_edit()` hint for an absent column or one with neither value nor type changes.
@@ -323,7 +327,13 @@ For example, an experimental result might look like:
     "identities": [1, [3, 2]],
     "added": [3],
     "dropped": [2],
-    "edited": [[3, 2]]
+    "edited": [
+      {
+        "column": [3, 2],
+        "type_changed": false,
+        "values_changed": true
+      }
+    ]
   },
   "key": [1],
   "rows": {
@@ -344,7 +354,7 @@ For example, an experimental result might look like:
 }
 ```
 
-Here old column 3 and new column 2 have the same identity; because their schema names differ, this represents a rename from `value` to `amount`. Their values also changed, so the same coordinate pair occurs in `edited`. The example is illustrative rather than a stable public contract: the representation can evolve as we use it for testing and experimentation.
+Here old column 3 and new column 2 have the same identity; because their schema names differ, this represents a rename from `value` to `amount`. Their values also changed, so the same identity occurs in `edited` with `values_changed: true`. The example is illustrative rather than a stable public contract: the representation can evolve as we use it for testing and experimentation.
 
 Coordinate-only output avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
 

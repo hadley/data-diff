@@ -531,6 +531,14 @@ are independent layers.
 **Response:**
 What are the consequences of the two options?
 
+**Resolution:**
+`col_edit()` is one semantic column event with independent `type_changed` and
+`values_changed` aspects. A type-only change produces no changed cells and is
+displayed only in the schema section. Type changes force the column into the
+summary; any genuinely unequal incident cells set `values_changed` and are
+covered before optimizing the remaining graph. Schema and cell data remain
+the underlying evidence, not duplicate semantic operations.
+
 ### 28. Minimum vertex-cover tie-breaking is not an algorithm yet
 
 A standard maximum matching produces one minimum cover, not necessarily the
