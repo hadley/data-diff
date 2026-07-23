@@ -1,4 +1,4 @@
-# Review of `data-diff-design.md`
+# Review of `design.md`
 
 This review focuses on decisions that a potential implementor would otherwise
 have to make. Each note has a response field so that decisions can be recorded
