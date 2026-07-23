@@ -219,7 +219,60 @@ The structured diff should preserve information rather than prematurely reducing
 * the chosen row/column summary; and
 * ignored hints, unresolved ambiguities, and exhausted computation budgets.
 
-The JSON output only needs to identify operations and their coordinates; it does not need to include old or new cell values. Coordinates should refer to zero-based row and column positions in the original inputs. When an operation relates positions in both datasets, such as a changed cell or matched row, it should include both its `old` and `new` coordinates. This avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
+The JSON output only needs to identify operations and their coordinates; it does not need to include old or new cell values. Coordinates refer to one-based row and column positions in the original inputs. We use the same collapsing convention for every old/new relationship:
+
+* A one-sided coordinate is an integer.
+* An old/new position is a single integer when the positions are the same, and `[old, new]` otherwise.
+* A cell is `[row, column]` when both positions are the same, and `[[old_row, old_column], [new_row, new_column]]` otherwise.
+
+Additions and removals are stored separately, so they do not require a sentinel coordinate. Arrays are emitted in deterministic input/coordinate order. An empty array means that a stage ran and found no corresponding changes; `null` means that the stage was not run or did not produce a resolved result, with the reason recorded as an issue.
+
+The complete resolved mapping between old and new columns is stored as `identities`. A rename is derived when the names at the two ends of an identity differ, so it is not also stored as a separate operation. Additions and removals must be stored explicitly because they have no identity on the other side. Edits are also stored explicitly because identity alone does not imply that a column's type or values changed.
+
+For example, an experimental result might look like:
+
+```json
+{
+  "schemas": {
+    "old": [
+      {"name": "id", "source_type": "INT64", "normalized_type": "int64"},
+      {"name": "label", "source_type": "UTF8", "normalized_type": "string"},
+      {"name": "value", "source_type": "DOUBLE", "normalized_type": "double"}
+    ],
+    "new": [
+      {"name": "id", "source_type": "INT64", "normalized_type": "int64"},
+      {"name": "amount", "source_type": "DOUBLE", "normalized_type": "double"},
+      {"name": "note", "source_type": "UTF8", "normalized_type": "string"}
+    ]
+  },
+  "columns": {
+    "identities": [1, [3, 2]],
+    "added": [3],
+    "dropped": [2],
+    "edited": [[3, 2]]
+  },
+  "key": [1],
+  "rows": {
+    "added": [4],
+    "dropped": [2],
+    "matched": [1, [3, 2]],
+    "fanout": []
+  },
+  "order": {
+    "columns": null,
+    "rows": null
+  },
+  "cells": [
+    [[3, 3], [2, 2]]
+  ],
+  "summary": null,
+  "issues": []
+}
+```
+
+Here old column 3 and new column 2 have the same identity; because their schema names differ, this represents a rename from `value` to `amount`. Their values also changed, so the same coordinate pair occurs in `edited`. The example is illustrative rather than a stable public contract: the representation can evolve as we use it for testing and experimentation.
+
+Coordinate-only output avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
 
 Each comparison should use a comparison plan derived from the two column types. Hashing and equality within that plan must use the same canonicalization, so values that compare equal always have equal hashes. Key matching, rename inference, and cell comparison should all use this shared comparison layer. Operations should be deterministic: samples, ambiguous exact matches, and tie-breaks must depend only on the input data and its original ordering. Expensive stages should accept explicit budgets and return an unresolved result when a budget is exhausted, rather than silently falling back to a weaker heuristic.
 

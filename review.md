@@ -79,6 +79,15 @@ guesswork.
 - A changed cell should get a pair of tuples ((old_row, old_col), (new_row, new_col)), collapsing to (row, col) if new and old are the same
 - No need to version or add a schema, this is just a lightweight representation we'll use for testing/experimentation. Overall, the JSON schema doesn't matter too much as it's purely internal.
 
+**Resolution:**
+Added an illustrative, intentionally unstable JSON representation. All
+coordinates are one-based and use the same collapsing convention: an unchanged
+old/new position is one integer, while a moved position is `[old, new]`; cells
+likewise collapse from a pair of coordinates to `[row, column]`. The complete
+column mapping is stored as `identities`; renames are derived from identities
+whose schema names differ. Adds, drops, and edits remain explicit. Separate
+add/drop lists avoid needing a sentinel coordinate such as zero.
+
 ### 4. “All original schema differences” conflicts with later rename resolution
 
 Initially, a renamed column is observed as a drop plus an addition. Once
