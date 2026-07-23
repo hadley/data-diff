@@ -103,6 +103,13 @@ but no relationship between the two layers is defined.
 **Response:**
 Only the semantic rename.
 
+**Resolution:**
+Schema additions and removals are provisional until column identity is
+resolved. A resolved rename replaces its drop/add observations rather than
+being stored alongside them. The original and normalized schemas remain
+available, but the structured operations contain only resolved semantic schema
+differences.
+
 ### 5. Column-order change is not defined operationally
 
 `col_order()` means the “relative order of existing columns changed,” but

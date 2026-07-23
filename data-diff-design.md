@@ -69,7 +69,9 @@ With those preliminaries in place, we can outline the full reconciliation proces
 
 ## Schema normalization
 
-We first compare the two schemas, recording column additions, removals, reorderings, and type changes. We preserve these differences for display at the schema: normalization does not erase a type change just because values can be compared across it. But we also don't want to display changes in type, but not type, e.g. when integers in a double-typed column are converted to integers in an integer-typed column.
+We first compare the two schemas, recording column additions, removals, reorderings, and type changes. Schema additions and removals recorded at this stage are provisional. If later reconciliation establishes an identity between a removed and added column, the structured diff replaces those provisional operations with the semantic rename. It does not retain redundant drop/add operations. The original schemas remain available if a consumer needs to reconstruct the initial syntactic comparison.
+
+We preserve type differences for display: normalization does not erase a type change just because values can be compared across it. But we also don't want to display changes in type, but not type, e.g. when integers in a double-typed column are converted to integers in an integer-typed column.
 
 For value comparison, we normalize the source types to a smaller set of flexible types:
 
@@ -211,7 +213,7 @@ data-diff old.parquet new.parquet --keys id,date
 
 The structured diff should preserve information rather than prematurely reducing it. At a minimum, it needs to contain:
 
-* the normalized schemas and all original schema differences;
+* the original and normalized schemas, plus the resolved semantic schema differences;
 * the resolved column identities and row key;
 * added, removed, matched, and fanout rows;
 * row- and column-order changes;
