@@ -37,7 +37,7 @@ title: data-diff implementation plan
   unmatched columns as additions or drops, and independently record source-type
   changes. Reject an identified same-name pair when its types are incompatible.
   Do not infer renames.
-- [ ] **Detect ordering changes.** Implement the deterministic LIS-based minimum
+- [x] **Detect ordering changes.** Implement the deterministic LIS-based minimum
   moved set for identified columns and matched rows, excluding additions and
   drops. Test insertions, deletions, rotations, ties, and already ordered inputs.
 - [ ] **Compare cells.** Compare identified, non-key columns over matched rows;

@@ -4,6 +4,7 @@ mod compare;
 mod input;
 mod key;
 mod model;
+mod order;
 mod rows;
 mod schema;
 
@@ -27,7 +28,8 @@ pub fn diff_tables(
 ) -> Result<Diff, DiffError> {
     validate_tables(old, new)?;
     let key = key::resolve_key(old, new, options)?;
-    let _rows = rows::match_rows(&key);
-    schema::reconcile_schema(old, new, &key)?;
+    let rows = rows::match_rows(&key);
+    let schema = schema::reconcile_schema(old, new, &key)?;
+    let _order = order::detect_order(&schema, &rows);
     Err(DiffError::NotImplemented)
 }
