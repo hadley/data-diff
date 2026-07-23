@@ -2,6 +2,7 @@
 
 mod compare;
 mod input;
+mod key;
 mod model;
 
 use arrow_array::RecordBatch;
@@ -20,8 +21,9 @@ pub use model::{
 pub fn diff_tables(
     old: &RecordBatch,
     new: &RecordBatch,
-    _options: &DiffOptions,
+    options: &DiffOptions,
 ) -> Result<Diff, DiffError> {
     validate_tables(old, new)?;
+    key::resolve_key(old, new, options)?;
     Err(DiffError::NotImplemented)
 }

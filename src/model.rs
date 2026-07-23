@@ -32,6 +32,32 @@ pub enum DiffError {
         source_type: String,
         row: usize,
     },
+    /// The CLI/library call omitted its required declared key.
+    MissingKey,
+    /// A comma-separated key contained an empty component.
+    EmptyKeyComponent,
+    /// Paired old/new key names are deferred until hint support.
+    PairedKeyUnsupported { component: String },
+    /// A compound key repeated a component.
+    DuplicateKeyComponent { component: String },
+    /// A key component was absent on one side.
+    MissingKeyColumn { side: Side, component: String },
+    /// A corresponding key-column pair cannot be compared.
+    IncompatibleKeyTypes {
+        component: String,
+        old_type: String,
+        new_type: String,
+    },
+    /// A key contains null or `NaN`.
+    InvalidKeyValue {
+        side: Side,
+        component: String,
+        row: usize,
+    },
+    /// The declared key is not unique in the old input.
+    NonUniqueOldKey { first_row: usize, row: usize },
+    /// New-side duplication requires fanout, which the MVP defers.
+    UnsupportedFanout { first_row: usize, row: usize },
     /// Reconciliation has not been implemented yet.
     NotImplemented,
 }
@@ -68,6 +94,41 @@ impl std::fmt::Display for DiffError {
             } => write!(
                 f,
                 "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
+            ),
+            DiffError::MissingKey => f.write_str("a declared key is required"),
+            DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
+            DiffError::PairedKeyUnsupported { component } => {
+                write!(f, "paired key component {component:?} is not supported yet")
+            }
+            DiffError::DuplicateKeyComponent { component } => {
+                write!(f, "key component {component:?} is repeated")
+            }
+            DiffError::MissingKeyColumn { side, component } => {
+                write!(f, "{side} is missing key column {component:?}")
+            }
+            DiffError::IncompatibleKeyTypes {
+                component,
+                old_type,
+                new_type,
+            } => write!(
+                f,
+                "key column {component:?} has incompatible types {old_type} and {new_type}"
+            ),
+            DiffError::InvalidKeyValue {
+                side,
+                component,
+                row,
+            } => write!(
+                f,
+                "{side} key column {component:?} has null or NaN at row {row}"
+            ),
+            DiffError::NonUniqueOldKey { first_row, row } => write!(
+                f,
+                "old key is non-unique at rows {first_row} and {row} (non_unique_old)"
+            ),
+            DiffError::UnsupportedFanout { first_row, row } => write!(
+                f,
+                "new key repeats at rows {first_row} and {row}; fanout is not supported yet"
             ),
             DiffError::NotImplemented => f.write_str("reconciliation is not implemented yet"),
         }

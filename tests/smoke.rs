@@ -6,13 +6,13 @@ use arrow_array::Int64Array;
 use data_diff::{DiffError, DiffOptions, diff_tables};
 
 #[test]
-fn library_boundary_is_callable() {
+fn library_boundary_requires_a_key() {
     let old = common::empty_batch();
     let new = common::empty_batch();
 
     assert_eq!(
         diff_tables(&old, &new, &DiffOptions::default()),
-        Err(DiffError::NotImplemented)
+        Err(DiffError::MissingKey)
     );
 }
 

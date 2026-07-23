@@ -25,7 +25,7 @@ title: data-diff implementation plan
   with table-driven tests that equal values always hash equally, hash matches are
   verified by equality, and null, `NaN`, signed zero, parsing, and exact
   integer/double comparisons follow `design.md`.
-- [ ] **Parse and validate declared keys.** Require `--key`, initially accepting
+- [x] **Parse and validate declared keys.** Require `--key`, initially accepting
   only comma-separated, same-name components. Check presence, compatible types,
   missing values, `NaN`, and uniqueness after canonicalization. Cover simple and
   compound keys, including cross-type components. Any duplicate on either side

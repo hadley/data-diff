@@ -46,6 +46,13 @@ pub(crate) enum CanonicalValue {
     UnparsedString(Vec<u8>),
 }
 
+impl CanonicalValue {
+    pub(crate) fn invalid_key(&self) -> bool {
+        matches!(self, Self::Null)
+            || matches!(self, Self::Double(bits) if f64::from_bits(*bits).is_nan())
+    }
+}
+
 impl ComparisonPlan {
     pub(crate) fn new(old: &DataType, new: &DataType) -> Option<Self> {
         let old = kind(old)?;
