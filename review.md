@@ -231,6 +231,12 @@ conversions should be defined separately.
 **Response:**
 Move this to future work
 
+**Resolution:**
+Removed the combined `date-time` normalized type from the initial design. The
+MVP rejects all temporal and interval columns. Future support will separately
+model calendar dates, local times, timestamps without time zones, instants,
+durations, and calendar intervals; only instants are converted to UTC.
+
 ### 11. The “standard parser” does not exist without further choices
 
 String conversion needs exact accepted grammars for booleans, integers, floats,

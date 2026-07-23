@@ -82,7 +82,6 @@ For value comparison, we normalize the source types to a smaller set of flexible
 | `int64` | Integers that fit in a signed 64-bit integer |
 | `double` | Floating-point numbers and other real numbers that can be represented as doubles |
 | `string` | Strings, factors, categoricals, dictionaries, and enums, using their logical values rather than their underlying codes |
-| `date-time` | Dates, times, and date-times |
 
 Missing values compare equal to missing values, including when the columns have different but compatible types. A missing value does not equal any present value. Floating-point `NaN` is distinct from a missing value: all `NaN` values compare equal to one another, but do not compare equal to null.
 
@@ -94,13 +93,12 @@ Columns with the same normalized type are compared as follows:
 * `int64` values are compared exactly.
 * `double` values are compared exactly, and positive and negative zero compare equal.
 * `string` values are compared byte-for-byte. We do not silently trim, fold case, or apply Unicode normalization.
-* `date-time` values are converted to a common resolution. Date-times that represent instants are converted to UTC; changes to source units and time zones remain visible as schema differences.
 
 Integers and floating-point numbers are compatible. A floating-point value compares equal to an integer only when it represents exactly the same mathematical value. This avoids introducing matches through rounding.
 
 `string` is compatible with every other normalized type. When comparing a string column with a numeric column, we parse the strings into the numeric comparison domain. Integer-like strings may contain a fractional part or exponent provided their exact mathematical value is integral: for example, `"1"`, `"1.0"`, and `"1e0"` compare equal to integer `1`, while `"1.5"` does not. Parsing must not truncate fractional values or pass exact integers through floating point. Numeric canonicalization removes insignificant decimal zeros, so `1`, `1.0`, and `1.00` have the same canonical representation.
 
-For other normalized types, we parse strings using the standard parser for the other column's type and compare the parsed values. A value that cannot be parsed is a mismatch. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only four possible non-string target types, so this adds only linear work per string column.
+For other normalized types, we parse strings using the standard parser for the other column's type and compare the parsed values. A value that cannot be parsed is a mismatch. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only three possible non-string target types, so this adds only linear work per string column.
 
 This rule allows a column to retain its identity through a transformation such as parsing a character date or number. We still report the string-to-typed transition as a type change.
 
@@ -344,6 +342,19 @@ Each step should be introduced with small fixtures that isolate the new behaviou
 ## Decimal values
 
 The MVP rejects all decimal columns. A future extension should support exact decimal-to-decimal, decimal-to-integer, and decimal-to-double comparison without passing through a rounded floating-point representation. It should define the supported precision and scale ranges, canonical representation, overflow behavior, and parsing of decimal strings as one coherent feature rather than introducing partial decimal support in the MVP.
+
+## Temporal values
+
+The MVP rejects dates, times, timestamps, durations, and intervals. Future temporal support must distinguish values with different semantics rather than placing them in one `date-time` type:
+
+* calendar dates;
+* local times of day;
+* timestamps without a time zone;
+* timestamps that represent instants;
+* durations; and
+* calendar intervals.
+
+Compatibility and conversion rules should be defined separately for each category. Only timestamps that represent instants should be converted to UTC. Changes in source units and time-zone metadata should remain visible as schema differences even when normalized values compare equal.
 
 ## Compound key guessing with HyUCC
 
