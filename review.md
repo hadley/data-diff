@@ -51,6 +51,13 @@ ordinary cells or rename inference:
 - no longer relevant
 - include them
 
+**Resolution:**
+Null equals null across compatible types and does not equal a present value.
+All `NaN` values equal one another, but remain distinct from null. Both null
+and `NaN` invalidate keys. Outside key validation they participate in
+comparison, hashing, agreement, and frequency calculations as distinct value
+categories.
+
 ### 3. The JSON contract is not concrete enough to implement
 
 Lines 206–216 list required information, but leave the actual data model open:

@@ -83,11 +83,15 @@ For value comparison, we normalize the source types to a smaller set of flexible
 
 Fixed-precision values are represented by an `int64` coefficient and a scale. When comparing two such columns, we rescale them to a common scale if we can do so without overflow. This allows values such as `1.0` and `1.00` to compare equal without passing through floating point.
 
+Missing values compare equal to missing values, including when the columns have different but compatible types. A missing value does not equal any present value. Floating-point `NaN` is distinct from a missing value: all `NaN` values compare equal to one another, but do not compare equal to null.
+
+Both null and floating-point `NaN` are considered missing for key validation and therefore invalidate a declared or guessed key. Outside key validation, null and `NaN` participate in value comparisons, hashing, agreement proportions, and value-frequency calculations as two distinct value categories.
+
 Columns with the same normalized type are compared as follows:
 
 * `boolean` values are compared exactly.
 * `int64` values are compared exactly after resolving any fixed-precision scale.
-* `double` values are compared exactly. All `NaN` values compare equal, and positive and negative zero compare equal.
+* `double` values are compared exactly, and positive and negative zero compare equal.
 * `string` values are compared byte-for-byte. We do not silently trim, fold case, or apply Unicode normalization.
 * `date-time` values are converted to a common resolution. Date-times that represent instants are converted to UTC; changes to source units and time zones remain visible as schema differences.
 
