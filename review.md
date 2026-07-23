@@ -555,6 +555,12 @@ These give different answers. Define the optimization tuple explicitly.
 **Response:**
 Again, I don't understand the consequneces.
 
+**Resolution:**
+No semantic tie preference is needed. Any exact minimum cover is acceptable.
+The implementation still uses stable traversal and iteration so repeated runs
+choose the same cover, but tests generally assert minimum size and complete
+edge coverage rather than a particular answer in tied cases.
+
 ### 29. Hints appear allowed to violate minimum summary size
 
 Forced `col_edit()` events are selected before solving the remaining graph.

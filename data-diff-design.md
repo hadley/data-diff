@@ -267,7 +267,7 @@ We model this as a bipartite graph with one vertex per affected row, one vertex 
 
 This objective depends only on the number of events, not on the proportion of values changed within each row or column. For example, if three changed cells all belong to one column, we report one `col_edit()` rather than three `row_edit()` events, even if most values in that column are unchanged.
 
-There can be multiple covers with the same number of events. We resolve these deterministically, preferring columns over rows, then original column order or aligned row order. These preferences are only tie-breakers and must never increase the number of events.
+There can be multiple minimum vertex covers. Any minimum cover is acceptable; the only semantic requirement is that it contains the fewest possible events. The implementation should use stable traversal and iteration order so that repeated runs on the same input produce the same cover, but no particular minimum cover is preferred over another. Tests should generally assert minimum size and complete edge coverage rather than a particular tied cover, except when testing the chosen implementation's determinism.
 
 Maximum matching is superlinear in the worst case, so we apply it only within fixed budgets for vertices, edges, and elapsed work. If the changed-cell graph exceeds any budget, we retain the complete cell-level diff but do not guess a row/column summary. Instead, we ask the user whether to summarize primarily by rows or by columns. The concrete budgets are implementation parameters that should be chosen through benchmarking.
 
