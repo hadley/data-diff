@@ -91,9 +91,11 @@ Columns with the same normalized type are compared as follows:
 * `string` values are compared byte-for-byte. We do not silently trim, fold case, or apply Unicode normalization.
 * `date-time` values are converted to a common resolution. Date-times that represent instants are converted to UTC; changes to source units and time zones remain visible as schema differences.
 
-`int64` and `double` are compatible. We promote an `int64` value to `double` only if it can be represented exactly; otherwise, the values do not compare equal. This avoids introducing matches through rounding. 
+Numeric comparisons use an exact comparison domain. Integers and fixed-precision decimals are represented by an integer coefficient and a decimal scale. A floating-point value compares equal to an integer or decimal only when it represents exactly the same mathematical value. This avoids introducing matches through rounding.
 
-`string` is compatible with every other normalized type. When comparing a string column with a non-string column, we parse the strings using the standard parser for the other column's normalized type and compare the parsed values. A value that cannot be parsed is a mismatch. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only four possible target types, so this adds only linear work per string column.
+`string` is compatible with every other normalized type. When comparing a string column with a numeric column, we parse the strings into the numeric comparison domain. Integer-like strings may contain a fractional part or exponent provided their exact mathematical value is integral: for example, `"1"`, `"1.0"`, and `"1e0"` compare equal to integer `1`, while `"1.5"` does not. Parsing must not truncate fractional values or pass exact integers through floating point. Numeric canonicalization removes insignificant decimal zeros, so `1`, `1.0`, and `1.00` have the same canonical representation.
+
+For other normalized types, we parse strings using the standard parser for the other column's type and compare the parsed values. A value that cannot be parsed is a mismatch. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only four possible non-string target types, so this adds only linear work per string column.
 
 This rule allows a column to retain its identity through a transformation such as parsing a character date or number. We still report the string-to-typed transition as a type change.
 
@@ -215,7 +217,7 @@ The structured diff should preserve information rather than prematurely reducing
 
 The JSON output only needs to identify operations and their coordinates; it does not need to include old or new cell values. Coordinates should refer to zero-based row and column positions in the original inputs. When an operation relates positions in both datasets, such as a changed cell or matched row, it should include both its `old` and `new` coordinates. This avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
 
-Hashes and normalized values should be computed by a shared comparison layer so that key matching, rename inference, and cell comparison all use exactly the same equality semantics. Operations should be deterministic: samples, ambiguous exact matches, and tie-breaks must depend only on the input data and its original ordering. Expensive stages should accept explicit budgets and return an unresolved result when a budget is exhausted, rather than silently falling back to a weaker heuristic.
+Each comparison should use a comparison plan derived from the two column types. Hashing and equality within that plan must use the same canonicalization, so values that compare equal always have equal hashes. Key matching, rename inference, and cell comparison should all use this shared comparison layer. Operations should be deterministic: samples, ambiguous exact matches, and tie-breaks must depend only on the input data and its original ordering. Expensive stages should accept explicit budgets and return an unresolved result when a budget is exhausted, rather than silently falling back to a weaker heuristic.
 
 ## MVP
 
