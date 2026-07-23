@@ -20,7 +20,7 @@ title: data-diff implementation plan
   one `RecordBatch` per side, eagerly validate that unsigned values fit in
   `int64`, and retain source and normalized schemas. Test each supported physical
   representation and each validation error without involving reconciliation.
-- [ ] **Build the shared comparison layer.** Implement comparison plans,
+- [x] **Build the shared comparison layer.** Implement comparison plans,
   canonical values, equality, and stable hashing for the MVP type matrix. Establish
   with table-driven tests that equal values always hash equally, hash matches are
   verified by equality, and null, `NaN`, signed zero, parsing, and exact

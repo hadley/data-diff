@@ -392,6 +392,7 @@ name = "data-diff"
 version = "0.0.1"
 dependencies = [
  "arrow-array",
+ "arrow-cast",
  "arrow-schema",
  "arrow-select",
  "clap",

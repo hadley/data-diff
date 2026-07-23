@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 arrow-array = "54"
+arrow-cast = "54"
 arrow-schema = "54"
 arrow-select = "54"
 clap = { version = "4", features = ["derive"] }

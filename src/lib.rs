@@ -1,5 +1,6 @@
 //! Semantic diffs for tabular data.
 
+mod compare;
 mod input;
 mod model;
 
