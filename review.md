@@ -651,6 +651,13 @@ its behavior for empty tables.
 **Response:**
 Good idea
 
+**Resolution:**
+Defined normalized overlap in ordinary key guessing as
+`m / min(n_old, n_new)`, where `m` is the number of shared key values. It is
+reported but does not alter candidate ranking. If either table is empty,
+overlap is `null` and no guessed key is eligible. The HyUCC extension now
+refers to this definition.
+
 ### 35. Empty-table behavior needs explicit cases
 
 Questions include:

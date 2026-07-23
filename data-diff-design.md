@@ -164,6 +164,14 @@ A string that cannot be parsed under its comparison plan remains a distinct, tag
 
 2. **Guessed key** — If no declared key was provided or survives validation, we search for one. For each compatible column with the same identity on both sides, we compute uniqueness and the overlap between its sets of non-missing values. A candidate must contain no missing values, be unique in both `old` and `new`, and have at least one value in common. We do not infer fanout from a guessed key. We select the candidate with the largest number of shared values, breaking ties by column order because we assume key columns are more likely to occur early in the data.
 
+   For each candidate, let $m$ be the number of shared key values and report normalized overlap as
+
+   $$
+   r = \frac{m}{\min(n_o, n_n)},
+   $$
+
+   where $n_o$ and $n_n$ are the row counts of `old` and `new`. The denominator is constant across candidates, so $r$ summarizes the match but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible because candidates require at least one shared value.
+
 3. **Row number** — If we can't find a candidate key, we use row number. This means we can't distinguish a `row_edit()` from `row_drop()` + `row_add()`, and we display a reordering as many edits. But it allows the rest of the process to continue, and will generate an initial display that the user can refine.
 
 If we reach step 2 or 3, we expose the selected matching basis in the UI so that the user can override it. An override reruns the remainder of the reconciliation process.
@@ -439,13 +447,7 @@ The initial key search considers only individual columns, but many datasets requ
 
 We would need to adapt HyUCC to our two-table setting. A candidate combination must contain no missing values and be unique in both `old` and `new`; satisfying either table alone is not sufficient. For every eligible combination, we would form its key tuples and let $m$ be the number shared by the two tables. We would select the candidate with the largest $m$, breaking ties first in favour of fewer columns and then by column order.
 
-As with single-column keys, we would report normalized overlap as
-
-$$
-r = \frac{m}{\min(n_o, n_n)},
-$$
-
-where $n_o$ and $n_n$ are the row counts of `old` and `new`. Because the denominator is constant across candidates, $r$ summarizes the match but does not affect candidate selection. The inferred compound key and its overlap must be visible and overrideable by the user, and we should not infer fanout from it.
+As with single-column keys, we would report the normalized overlap $r$ defined in key guessing. The inferred compound key and its overlap must be visible and overrideable by the user, and we should not infer fanout from it.
 
 Unique-column-combination discovery has an exponential worst-case search space, particularly for wide tables. Any HyUCC-based search must therefore have explicit limits on candidate width, number of candidates, memory, and elapsed work. If it exhausts a budget, it should report that the search was incomplete rather than imply that no compound key exists.
 
