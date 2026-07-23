@@ -20,6 +20,10 @@ does the behavior-table row cover both sides, and does the error distinguish
 the key is broken?
 
 **Response:**
+Agreed. The MVP rejects duplicates on either side. Old-side duplication is
+reported as `non_unique_old`; new-only duplication is reported as unsupported
+fanout so it does not imply that the declared key is inherently invalid. The
+checklist and behavior table now state both outcomes.
 
 ### 2. `columns.edited` has no defined rule without summarization
 
@@ -37,6 +41,10 @@ replaces or augments it with the minimum-cover summary. Otherwise the example
 is wrong.
 
 **Response:**
+Agreed. For the MVP, `columns.edited` is an evidence-level rollup containing
+each identified column with a source-type change or at least one changed cell.
+The later minimum-cover feature adds a separate `summary` and does not replace
+this evidence. The plan now defines that distinction.
 
 ### 3. There is no `rows.edited`, and the asymmetry is unexplained
 
@@ -48,6 +56,9 @@ summarization — but an implementor reading the plan alone will wonder whether
 step 1.
 
 **Response:**
+Agreed. `rows.edited` is intentionally absent from the MVP because rows have no
+schema-level edit evidence; row edit events first appear in the post-MVP
+row/column summary. This is now explicit in the result section and checklist.
 
 ### 4. Same-name columns with incompatible types have no defined outcome
 
@@ -62,6 +73,11 @@ applies to a supported type paired with itself under the "source types outside
 these categories" rule once type support expands.
 
 **Response:**
+The MVP will fail the comparison when a same-name identified pair has
+incompatible types, reporting both columns and source types. Treating all cells
+as different would invent comparisons outside the matrix, while drop/add would
+discard the name-based identity rule. The checklist and behavior table now
+record this decision.
 
 ### 5. Column coordinates in `edited` and `key` are only shown for the trivial case
 
@@ -73,6 +89,10 @@ otherwise — but the plan never says so, and the example cannot show it. Confir
 the rule and add a coordinate-shape unit test for the disagreeing case.
 
 **Response:**
+Confirmed. `columns.identities`, `columns.edited`, and `key.columns` all use the
+same collapsed old/new column coordinate. The result section now says so, adds
+the disagreeing-position test requirement, and includes a non-trivial coordinate
+example.
 
 ### 6. `rows.matched` collapsed pairs versus `order.rows` needs one sentence
 
@@ -86,6 +106,9 @@ bare integers in both. Spell out the relationship and the emission order of
 `matched` (old-position order, presumably).
 
 **Response:**
+Agreed. `rows.matched` is the complete position mapping in old-row order;
+`order.rows` is only the LCS-minimal relative-move subset. The plan now states
+the distinction and gives an example with pair-form row coordinates.
 
 ### 7. The library's table type is undefined
 
@@ -97,6 +120,11 @@ mapping, and every test builder. Deciding this before the scaffold item avoids
 reworking the test vocabulary.
 
 **Response:**
+The library boundary will use one Arrow `RecordBatch` per side. The Parquet
+loader concatenates batches from all row groups in file order, including a
+schema-preserving empty batch, so row coordinates address one logical table.
+The scaffold, architecture, and test-helper descriptions now use this concrete
+type.
 
 ## Post-MVP sequencing notes
 
@@ -110,6 +138,9 @@ sentence so step 6's tests aren't written against machinery that doesn't exist
 yet.
 
 **Response:**
+Correct. Approximate inference initially examines all matched rows; the full
+matched set is its effective sample. Deterministic bounded sampling is introduced
+only with computation budgets in step 7. The roadmap now states this.
 
 ### 9. Step 1 summarization without budgets needs a stance on `optimal`
 
@@ -121,6 +152,10 @@ field from the start. The former is simpler and consistent with "do not add
 placeholder fields for post-MVP stages."
 
 **Response:**
+Step 1 will compute an exact cover only and emit a separate summary with
+`optimal: true`. Step 7 adds bounded fallback and permits `optimal: false`.
+This keeps the first implementation simple while preserving the eventual result
+shape.
 
 ## Smaller mistakes and inconsistencies
 
@@ -135,6 +170,9 @@ cross-type key components, this case is reachable on day one; add it to the
 checklist item and the behavior table.
 
 **Response:**
+Agreed. The cell-comparison checklist item now includes source-type edits on key
+columns, and the behavior table requires a type-only column edit with no key
+cells when canonical key values agree.
 
 ### 11. Out-of-range integer detection needs a stated timing
 
@@ -145,6 +183,9 @@ say so, and decide whether the error includes the offending row position or
 only side, column, and source type as the behavior table currently states.
 
 **Response:**
+Validation is eager during loading. The loader scans supported unsigned columns
+and reports the side, column, source type, and first one-based offending row.
+The checklist and behavior table now specify this timing and context.
 
 ### 12. Dictionary columns with non-string values are unaddressed
 
@@ -155,6 +196,9 @@ clearly rejected. Make rejection (or logical-type normalization) explicit in
 the loader item so the unsupported-type test list is complete.
 
 **Response:**
+Only dictionaries whose logical value type is UTF-8 string are supported.
+Numeric and other dictionary value types are rejected as unsupported. The MVP
+type description now makes this explicit.
 
 ### 13. The scaffold item depends on the result model that follows it
 
@@ -164,6 +208,9 @@ real assertions arrive with item 2; a parenthetical would prevent an
 implementor from designing assertion helpers twice.
 
 **Response:**
+Agreed. The scaffold uses only a placeholder result assertion to prove the test
+path; the complete structured assertion helpers arrive with checklist item 2,
+after the result model exists. Item 1 now says this directly.
 
 ## Suggested plan additions
 
@@ -177,3 +224,8 @@ Two small additions would remove most of the remaining guesswork:
    key-column type-only edits, and same-name columns with incompatible types.
 
 **Response:**
+Both additions have been made. The result section now includes a compact fragment
+showing moved row/column identities, pair-form key and edited coordinates, the
+minimal order subsets, and a fully paired cell coordinate. The behavior table
+now covers new-side duplicates, key-column type edits, incompatible same-name
+columns, and the more precise unsigned-range error.

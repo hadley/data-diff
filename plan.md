@@ -5,18 +5,21 @@ title: data-diff implementation plan
 # MVP todo
 
 - [ ] **Scaffold the library, CLI, and test harness.** Create one Rust package with
-  a library that accepts two typed tables plus options and a thin `data-diff`
-  binary that reads Parquet files. Add concise builders for in-memory test tables,
-  structured diff assertions, and temporary Parquet fixtures. The initial
-  `cargo test` should exercise one library call and one CLI invocation.
+  a library that accepts two Arrow `RecordBatch` values plus options and a thin
+  `data-diff` binary that reads Parquet files. Add concise builders for in-memory
+  test tables, a placeholder result assertion, and temporary Parquet fixtures.
+  The initial `cargo test` should exercise one library call and one CLI
+  invocation; complete structured diff assertion helpers arrive with the result
+  model. Start from the shared dependency baseline described below.
 - [ ] **Define the result model.** Add types for schemas, column identities, keys,
   row matches, ordering changes, changed cells, and errors. Implement one-based
   collapsed coordinates and deterministic JSON serialization, with focused unit
   tests for every coordinate shape.
 - [ ] **Load and validate inputs.** Read both Parquet files into memory, reject
-  duplicate top-level names and unsupported types, and retain source and
-  normalized schemas. Test each supported physical representation and each
-  validation error without involving reconciliation.
+  duplicate top-level names and unsupported types, concatenate row groups into
+  one `RecordBatch` per side, eagerly validate that unsigned values fit in
+  `int64`, and retain source and normalized schemas. Test each supported physical
+  representation and each validation error without involving reconciliation.
 - [ ] **Build the shared comparison layer.** Implement comparison plans,
   canonical values, equality, and stable hashing for the MVP type matrix. Establish
   with table-driven tests that equal values always hash equally, hash matches are
@@ -25,19 +28,23 @@ title: data-diff implementation plan
 - [ ] **Parse and validate declared keys.** Require `--key`, initially accepting
   only comma-separated, same-name components. Check presence, compatible types,
   missing values, `NaN`, and uniqueness after canonicalization. Cover simple and
-  compound keys, including cross-type components.
+  compound keys, including cross-type components. Any duplicate on either side
+  fails in the MVP; distinguish a broken old key from unsupported new-side fanout.
 - [ ] **Match rows.** Hash compound keys, verify candidate matches, and classify
   rows as added, dropped, or one-to-one matched. Order matched pairs by their old
   row positions and test empty inputs, disjoint keys, and reordered rows.
 - [ ] **Reconcile the MVP schema.** Give same-name columns identities, classify
   unmatched columns as additions or drops, and independently record source-type
-  changes. Do not infer renames.
+  changes. Reject an identified same-name pair when its types are incompatible.
+  Do not infer renames.
 - [ ] **Detect ordering changes.** Implement the deterministic LIS-based minimum
   moved set for identified columns and matched rows, excluding additions and
   drops. Test insertions, deletions, rotations, ties, and already ordered inputs.
 - [ ] **Compare cells.** Compare identified, non-key columns over matched rows;
   retain every changed cell while avoiding per-cell changes for added/dropped
-  rows or columns. Record type-only and value column edits independently.
+  rows or columns. Record an evidence-level column edit for every identified
+  column with a source-type change or changed cell, including type-only key
+  columns; row edits wait for post-MVP summarization.
 - [ ] **Complete the JSON and CLI path.** Emit deterministic, pretty JSON for a
   successful comparison and concise contextual errors for failures. Add small
   end-to-end fixtures covering unchanged data, combined schema/row/value changes,
@@ -70,10 +77,14 @@ behavior clearly are more important than large-data performance.
 Use a single Rust package with two entry points:
 
 * The library owns all input-independent reconciliation types and algorithms.
-  Its top-level function accepts two in-memory typed tables and structured
-  options, and returns either a structured diff or a typed error.
+  Its top-level function accepts two in-memory Arrow `RecordBatch` values and
+  structured options, and returns either a structured diff or a typed error.
 * The binary parses arguments, loads the two Parquet files, calls the library,
   and writes JSON. It should contain no reconciliation logic.
+
+The loader reads every row group and concatenates its batches in file order into
+one `RecordBatch` per input, preserving the schema even when there are no rows.
+All row coordinates therefore index this single logical batch.
 
 Keep stages separate enough to test directly: input validation, normalization,
 comparison planning, key validation, row matching, schema reconciliation,
@@ -83,6 +94,38 @@ stage invariants so later stages do not repeatedly validate earlier assumptions.
 The MVP may load both datasets fully into memory. It does not need sampling,
 streaming, caching across runs, elapsed-time limits, or partial results.
 
+# Dependency alignment
+
+Reuse the established choices in
+`~/Documents/data-dict/data-dict/Cargo.toml` where they fit:
+
+* Rust edition 2024.
+* `clap` 4 with `derive` for the CLI.
+* `parquet` 54 with default features disabled and the same `snap`, `flate2`,
+  `lz4`, `zstd`, and `brotli` codec features. Also enable its `arrow` feature,
+  which `data-diff` needs to load `RecordBatch` values.
+* `serde` 1 with `derive` and `serde_json` 1 for the result model and output.
+* `insta` 1 and `indoc` 2 as development dependencies for compact boundary
+  snapshots and readable inline fixtures.
+
+Use Arrow crates from the same 54 release family as `parquet`: `arrow-array`
+and `arrow-schema` for the table boundary, plus `arrow-select` for concatenating
+batches. Keep these versions aligned rather than allowing two Arrow release
+families into the dependency graph.
+
+Follow `data-dict`'s test style where appropriate: invoke the binary with
+`env!("CARGO_BIN_EXE_data-diff")`, normalize JSON through `serde_json::Value`
+before snapshotting it, sanitize variable paths, and keep fixture construction
+next to the behavior it exercises. Continue to use typed assertions for
+algorithm unit tests; snapshots are reserved for compact CLI and serialization
+boundaries.
+
+XXH3 is a `data-diff`-specific requirement, so add the smallest crate that
+provides seeded XXH3-128. Do not adopt `rayon`, `hashbrown`, `criterion`, or
+other `data-dict` dependencies until the corresponding parallelism, performance,
+or benchmarking need appears. When either project upgrades a shared dependency,
+keep their compatible version and feature choices aligned where practical.
+
 # Test infrastructure
 
 Establish the test vocabulary before implementing reconciliation. A test should
@@ -91,8 +134,8 @@ or snapshot.
 
 Provide these helpers:
 
-* A compact builder for named Arrow columns and record batches, including nulls,
-  dictionary strings, and explicit source types.
+* A compact builder for named Arrow columns and a single `RecordBatch`, including
+  nulls, dictionary strings, and explicit source types.
 * A `diff_tables()` helper that runs the library directly, avoiding Parquet and
   the CLI in algorithm tests.
 * Constructors for expected row, column, and cell coordinates, so coordinate
@@ -182,11 +225,26 @@ The internal result should preserve evidence rather than prematurely reduce it:
 * row and column ordering changes; and
 * the complete set of changed cells.
 
+For the MVP, `columns.edited` is an evidence-level rollup, not the minimum edit
+summary: include every identified column with a source-type change or at least
+one changed cell, coalescing both facts into one entry. There is no
+`rows.edited` field yet because row edits arise only from choosing a row/column
+summary. Post-MVP summarization adds a separate `summary`; it does not replace
+the evidence-level column entries.
+
 Coordinates are one-based positions in the original inputs. Use the collapsing
 rules from `design.md`: an unchanged old/new position is one integer; a moved
 position is `[old, new]`; and a changed cell is `[row, column]` when both
 coordinates agree or `[[old_row, old_column], [new_row, new_column]]` otherwise.
-Additions and drops are separate arrays and need no sentinel coordinate.
+The same collapsed column coordinate is used in `columns.identities`,
+`columns.edited`, and `key.columns`. Additions and drops are separate arrays and
+need no sentinel coordinate.
+
+`rows.matched` is the complete old-to-new position mapping, emitted in old-row
+order. By contrast, `order.rows` contains only the LCS-minimal subset whose
+relative order changed. Inserting a row can therefore change many mapped
+positions while leaving `order.rows` empty. The corresponding distinction
+applies to column identities and `order.columns`.
 
 Emit arrays deterministically in input/coordinate order. Use an empty array when
 an MVP stage ran and found no changes. Do not add placeholder `null` fields for
@@ -233,13 +291,38 @@ For example, a same-name MVP comparison might produce:
 }
 ```
 
+For a non-trivial coordinate example, suppose the two identified columns and
+two matched rows both exchange positions, and the value cell changes:
+
+```json
+{
+  "columns": {
+    "identities": [[1, 2], [2, 1]],
+    "edited": [
+      {"column": [2, 1], "type_changed": false, "values_changed": true}
+    ]
+  },
+  "key": {"basis": "declared", "columns": [[1, 2]]},
+  "rows": {"matched": [[1, 2], [2, 1]]},
+  "order": {"columns": [[2, 1]], "rows": [[2, 1]]},
+  "cells": [[[1, 2], [2, 1]]]
+}
+```
+
+This fragment shows coordinate shapes only; omitted fields follow the complete
+result above.
+
 # MVP behavior
 
 The MVP supports booleans; signed and unsigned integers whose values fit in
 `int64`; `float32` and `float64`; UTF-8 and dictionary-encoded strings; and
 nulls within those columns. It rejects the entire comparison when either input
 contains a decimal, binary, temporal, interval, nested, or other unsupported
-column.
+column. Dictionary encoding is supported only when its logical value type is
+UTF-8 string; dictionaries of numeric or other values are unsupported.
+
+Validate unsigned integer ranges eagerly while loading. Report the side, column,
+source type, and first one-based row containing a value above `i64::MAX`.
 
 The following outcomes are required:
 
@@ -247,16 +330,20 @@ The following outcomes are required:
 |---|---|
 | Unreadable or invalid Parquet | Fail before reconciliation |
 | Duplicate top-level name | Fail with side, exact name, and one-based positions |
-| Unsupported type or out-of-range integer | Fail with side, column, and source type |
+| Unsupported type | Fail with side, column, and source type |
+| Unsigned integer above `i64::MAX` | Fail with side, column, source type, and first row |
 | Missing `--key` | Fail |
 | Paired, missing, or duplicate key component | Fail with the component |
 | Incompatible key types | Fail with both types |
 | Null or `NaN` in a key | Fail key validation |
-| Key non-unique after canonicalization | Fail key validation |
+| Key duplicated in `old` after canonicalization | Fail with `non_unique_old` |
+| Key duplicated only in `new` | Fail with unsupported-fanout context |
 | Valid key with no shared values | Classify all old rows as drops and all new rows as additions |
 | One empty input | Classify every row on the other side atomically; still compare schemas |
 | Both inputs empty | Emit no row or cell changes; still compare schemas |
 | Compatible source type changes but values agree | Emit a type-only column edit |
+| Key source type changes but canonical values agree | Emit a type-only column edit and no key cells |
+| Same-name non-key columns have incompatible types | Fail with both columns and types |
 | Added or dropped row/column | Emit the atomic event, not per-cell changes |
 | Valid inputs and key | Emit deterministic coordinate-only JSON |
 
@@ -282,12 +369,16 @@ The MVP is complete when:
 Add reconciliation features in dependency order, giving each the same combination
 of isolated fixtures, integration coverage, and determinism checks:
 
-1. Summarize changed cells with a minimum bipartite vertex cover.
+1. Summarize changed cells with an exact minimum bipartite vertex cover. Emit a
+   separate summary with `optimal: true`; bounded fallback is added only in step
+   7, when this field may become false.
 2. Guess eligible single-column keys and allow users to override the guess.
 3. Add paired key components and validated rename/add/drop/edit hints.
 4. Infer exact renames from aligned matched rows.
 5. Support bounded declared-key fanout while keeping fanout cells separate.
-6. Add approximate rename inference and then swap detection.
+6. Add approximate rename inference and then swap detection, initially examining
+   all matched rows; step 7 replaces the full set with deterministic sampling
+   when required.
 7. Benchmark the complete pipeline and introduce sampling, computation budgets,
    valid partial results, and incomplete-stage reporting.
 8. Expand scalar type support, then design a bounded large-data execution model
