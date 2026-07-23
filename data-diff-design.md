@@ -122,7 +122,7 @@ Missing values and `NaN` invalidate the key. Uniqueness is checked independently
 
 A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally. If a declared key contains an incompatible type pair, key validation fails and reports the pair to the user. In the MVP, compatible cross-type pairs are integer with double, and string with boolean, integer, or double; boolean and numeric columns are incompatible.
 
-1. **Declared key** — If the user supplies a key set, either directly or through `data-dict.yaml`, we use it provided that all of its columns still exist on both sides. We validate uniqueness in both `old` and `new` before trusting it:
+1. **Declared key** — If the user supplies a key set, either directly or through `data-dict.yaml`, each component identifies an old/new column pair. A component with one name refers to that name on both sides; a component with two names can identify differently named key columns. The paired form establishes column identity before key validation, like a rename hint. Every referenced column must exist exactly once on its respective side, and no old or new column may occur in more than one component. We validate uniqueness in both `old` and `new` before trusting the key:
 
    | Unique in `old` | Unique in `new` | Resolution |
    |---|---|---|
@@ -231,10 +231,12 @@ The goal of the first implementation pass is to work out the reconciliation proc
 The initial command-line interface should be:
 
 ```
-data-diff old.parquet new.parquet --keys id,date
+data-diff old.parquet new.parquet --key customer_id/id,date,region_code/region
 ```
 
-`--keys` takes a comma-separated list of columns, allowing the user to supply either a single-column or compound key. We still need to decide how hints will be supplied. That decision is not required for the MVP, which does not support hints; later, the engine should accept them independently of whatever command-line or UI syntax we choose.
+`--key` takes a comma-separated list of components, allowing the user to supply either a single-column or compound key. A bare name such as `date` means `old.date/new.date`; `old_name/new_name` identifies differently named columns. The JSON `key` field stores these resolved column identities using the same collapsed coordinates as everywhere else. Names containing `/` or `,` cannot be expressed through this initial CLI syntax, although the engine API uses structured pairs and has no such restriction.
+
+We still need to decide how other hints will be supplied. That decision is not required for the MVP, which does not support hints and accepts only bare, same-name key components. Paired key components should be added with rename-hint support in implementation step 3. Later, the engine should accept hints independently of whatever command-line or UI syntax we choose.
 
 The structured diff should preserve information rather than prematurely reducing it. At a minimum, it needs to contain:
 
@@ -305,7 +307,7 @@ Each comparison should use a comparison plan derived from the two column types. 
 
 ## MVP
 
-The MVP should exercise the complete path from two Parquet files to a JSON description of their differences while avoiding inference. It should require the user to supply a key whose columns have the same names in both datasets, and it should reject keys that are missing, contain missing values, or are not unique on either side. It does not need to support fanout, guessed keys, column hints, rename inference, or an interactive UI.
+The MVP should exercise the complete path from two Parquet files to a JSON description of their differences while avoiding inference. It should require the user to supply a key using bare components whose columns have the same names in both datasets, and it should reject keys that are missing, contain missing values, or are not unique on either side. It does not need to support fanout, guessed keys, paired key components, column hints, rename inference, or an interactive UI.
 
 The MVP can assume that both datasets are small enough to fit comfortably in memory. Its purpose is to work out the reconciliation model and produce correct results, so it does not need computation budgets, sampling, streaming, or other safeguards for large inputs.
 

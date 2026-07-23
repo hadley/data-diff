@@ -284,6 +284,14 @@ The engine API needs side-specific key references or identity-aware resolution.
 **Response:**
 An old/new name pair. e.g. --key old1/new1,repeated,old2/new2
 
+**Resolution:**
+`--key` accepts comma-separated components. A bare name refers to that column
+on both sides; `old_name/new_name` identifies differently named columns and
+establishes their identity before validation. Components may not reuse a
+column. The JSON stores resolved key identities with the standard collapsed
+coordinates. The MVP supports only bare components; paired components arrive
+with rename-hint support.
+
 ### 14. Declared-key failure behavior conflicts with requiring keys
 
 A broken declared key silently falls through to guessing and then row numbers.
