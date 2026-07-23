@@ -116,6 +116,22 @@ Parsing is case-sensitive, except where Rust's parser explicitly defines otherwi
 
 This rule allows a column to retain its identity through a transformation such as parsing a character date or number. We still report the string-to-typed transition as a type change.
 
+For reference, the MVP comparison matrix is:
+
+| Normalized type pair | Comparison |
+|---|---|
+| `boolean` ↔ `boolean` | Exact |
+| `int64` ↔ `int64` | Exact |
+| `double` ↔ `double` | Exact; all `NaN` values agree and signed zeros agree |
+| `string` ↔ `string` | Exact bytes |
+| `int64` ↔ `double` | Equal only when the double represents the integer exactly |
+| `string` ↔ `boolean` | Parse with `bool::from_str`, then compare exactly |
+| `string` ↔ `int64` | Parse with the exact integral parser, then compare exactly |
+| `string` ↔ `double` | Parse with `f64::from_str`, then compare exactly |
+| `boolean` ↔ numeric | Incompatible |
+
+Null/null agrees across compatible types, null/present disagrees, and null is distinct from `NaN`. A parse failure is a mismatch. Hashing uses the same pair-specific canonicalization and always verifies equality after bucketing. Decimal, temporal, binary, and nested types are unsupported by the MVP.
+
 Source types that cannot be represented by these four normalized types, such as binary or nested values, are compared only when their source types are identical. They are not candidates for inferred cross-type renames; the user can supply a rename hint if needed.
 
 ## Empty inputs

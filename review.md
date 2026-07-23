@@ -773,3 +773,7 @@ sections:
 2. sketch me something
 3. sketch me something
 4. sketch me something
+
+**Resolution 1:**
+Added an MVP comparison matrix covering compatible type pairs, parsing,
+missing values, hashing, and unsupported type families.
