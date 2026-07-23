@@ -321,6 +321,13 @@ simply proceeding to a guessed key.
 **Response:**
 This is deliberate
 
+**Resolution:**
+Fanout remains intentionally one-directional. A unique old row can be compared
+unambiguously with multiple new rows. Multiple old rows mapping to one new row
+could represent aggregation, deduplication, or arbitrary pairing, so no
+reverse-fanout event is inferred. The declared key fails with reason
+`non_unique_old` and follows the normal invalid-key fallback behavior.
+
 ### 16. The fanout threshold needs a precise formula
 
 “Fewer than 10% of the distinct key values in `new` are duplicated” could mean:
