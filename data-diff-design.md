@@ -80,7 +80,7 @@ An unmatched old column is a drop and an unmatched new column is an addition. A 
 
 We first compare the two schemas, recording column additions, removals, reorderings, and type changes. Schema additions and removals recorded at this stage are provisional. If later reconciliation establishes an identity between a removed and added column, the structured diff replaces those provisional operations with the semantic rename. It does not retain redundant drop/add operations. The original schemas remain available if a consumer needs to reconstruct the initial syntactic comparison.
 
-We preserve type differences for display: normalization does not erase a type change just because values can be compared across it. But we also don't want to display changes in type, but not type, e.g. when integers in a double-typed column are converted to integers in an integer-typed column.
+We preserve source-type differences for display: normalization does not erase a type change merely because values remain equal. Type and value changes are determined independently. For example, converting a double-typed column containing whole numbers to an integer column produces a type-only `col_edit()` when all normalized values compare equal; it does not produce changed cells.
 
 For value comparison, we normalize the source types to a smaller set of flexible types:
 

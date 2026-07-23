@@ -591,6 +591,11 @@ one after only summary construction times out. The result should say:
 Yes
 
 **Resolution:**
+Clarified that source-type and value changes are independent. A double-to-int
+conversion whose normalized values remain equal produces a type-only
+`col_edit()` and no changed cells.
+
+**Resolution:**
 Budgeted stages return the best valid partial result rather than suppressing
 downstream work. Rename pairs are processed in endpoint groups and accepted
 only when all candidates incident to both endpoints were examined. Minimum
