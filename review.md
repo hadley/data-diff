@@ -425,6 +425,11 @@ ambiguity issue for low-information matches.
 **Response:**
 Suggest something
 
+**Resolution:**
+Keep exact rename inference simple for now: a sole exact pair is inferred
+without a minimum row-count, cardinality, or information-content threshold.
+Reconsider this only if practical fixtures reveal false positives.
+
 ### 22. Approximate rename sampling lacks minimum evidence requirements
 
 With one sampled matched row, an unrelated pair can achieve 100% agreement.
