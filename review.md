@@ -193,6 +193,14 @@ This needs a precise support matrix and failure behavior.
 **Response:**
 Lets reject for now, but handling them to future work.
 
+**Resolution:**
+The MVP supports booleans, integers whose values fit in `int64`, `float32` and
+`float64`, UTF-8 and dictionary-encoded strings, decimals with at most 18
+significant digits, and nulls within those types. It rejects the entire
+comparison when either input contains binary, nested, temporal, interval,
+over-precision decimal, or other unsupported columns, identifying the column
+and source type. Broader type support is future work.
+
 ### 9. Decimal normalization is incomplete
 
 “At most 18 significant digits” does not fully determine representability. The

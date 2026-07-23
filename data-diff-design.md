@@ -303,6 +303,17 @@ The MVP should exercise the complete path from two Parquet files to a JSON descr
 
 The MVP can assume that both datasets are small enough to fit comfortably in memory. Its purpose is to work out the reconciliation model and produce correct results, so it does not need computation budgets, sampling, streaming, or other safeguards for large inputs.
 
+The MVP supports:
+
+* booleans;
+* signed and unsigned integers, provided every value fits in `int64`;
+* `float32` and `float64`, normalized to `double`;
+* UTF-8 strings, including dictionary-encoded strings after decoding their logical values;
+* decimals with at most 18 significant digits; and
+* nulls within any supported typed column.
+
+The MVP rejects binary and fixed-size binary values; lists, structs, maps, and other nested values; dates, times, timestamps, durations, and intervals; decimals exceeding the supported precision; and any other Arrow or Parquet logical type not listed above. If either input contains an unsupported column, the MVP rejects the entire comparison and identifies the column and its source type. It does not silently omit the column or return a partial diff. Support for these types can be added later.
+
 For this restricted case, the engine should:
 
 1. Read the two files and compare their schemas.
