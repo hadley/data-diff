@@ -35,7 +35,7 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 | `row_drop()` | Rows removed |
 | `row_edit()` | Existing rows' (non-key) values changed |
 | `row_fanout()` | One old row corresponds to multiple new rows with the same key |
-| `row_order()` | Relative order of one-to-one matched rows changed |
+| `row_order()` | Minimum set of one-to-one matched rows that must move to explain a change in relative order |
 
 This vocabulary allows a single physical change to be described by multiple possible semantic changes. Here are a few examples of such ambiguities:
 
@@ -145,7 +145,13 @@ Uniqueness is required for one-to-one row matching, but not for grouping. If the
 
 ## Canonical row ordering
 
-We then create `old_matching` and `new_matching`, which contain only the one-to-one common rows, ordered by key. We use these datasets for all subsequent steps. We also record how row order has changed so that we can report it to the user.
+We then create `old_matching` and `new_matching`, which contain only the one-to-one common rows, ordered by key. We use these datasets for all subsequent steps.
+
+Before canonical ordering, we compare the matched-row identities in their original old and new input orders. Added, dropped, and fanout rows are excluded. We find a longest common subsequence (LCS) of these identities. Rows in the LCS retained their relative order; rows outside it are the minimum set of rows that must move to explain the reordering. Because matched-row identities are unique, we use the same linearithmic longest-increasing-subsequence algorithm as for column ordering.
+
+We break ties by retaining the LCS whose sequence of original old-row positions is lexicographically earliest. The structured diff records each moved row using its collapsed old/new coordinate. An empty list means that relative order did not change.
+
+For example, if old rows `[a, b, c]` become `[x, c, a, b]`, `x` is handled as an addition, the LCS retains `[a, b]`, and `c` is the sole moved row. Fanout rows are excluded because a one-to-many relationship does not have a single position on the new side; their ordering remains part of the fanout event.
 
 ## Rename inference
 

@@ -152,6 +152,13 @@ insertion, contrary to “relative order.”
 **Response:**
 Same as above
 
+**Resolution:**
+Apply the same LCS/LIS algorithm to one-to-one matched row identities in their
+original input orders. Exclude added, dropped, and fanout rows. Break ties by
+retaining the lexicographically earliest sequence of old-row positions and
+report the minimum moved set using collapsed, one-based old/new coordinates.
+Fanout ordering remains part of the fanout event.
+
 ### 7. “Ordered by key” lacks an ordering definition
 
 Canonical ordering must cover compound and cross-type keys, decimals,
