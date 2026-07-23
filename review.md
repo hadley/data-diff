@@ -571,6 +571,12 @@ invariant should say “minimum subject to forced hints,” rather than simply
 **Response:**
 Yes, that's right.
 
+**Resolution:**
+Coalesce columns forced by type changes or valid edit hints, remove all incident
+changed-cell edges, and compute an exact minimum cover of the remainder. The
+final summary is minimum subject to those forced events, not necessarily a
+global minimum of the original graph, and must still cover every changed cell.
+
 ### 30. Budget exhaustion needs stage-specific result semantics
 
 A partial diff after rename inference times out is materially different from
