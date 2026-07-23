@@ -456,6 +456,12 @@ observations, or ordinary values?
 **Response:**
 See above
 
+**Resolution:**
+The shared comparison-plan and missing-value rules already define the value
+categories and parse-failure behavior. Clarified only that both frequency
+distributions for expected agreement use the same deterministic sample as
+observed agreement.
+
 ### 24. Swap detection does not fit cleanly into the identity model
 
 A swap expressed as `old.a -> new.b` and `old.b -> new.a` means same-named

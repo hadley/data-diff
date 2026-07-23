@@ -203,6 +203,8 @@ $$
 p_e = \sum_v p_{old}(v) p_{new}(v)
 $$
 
+Both frequency distributions are calculated over the same deterministic sample used for $p_o$, using the candidate pair's comparison plan and the missing-value rules above.
+
 We then calculate chance-corrected agreement:
 
 $$
