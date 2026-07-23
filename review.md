@@ -358,6 +358,12 @@ should presumably be added rows. Classification needs precedence rules.
 Correct
 
 **Resolution:**
+Added and dropped rows are atomic events whose cells are not emitted or
+summarized. Added and dropped columns likewise remain schema events rather than
+generating cells across matched rows. Cell changes only compare identified
+columns in matched or fanout-related rows.
+
+**Resolution:**
 Classify side presence before new-side multiplicity. An old-only key is a drop;
 a new-only key produces additions regardless of duplication; a shared key with
 one new row is a one-to-one match; and a shared key with multiple new rows is a

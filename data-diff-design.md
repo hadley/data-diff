@@ -162,6 +162,8 @@ With a key in hand, we hash each row's key value on both sides. For a retained k
 
 Side presence is checked before new-side multiplicity. A duplicated key can only be fanout when an old row exists to fan out from; otherwise every new row in the group is an addition.
 
+Added and dropped rows are atomic row events. Their cells are not emitted as changed cells and do not participate in row/column edit summarization. Likewise, added and dropped columns remain schema events rather than generating a changed cell for every matched row. The cell-level diff contains only comparisons between identified columns in matched or fanout-related rows.
+
 Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. Once column identities have been resolved, we compare each identified non-key column between the old row and every new row in the group.
 
 Each fanout is a self-contained event containing the old row coordinate, all corresponding new row coordinates, and its changed cell pairs. Fanout cells are not added to the top-level changed-cell set, do not participate in row/column edit summarization, and are not used for rename inference. Added and dropped columns remain schema operations rather than being expanded into fanout cell changes. A fanout with no changed non-key cells remains an event because the duplication itself is the important change.
