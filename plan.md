@@ -45,7 +45,7 @@ title: data-diff implementation plan
   rows or columns. Record an evidence-level column edit for every identified
   column with a source-type change or changed cell, including type-only key
   columns; row edits wait for post-MVP summarization.
-- [ ] **Complete the JSON and CLI path.** Emit deterministic, pretty JSON for a
+- [x] **Complete the JSON and CLI path.** Emit deterministic, pretty JSON for a
   successful comparison and concise contextual errors for failures. Add small
   end-to-end fixtures covering unchanged data, combined schema/row/value changes,
   type-only changes, empty inputs, and invalid input.

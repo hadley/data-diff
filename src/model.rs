@@ -64,8 +64,6 @@ pub enum DiffError {
         old_type: String,
         new_type: String,
     },
-    /// Reconciliation has not been implemented yet.
-    NotImplemented,
 }
 
 impl std::fmt::Display for DiffError {
@@ -144,7 +142,6 @@ impl std::fmt::Display for DiffError {
                 f,
                 "column {column:?} has incompatible types {old_type} and {new_type}"
             ),
-            DiffError::NotImplemented => f.write_str("reconciliation is not implemented yet"),
         }
     }
 }

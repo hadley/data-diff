@@ -27,11 +27,77 @@ pub fn diff_tables(
     new: &RecordBatch,
     options: &DiffOptions,
 ) -> Result<Diff, DiffError> {
-    validate_tables(old, new)?;
+    let schemas = validate_tables(old, new)?;
     let key = key::resolve_key(old, new, options)?;
     let rows = rows::match_rows(&key);
     let schema = schema::reconcile_schema(old, new, &key)?;
-    let _order = order::detect_order(&schema, &rows);
-    let _cells = cells::compare_cells(old, new, &schema, &rows);
-    Err(DiffError::NotImplemented)
+    let order = order::detect_order(&schema, &rows);
+    let cells = cells::compare_cells(old, new, &schema, &rows);
+
+    Ok(Diff {
+        schemas,
+        columns: ColumnsDiff {
+            identities: schema
+                .identities
+                .iter()
+                .map(|column| Coordinate::from_zero_based(column.old, column.new))
+                .collect(),
+            added: one_based(&schema.added),
+            dropped: one_based(&schema.dropped),
+            edited: cells
+                .columns
+                .iter()
+                .map(|column| ColumnEdit {
+                    column: Coordinate::from_zero_based(column.old, column.new),
+                    type_changed: column.type_changed,
+                    values_changed: column.values_changed,
+                })
+                .collect(),
+        },
+        key: KeyDiff {
+            basis: KeyBasis::Declared,
+            columns: key
+                .columns
+                .iter()
+                .map(|column| Coordinate::from_zero_based(column.old, column.new))
+                .collect(),
+        },
+        rows: RowsDiff {
+            added: one_based(&rows.added),
+            dropped: one_based(&rows.dropped),
+            matched: rows
+                .matched
+                .iter()
+                .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .collect(),
+        },
+        order: OrderDiff {
+            columns: order
+                .columns
+                .iter()
+                .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .collect(),
+            rows: order
+                .rows
+                .iter()
+                .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .collect(),
+        },
+        cells: cells
+            .cells
+            .iter()
+            .map(|cell| {
+                CellCoordinate::from_zero_based(
+                    cell.old_row,
+                    cell.old_column,
+                    cell.new_row,
+                    cell.new_column,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn one_based(indices: &[usize]) -> Vec<usize> {
+    indices.iter().map(|index| index + 1).collect()
 }
