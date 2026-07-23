@@ -380,6 +380,10 @@ Coordinate-only output avoids defining JSON encodings for values such as large i
 
 Each comparison should use a comparison plan derived from the two column types. Hashing and equality within that plan must use the same canonicalization, so values that compare equal always have equal hashes. Key matching, rename inference, and cell comparison should all use this shared comparison layer. Operations should be deterministic: samples, ambiguous exact matches, and tie-breaks must depend only on the input data and its original ordering.
 
+Stable hashing uses XXH3-128 with seed 0, identified internally as `stable-hash-v1`. We hash an explicit canonical byte encoding rather than Rust memory: fixed type/category tags, little-endian numeric bytes, one representation each for `NaN` and numeric zero, distinct tags for null and `NaN`, length-prefixed string bytes, and length-prefixed components for compound keys. The same canonical input must produce the same hash across runs and platforms. A change to the algorithm or byte encoding requires a new internal hash version.
+
+Hash equality is never sufficient for value equality. Hashes form candidate buckets, after which the comparison plan verifies values exactly, so collisions cannot change correctness. Deterministic samples select the smallest stable key hashes and break hash ties by original old-row position.
+
 Expensive stages accept explicit budgets and return the best valid result completed within them. A stage result records whether it is complete and, when incomplete, the exhausted budget and unresolved coordinates or candidates. Downstream stages continue using the partial result and inherit an `incomplete_input` marker when their interpretation may change after more upstream work. Unexamined candidates must never be treated as confirmed non-matches. Increasing a budget or adding a hint reruns the affected stage and its downstream consumers, so partial results may improve or change.
 
 ## MVP

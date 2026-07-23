@@ -748,6 +748,13 @@ limit the determinism guarantee.
 **Response:**
 Yes, use stable hash.
 
+**Resolution:**
+Use XXH3-128 with seed 0 and a versioned, explicit canonical byte encoding.
+Hashes are stable across runs and platforms. They only form candidate buckets;
+the comparison plan always verifies equality, so collisions cannot affect
+correctness. Deterministic samples use the smallest hashes with old-row
+position as the tie-break.
+
 ## Suggested design additions
 
 Before implementation, it would be useful to add four short normative
