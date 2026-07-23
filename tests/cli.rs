@@ -162,6 +162,8 @@ fn reports_mixed_changes_from_real_parquet_files() {
     assert_eq!(value["rows"]["added"], json!([3]));
     assert_eq!(value["order"]["rows"], json!([[2, 1]]));
     assert_eq!(value["cells"], json!([[[1, 2], [2, 1]], [[2, 2], [1, 1]]]));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""cells": [[[1, 2], [2, 1]], [[2, 2], [1, 1]]]"#));
 }
 
 #[test]

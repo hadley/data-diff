@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use data_diff::{DiffOptions, diff_tables, read_parquet};
+use data_diff::{DiffOptions, diff_tables, read_parquet, write_json};
 
 #[derive(Debug, Parser)]
 #[command(name = "data-diff", version, about = "Compare two tabular data files")]
@@ -31,7 +31,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let new = read_parquet(&cli.new).map_err(|error| error.to_string())?;
     let diff = diff_tables(&old, &new, &DiffOptions { key: cli.key })
         .map_err(|error| error.to_string())?;
-    serde_json::to_writer_pretty(std::io::stdout().lock(), &diff)
+    write_json(std::io::stdout().lock(), &diff)
         .map_err(|error| format!("cannot write JSON: {error}"))?;
     println!();
     Ok(())

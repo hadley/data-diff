@@ -3,6 +3,7 @@
 mod cells;
 mod compare;
 mod input;
+mod json;
 mod key;
 mod model;
 mod order;
@@ -12,6 +13,7 @@ mod schema;
 use arrow_array::RecordBatch;
 
 pub use input::{read_parquet, validate_tables};
+pub use json::write_json;
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
     DiffOptions, DuplicateColumnName, KeyBasis, KeyDiff, NormalizedType, OrderDiff, RowsDiff,
