@@ -62,3 +62,43 @@ fn repeated_comparisons_are_byte_identical() {
 
     assert_eq!(first, second);
 }
+
+#[test]
+fn disjoint_keys_are_all_atomic_row_events() {
+    let old = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+    let new = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+
+    let diff = diff_tables(
+        &old,
+        &new,
+        &DiffOptions {
+            key: vec!["id".into()],
+        },
+    )
+    .unwrap();
+    let value = serde_json::to_value(diff).unwrap();
+
+    assert_eq!(value["rows"]["dropped"], json!([1, 2]));
+    assert_eq!(value["rows"]["added"], json!([1, 2]));
+    assert_eq!(value["rows"]["matched"], json!([]));
+    assert_eq!(value["cells"], json!([]));
+}
+
+#[test]
+fn empty_inputs_preserve_schema_and_classify_the_other_side() {
+    let empty = common::batch([("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
+    let rows = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+    let options = DiffOptions {
+        key: vec!["id".into()],
+    };
+
+    let added = serde_json::to_value(diff_tables(&empty, &rows, &options).unwrap()).unwrap();
+    let dropped = serde_json::to_value(diff_tables(&rows, &empty, &options).unwrap()).unwrap();
+    let both_empty = serde_json::to_value(diff_tables(&empty, &empty, &options).unwrap()).unwrap();
+
+    assert_eq!(added["rows"]["added"], json!([1, 2]));
+    assert_eq!(dropped["rows"]["dropped"], json!([1, 2]));
+    assert_eq!(both_empty["schemas"]["old"][0]["name"], "id");
+    assert_eq!(both_empty["rows"]["matched"], json!([]));
+    assert_eq!(both_empty["cells"], json!([]));
+}

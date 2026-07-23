@@ -1,5 +1,3 @@
-#![allow(dead_code)] // The resolved keys are consumed by the next row-matching stage.
-
 use std::collections::{HashMap, HashSet};
 
 use arrow_array::RecordBatch;

@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Consumed by ordering and cell stages.
-
 use std::collections::HashSet;
 
 use arrow_array::RecordBatch;

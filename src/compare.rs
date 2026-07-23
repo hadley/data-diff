@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Consumed incrementally by key, row, and cell reconciliation stages.
-
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
@@ -403,6 +401,7 @@ fn encode_bytes(tag: u8, value: &[u8], output: &mut Vec<u8>) {
     output.extend_from_slice(value);
 }
 
+#[cfg(test)]
 pub(crate) fn equal_after_hash(
     old: &CanonicalValue,
     new: &CanonicalValue,

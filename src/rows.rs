@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Consumed by schema, ordering, and cell stages.
-
 use std::collections::HashMap;
 
 use crate::key::{ResolvedKey, compound_hash};

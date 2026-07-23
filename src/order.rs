@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Converted to public coordinates by the final assembly stage.
-
 use crate::rows::RowMatches;
 use crate::schema::SchemaMatches;
 

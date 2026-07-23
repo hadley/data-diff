@@ -49,7 +49,7 @@ title: data-diff implementation plan
   successful comparison and concise contextual errors for failures. Add small
   end-to-end fixtures covering unchanged data, combined schema/row/value changes,
   type-only changes, empty inputs, and invalid input.
-- [ ] **MVP acceptance pass.** Run the complete test suite, confirm repeated runs
+- [x] **MVP acceptance pass.** Run the complete test suite, confirm repeated runs
   are byte-for-byte deterministic, document the supported CLI and limitations,
   and manually inspect one representative diff before declaring the MVP complete.
 

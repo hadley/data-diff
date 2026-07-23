@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Converted to the public result by the final assembly stage.
-
 use arrow_array::RecordBatch;
 
 use crate::compare::ComparisonPlan;
