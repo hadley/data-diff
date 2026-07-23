@@ -30,7 +30,7 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 | `col_drop([old1, old2, ...])` | Column removed |
 | `col_edit([old1, old2, ...])` | Values (or type) changed, preserving identity |
 | `col_rename([old1, old2], [new1, new2])` | Column renamed, preserving identity |
-| `col_order()` | Relative order of existing columns changed |
+| `col_order()` | Minimum set of identified columns that must move to explain a change in relative order |
 | `row_add()` | Rows added |
 | `row_drop()` | Rows removed |
 | `row_edit()` | Existing rows' (non-key) values changed |
@@ -65,7 +65,8 @@ With those preliminaries in place, we can outline the full reconciliation proces
 4. Match rows, including duplicate-key groups.
 5. Create canonical datasets for comparison.
 6. Detect column renaming.
-7. Determine value changes.
+7. Determine column reordering.
+8. Determine value changes.
 
 ## Schema normalization
 
@@ -180,6 +181,18 @@ A pair is an approximate-rename candidate if $p_o > 0.9$ and $\kappa > 0.8$. If 
 We accept a candidate only when it is the sole candidate for both the old and new columns. If candidates overlap --- for example, if one old column plausibly matches two new columns ---  we leave resolution up to the user. We deliberately avoid more complex assignment algorithms: ambiguity here is unusual, and user input is more valuable than a sophisticated guess.
 
 Finally, we check whether pairs of heavily edited, same-named columns might actually have been swapped. For columns `a` and `b`, we compare `old.a` with `new.b` and `old.b` with `new.a`. If both cross-column comparisons have greater than 90% agreement and there is only one possible swap, we replace the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. As above, we ask the user to resolve competing interpretations.
+
+## Column ordering
+
+Once column identities have been resolved, we compare the relative order of the identified columns. We remove dropped columns from the old sequence and added columns from the new sequence, then replace every remaining column with its resolved identity. Renaming a column without moving it therefore does not count as a reordering, and inserting or removing a column does not by itself make the surrounding columns appear to move.
+
+We find a longest common subsequence (LCS) of the two identity sequences. Columns in the LCS retained their relative order; columns outside it are the minimum set of columns that must move to explain the reordering. Because column identities are unique, this can be implemented as a longest-increasing-subsequence problem in linearithmic time rather than with a general quadratic LCS algorithm.
+
+There may be multiple longest common subsequences. We deterministically retain the one whose sequence of original old-column positions is lexicographically earliest. This tends to treat an earlier part of the old schema as stable and describe later columns as moving around it.
+
+For example, inserting `x` to transform `[a, b]` into `[x, a, b]` is only a column addition: after removing `x`, the two identity sequences are identical. Transforming `[a, b, c]` into `[c, a, b]` retains the subsequence `[a, b]` and reports `c` as the single moved column. Transforming `[a, b, c]` into `[c, a]` first removes the dropped column `b`, then compares `[a, c]` with `[c, a]`; the tie-break retains `a` and reports `c` as moved.
+
+The structured diff records each moved column using its collapsed old/new coordinate. An empty list means that relative order did not change.
 
 ## Value changes
 

@@ -128,6 +128,14 @@ You tell me, but I think this needs to be a mapping from the location of each co
 
 Hmmmm, but that would report a lot of changes if you insert one column at the beginning. Can we simplify this using a classic diff algorithm to describe as a minimal change set?
 
+**Resolution:**
+Compare the sequences of resolved column identities after removing additions
+and drops. Columns outside a longest common subsequence are the minimum set
+that must move. Because identities are unique, use a linearithmic
+longest-increasing-subsequence implementation. Break ties by retaining the
+lexicographically earliest sequence of old-column positions. Report moved
+columns using their collapsed, one-based old/new coordinates.
+
 ### 6. Row-order change is not defined operationally
 
 Lines 137–139 say to record how order changed, but not how:
