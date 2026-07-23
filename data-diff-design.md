@@ -79,12 +79,10 @@ For value comparison, we normalize the source types to a smaller set of flexible
 | Normalized type | Source types |
 |---|---|
 | `boolean` | Booleans |
-| `int64` | Integers that fit in a signed 64-bit integer, and fixed-precision numbers with at most 18 significant digits |
+| `int64` | Integers that fit in a signed 64-bit integer |
 | `double` | Floating-point numbers and other real numbers that can be represented as doubles |
 | `string` | Strings, factors, categoricals, dictionaries, and enums, using their logical values rather than their underlying codes |
 | `date-time` | Dates, times, and date-times |
-
-Fixed-precision values are represented by an `int64` coefficient and a scale. When comparing two such columns, we rescale them to a common scale if we can do so without overflow. This allows values such as `1.0` and `1.00` to compare equal without passing through floating point.
 
 Missing values compare equal to missing values, including when the columns have different but compatible types. A missing value does not equal any present value. Floating-point `NaN` is distinct from a missing value: all `NaN` values compare equal to one another, but do not compare equal to null.
 
@@ -93,12 +91,12 @@ Both null and floating-point `NaN` are considered missing for key validation and
 Columns with the same normalized type are compared as follows:
 
 * `boolean` values are compared exactly.
-* `int64` values are compared exactly after resolving any fixed-precision scale.
+* `int64` values are compared exactly.
 * `double` values are compared exactly, and positive and negative zero compare equal.
 * `string` values are compared byte-for-byte. We do not silently trim, fold case, or apply Unicode normalization.
 * `date-time` values are converted to a common resolution. Date-times that represent instants are converted to UTC; changes to source units and time zones remain visible as schema differences.
 
-Numeric comparisons use an exact comparison domain. Integers and fixed-precision decimals are represented by an integer coefficient and a decimal scale. A floating-point value compares equal to an integer or decimal only when it represents exactly the same mathematical value. This avoids introducing matches through rounding.
+Integers and floating-point numbers are compatible. A floating-point value compares equal to an integer only when it represents exactly the same mathematical value. This avoids introducing matches through rounding.
 
 `string` is compatible with every other normalized type. When comparing a string column with a numeric column, we parse the strings into the numeric comparison domain. Integer-like strings may contain a fractional part or exponent provided their exact mathematical value is integral: for example, `"1"`, `"1.0"`, and `"1e0"` compare equal to integer `1`, while `"1.5"` does not. Parsing must not truncate fractional values or pass exact integers through floating point. Numeric canonicalization removes insignificant decimal zeros, so `1`, `1.0`, and `1.00` have the same canonical representation.
 
@@ -309,10 +307,9 @@ The MVP supports:
 * signed and unsigned integers, provided every value fits in `int64`;
 * `float32` and `float64`, normalized to `double`;
 * UTF-8 strings, including dictionary-encoded strings after decoding their logical values;
-* decimals with at most 18 significant digits; and
 * nulls within any supported typed column.
 
-The MVP rejects binary and fixed-size binary values; lists, structs, maps, and other nested values; dates, times, timestamps, durations, and intervals; decimals exceeding the supported precision; and any other Arrow or Parquet logical type not listed above. If either input contains an unsupported column, the MVP rejects the entire comparison and identifies the column and its source type. It does not silently omit the column or return a partial diff. Support for these types can be added later.
+The MVP rejects decimals; binary and fixed-size binary values; lists, structs, maps, and other nested values; dates, times, timestamps, durations, and intervals; and any other Arrow or Parquet logical type not listed above. If either input contains an unsupported column, the MVP rejects the entire comparison and identifies the column and its source type. It does not silently omit the column or return a partial diff. Support for these types can be added later.
 
 For this restricted case, the engine should:
 
@@ -343,6 +340,10 @@ Once the end-to-end MVP works, additional reconciliation features should be adde
 Each step should be introduced with small fixtures that isolate the new behaviour, plus end-to-end fixtures that combine it with all earlier stages. Particularly important invariants are that reconciliation is deterministic, hints never override the data, every changed cell remains available for display, and every inferred row or column event can be traced back to the underlying schema or cell-level diff.
 
 # Future extensions
+
+## Decimal values
+
+The MVP rejects all decimal columns. A future extension should support exact decimal-to-decimal, decimal-to-integer, and decimal-to-double comparison without passing through a rounded floating-point representation. It should define the supported precision and scale ranges, canonical representation, overflow behavior, and parsing of decimal strings as one coherent feature rather than introducing partial decimal support in the MVP.
 
 ## Compound key guessing with HyUCC
 

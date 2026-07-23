@@ -195,11 +195,10 @@ Lets reject for now, but handling them to future work.
 
 **Resolution:**
 The MVP supports booleans, integers whose values fit in `int64`, `float32` and
-`float64`, UTF-8 and dictionary-encoded strings, decimals with at most 18
-significant digits, and nulls within those types. It rejects the entire
-comparison when either input contains binary, nested, temporal, interval,
-over-precision decimal, or other unsupported columns, identifying the column
-and source type. Broader type support is future work.
+`float64`, UTF-8 and dictionary-encoded strings, and nulls within those types.
+It rejects the entire comparison when either input contains decimal, binary,
+nested, temporal, interval, or other unsupported columns, identifying the
+column and source type. Broader type support is future work.
 
 ### 9. Decimal normalization is incomplete
 
@@ -215,6 +214,12 @@ implementation also needs rules for:
 
 **Response:**
 Can you sketch out something reasonable, assuming that decimal values will be relatively rare, and I think typically are used to represent currency, so will be well under 18 significant digitrs
+
+**Resolution:**
+All decimal support is deferred. The MVP rejects decimal columns and the
+initial normalized numeric domain covers only integers and floating-point
+values. Exact decimal representation, cross-type comparison, overflow, and
+string parsing will be designed together as a future extension.
 
 ### 10. Date/time normalization combines types with different semantics
 
