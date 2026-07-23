@@ -716,6 +716,12 @@ In particular, invalid JSON must never be mixed with diagnostics on stdout.
 **Response:**
 Again, the this is just an initial sketch to work through reconcliation. These semantics don't matter yet.
 
+**Resolution:**
+Process-level exit codes, stdout/stderr conventions, and diagnostic formatting
+are outside this reconciliation design. The experimental CLI may use
+conventional behavior, but tests focus on engine results until the CLI becomes
+a supported interface.
+
 ### 39. Coordinate-only output limits standalone inspectability
 
 This is a defensible choice, but normalized schemas and key identities may
