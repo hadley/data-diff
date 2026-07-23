@@ -610,6 +610,11 @@ that.
 **Response:**
 Update to five
 
+**Resolution:**
+Superseded by the later decision to defer temporal values. The initial design
+now has four normalized types and three non-string parsing targets, so the
+current counts are correct.
+
 ### 32. The type-change sentence is garbled
 
 Line 72 says “we also don't want to display changes in type, but not type.”
