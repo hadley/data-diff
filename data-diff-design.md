@@ -223,7 +223,9 @@ A pair is an approximate-rename candidate if $p_o > 0.9$ and $\kappa > 0.8$. If 
 
 We accept a candidate only when it is the sole candidate for both the old and new columns. If candidates overlap --- for example, if one old column plausibly matches two new columns ---  we leave resolution up to the user. We deliberately avoid more complex assignment algorithms: ambiguity here is unusual, and user input is more valuable than a sophisticated guess.
 
-Finally, we check whether pairs of heavily edited, same-named columns might actually have been swapped. For columns `a` and `b`, we compare `old.a` with `new.b` and `old.b` with `new.a`. If both cross-column comparisons have greater than 90% agreement and there is only one possible swap, we replace the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. As above, we ask the user to resolve competing interpretations.
+Finally, we check whether pairs of heavily edited, same-named columns might actually have been swapped. A same-name pair is heavily edited when fewer than 50% of its aligned values agree. Columns `a` and `b` form a swap candidate when at least 20 aligned, one-to-one rows are available; both same-name pairs have $p_o < 0.5$; both cross-pairs `old.a`/`new.b` and `old.b`/`new.a` have compatible types; and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
+
+Agreement, missing values, parsing, deterministic sampling, and expected agreement use the same rules as approximate rename inference. We accept a swap only when each involved column belongs to exactly one candidate; competing swaps remain unresolved for the user. An accepted swap atomically updates the identity bijection as described above, replacing the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. The 50%, 90%, 80%, and 20-row thresholds are tunable implementation parameters.
 
 ## Column ordering
 

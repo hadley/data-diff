@@ -489,6 +489,13 @@ rules apply.
 **Response:**
 suggest something
 
+**Resolution:**
+A same-name pair is heavily edited when direct agreement is below 50%. Test a
+swap only with at least 20 aligned rows; require both cross-pairs to have
+greater than 90% observed and 80% chance-corrected agreement, using the
+approximate-rename comparison rules. Accept only mutually unique candidate
+swaps. All thresholds remain tunable.
+
 ### 26. Hints lack a formal contradiction model
 
 Cases requiring explicit decisions include:
