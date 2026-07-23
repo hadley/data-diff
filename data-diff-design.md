@@ -78,6 +78,8 @@ An unmatched old column is a drop and an unmatched new column is an addition. A 
 
 ## Schema normalization
 
+Before schema normalization, we validate that each input has unique top-level column names. Name equality is exact and case-sensitive, with no Unicode normalization. If duplicates exist, we reject the comparison and report every duplicated name, its side (`old` or `new`), and its one-based column positions. This is a fatal input error rather than an unresolved reconciliation issue because names are used by the CLI, hints, keys, schema matching, and result interpretation. Nested field names are outside this check because nested columns are not supported by the MVP.
+
 We first compare the two schemas, recording column additions, removals, reorderings, and type changes. Schema additions and removals recorded at this stage are provisional. If later reconciliation establishes an identity between a removed and added column, the structured diff replaces those provisional operations with the semantic rename. It does not retain redundant drop/add operations. The original schemas remain available if a consumer needs to reconstruct the initial syntactic comparison.
 
 We preserve source-type differences for display: normalization does not erase a type change merely because values remain equal. Type and value changes are determined independently. For example, converting a double-typed column containing whole numbers to an integer column produces a type-only `col_edit()` when all normalized values compare equal; it does not produce changed cells.

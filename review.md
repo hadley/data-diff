@@ -687,6 +687,12 @@ define name-plus-occurrence addressing.
 **Response:**
 Reject it
 
+**Resolution:**
+Reject duplicate top-level column names before normalization. Equality is exact
+and case-sensitive without Unicode normalization. Report every duplicate with
+its side and one-based positions. This is a fatal input error because names
+address keys, hints, schema identities, and results.
+
 ### 37. CLI parsing is ambiguous for unusual names
 
 Comma-separated `--keys id,date` cannot represent a column name containing a
