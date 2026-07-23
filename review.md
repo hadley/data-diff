@@ -247,6 +247,14 @@ formats must be fixed for deterministic behavior across libraries.
 **Response:**
 Define this briefly using standard rust parsers. Assume ISO8601.
 
+**Resolution:**
+String parsing is locale-independent, case-sensitive, and does not trim
+whitespace. Booleans and doubles use Rust's standard `FromStr` parsers.
+Integers use `i64::from_str` plus an exact checked parser for decimal/exponent
+syntax whose mathematical value is integral. Unsupported formatting produces
+a mismatch, not an error. Future temporal parsing will use explicitly selected
+ISO 8601 profiles.
+
 ### 12. Key validation across differently typed columns is underspecified
 
 The MVP requires key columns to have the same names, but not necessarily the

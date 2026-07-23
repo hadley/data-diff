@@ -98,7 +98,11 @@ Integers and floating-point numbers are compatible. A floating-point value compa
 
 `string` is compatible with every other normalized type. When comparing a string column with a numeric column, we parse the strings into the numeric comparison domain. Integer-like strings may contain a fractional part or exponent provided their exact mathematical value is integral: for example, `"1"`, `"1.0"`, and `"1e0"` compare equal to integer `1`, while `"1.5"` does not. Parsing must not truncate fractional values or pass exact integers through floating point. Numeric canonicalization removes insignificant decimal zeros, so `1`, `1.0`, and `1.00` have the same canonical representation.
 
-For other normalized types, we parse strings using the standard parser for the other column's type and compare the parsed values. A value that cannot be parsed is a mismatch. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only three possible non-string target types, so this adds only linear work per string column.
+String parsing is locale-independent and does not trim whitespace. Boolean strings use Rust's `bool::from_str`, accepting only `true` and `false`. Floating-point strings use Rust's `f64::from_str`, including its spellings for `NaN` and infinities.
+
+Integer strings normally use `i64::from_str`. To support integer values written with decimal or exponent notation, we additionally accept the ASCII grammar `[+-]?[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?`, but only when its exact mathematical value is integral and fits in `int64`. Thus `"1.0"` and `"1e0"` parse as integer `1`, while `"1.5"` and out-of-range values fail. This parser uses checked integer arithmetic and never converts through floating point.
+
+Parsing is case-sensitive, except where Rust's parser explicitly defines otherwise. Thousands separators, underscores, currency symbols, locale-specific forms, and leading or trailing whitespace are not accepted. A parse failure is a value mismatch, not an error. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only three possible non-string target types, so this adds only linear work per string column.
 
 This rule allows a column to retain its identity through a transformation such as parsing a character date or number. We still report the string-to-typed transition as a type change.
 
@@ -355,6 +359,8 @@ The MVP rejects dates, times, timestamps, durations, and intervals. Future tempo
 * calendar intervals.
 
 Compatibility and conversion rules should be defined separately for each category. Only timestamps that represent instants should be converted to UTC. Changes in source units and time-zone metadata should remain visible as schema differences even when normalized values compare equal.
+
+When temporal parsing is added, strings should use the applicable ISO 8601 representation, with the exact accepted profiles specified separately for dates, local times, zoned instants, and unzoned timestamps.
 
 ## Compound key guessing with HyUCC
 
