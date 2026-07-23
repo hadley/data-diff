@@ -790,3 +790,9 @@ Row and column ordering now compare resolved identities with additions, drops,
 and fanouts excluded as appropriate. An LCS/LIS produces the minimum moved set,
 with deterministic old-position tie-breaking and collapsed one-based output
 coordinates. The design includes insertion, deletion, and movement examples.
+
+**Resolution 4:**
+Added an MVP behavior table covering input failures, key validation, empty
+tables, unsupported types, type-only changes, atomic row/column events, and
+coordinate output. It deliberately leaves process-level CLI conventions
+unspecified.

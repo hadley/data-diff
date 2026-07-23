@@ -446,6 +446,29 @@ The MVP supports:
 
 The MVP rejects decimals; binary and fixed-size binary values; lists, structs, maps, and other nested values; dates, times, timestamps, durations, and intervals; and any other Arrow or Parquet logical type not listed above. If either input contains an unsupported column, the MVP rejects the entire comparison and identifies the column and its source type. It does not silently omit the column or return a partial diff. Support for these types can be added later.
 
+The MVP behavior is summarized below:
+
+| Condition | MVP behavior |
+|---|---|
+| File is unreadable or invalid Parquet | Fail before producing a diff |
+| Duplicate top-level column names | Fail and identify side, name, and positions |
+| Unsupported column type | Fail and identify side, column, and source type |
+| `--key` is omitted | Fail; the MVP requires a declared key |
+| Key uses a paired `old/new` component | Fail as unsupported by the MVP |
+| Key column is missing | Fail and identify side and component |
+| Key types are incompatible | Fail and identify the type pair |
+| Key contains null or `NaN` | Fail key validation |
+| Key is non-unique after canonicalization | Fail key validation |
+| Valid key has no shared values | All old rows are drops and all new rows are additions |
+| `old` has zero rows | All new rows are additions; schemas compare normally |
+| `new` has zero rows | All old rows are drops; schemas compare normally |
+| Both sides have zero rows | No row or cell changes; schemas compare normally |
+| Compatible source types change but values compare equal | Emit a type-only `col_edit()` with no changed cells |
+| Row or column is added or dropped | Emit the atomic row/schema event, not per-cell changes |
+| Inputs and key are valid | Emit coordinate-only JSON using one-based collapsed coordinates |
+
+This table specifies engine outcomes, not process-level exit codes, stderr formatting, or other supported-CLI guarantees.
+
 For this restricted case, the engine should:
 
 1. Read the two files and compare their schemas.
