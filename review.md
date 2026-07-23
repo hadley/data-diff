@@ -341,6 +341,13 @@ The strict boundary at exactly 10% also needs definition.
 **Response:**
 What do you recommend?
 
+**Resolution:**
+The fanout rate is the number of distinct shared key values duplicated in
+`new`, divided by the number of distinct key values shared by both sides. Each
+affected key counts once regardless of its number of new rows. Define the rate
+as zero when there are no shared keys and retain the declared key when the rate
+is at most 10%. New-only duplicates are additions and do not contribute.
+
 ### 17. Duplicated new-only keys should not be classified as fanout
 
 The row-matching bullets say “keys duplicated in `new` → `row_fanout()`.” If

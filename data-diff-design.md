@@ -130,7 +130,14 @@ A string that cannot be parsed under its comparison plan remains a distinct, tag
    | yes | no | `new` has fanned out relative to `old` |
    | no | --- | key is unreliable |
 
-   For the fanout case, we retain the key if fewer than 10% of the distinct key values in `new` are duplicated, treating them as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to the next step.
+   For the fanout case, let $K_o$ and $K_n$ be the sets of distinct key values in `old` and `new`, and define the affected-key rate as
+
+   $$
+   f = \frac{\left|\{k \in K_o \cap K_n : count_{new}(k) > 1\}\right|}
+            {|K_o \cap K_n|}.
+   $$
+
+   We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to the next step. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
 
    If a declared key fails validation, reconciliation does not use it. It records an `invalid_key` issue containing the supplied components and all observed reasons, such as missing columns, incompatible types, missing values, or non-uniqueness on either side. It then continues to guessed-key resolution and, if necessary, row-number matching so that the UI still has an initial diff to display. The resulting key records its basis as `guessed` or `row_number`, rather than `declared`, and the unresolved declared-key issue remains visible. When the user supplies a replacement key, reconciliation reruns key validation and all downstream stages.
 
