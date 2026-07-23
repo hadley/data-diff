@@ -132,6 +132,8 @@ A string that cannot be parsed under its comparison plan remains a distinct, tag
 
    For the fanout case, we retain the key if fewer than 10% of the distinct key values in `new` are duplicated, treating them as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to the next step.
 
+   If a declared key fails validation, reconciliation does not use it. It records an `invalid_key` issue containing the supplied components and all observed reasons, such as missing columns, incompatible types, missing values, or non-uniqueness on either side. It then continues to guessed-key resolution and, if necessary, row-number matching so that the UI still has an initial diff to display. The resulting key records its basis as `guessed` or `row_number`, rather than `declared`, and the unresolved declared-key issue remains visible. When the user supplies a replacement key, reconciliation reruns key validation and all downstream stages.
+
 2. **Guessed key** — If no declared key was provided or survives validation, we search for one. For each compatible column with the same identity on both sides, we compute uniqueness and the overlap between its sets of non-missing values. A candidate must contain no missing values, be unique in both `old` and `new`, and have at least one value in common. We do not infer fanout from a guessed key. We select the candidate with the largest number of shared values, breaking ties by column order because we assume key columns are more likely to occur early in the data.
 
 3. **Row number** — If we can't find a candidate key, we use row number. This means we can't distinguish a `row_edit()` from `row_drop()` + `row_add()`, and we display a reordering as many edits. But it allows the rest of the process to continue, and will generate an initial display that the user can refine.
@@ -307,7 +309,7 @@ Each comparison should use a comparison plan derived from the two column types. 
 
 ## MVP
 
-The MVP should exercise the complete path from two Parquet files to a JSON description of their differences while avoiding inference. It should require the user to supply a key using bare components whose columns have the same names in both datasets, and it should reject keys that are missing, contain missing values, or are not unique on either side. It does not need to support fanout, guessed keys, paired key components, column hints, rename inference, or an interactive UI.
+The MVP should exercise the complete path from two Parquet files to a JSON description of their differences while avoiding inference. It should require the user to supply a key using bare components whose columns have the same names in both datasets. Because it has no resolution UI or key guessing, a key that is missing, contains missing values, has incompatible types, or is not unique on either side terminates the comparison with an error. It does not need to support fanout, guessed keys, paired key components, column hints, rename inference, or an interactive UI.
 
 The MVP can assume that both datasets are small enough to fit comfortably in memory. Its purpose is to work out the reconciliation model and produce correct results, so it does not need computation budgets, sampling, streaming, or other safeguards for large inputs.
 

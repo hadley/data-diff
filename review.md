@@ -304,6 +304,13 @@ That could conceal a serious data-integrity failure. Decide whether this is:
 **Response:**
 Should be flagged for the user in the same way as a failing hint. The UI will provide a way to resolve
 
+**Resolution:**
+Full reconciliation records an `invalid_key` issue with all validation reasons,
+then continues with a guessed key or row-number matching to provide an initial
+display. The fallback basis is explicit and the issue remains visible until the
+user supplies a replacement, which reruns downstream stages. The MVP instead
+terminates because it has neither guessing nor a resolution UI.
+
 ### 15. Many-to-one row changes have no representation
 
 Duplication in `new` is fanout, but duplication in `old` makes the key
