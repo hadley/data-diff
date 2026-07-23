@@ -671,6 +671,13 @@ Questions include:
 **Response:**
 If old is empty, generate col_add() and row_add(). If new is empty, use col_drop() and row_drop(). But I don't think that speical case is particualrly interesting, we just need some default
 
+**Resolution:**
+Distinguish zero rows from zero columns and always compare schemas normally.
+With an empty old/new side, all rows on the other side are additions/drops;
+both empty means no row or cell changes. Empty-side key uniqueness is
+vacuously true, no key can be guessed, value-based renames are skipped, and
+column ordering may still be derived from schema identities.
+
 ### 36. Duplicate column names are not addressed
 
 Arrow schemas can potentially contain repeated field names, while the CLI

@@ -116,6 +116,14 @@ This rule allows a column to retain its identity through a transformation such a
 
 Source types that cannot be represented by these four normalized types, such as binary or nested values, are compared only when their source types are identical. They are not candidates for inferred cross-type renames; the user can supply a rename hint if needed.
 
+## Empty inputs
+
+Row emptiness and schema emptiness are independent. We always compare schemas normally regardless of row count; columns are added or dropped only when absent from the corresponding schema.
+
+If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist and have compatible types. No key can be guessed when either side is empty because there are no shared values.
+
+With no matched rows, value-based rename inference is skipped as described below. Column ordering can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
+
 ## Initial hint processing
 
 We parse and normalize all column hints before applying them; identical duplicate hints collapse to one. We reject hints whose referenced old or new columns do not exist. The remaining hints make claims against the identity bijection:
