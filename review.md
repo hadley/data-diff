@@ -511,6 +511,15 @@ Cases requiring explicit decisions include:
 **Response:**
 Yes. Maybe change "Rename hints" to "Initial hint processing" where we reject contradictory hints, then apply the rename rules.
 
+**Resolution:**
+Initial hint processing normalizes all hints, rejects missing targets, and
+detects endpoint conflicts across the full set before mutating identity.
+Conflicting connected groups are rejected together so input order never picks
+a winner; independent hints still apply. Renames precede keys, add/drop hints
+reserve inference endpoints, and edit hints are validated after changes are
+known. Issues use stable kinds for missing, contradictory, unchanged, and
+unresolved hints.
+
 ### 27. `col_edit()` conflates schema and value events
 
 The vocabulary says it means “values (or type) changed,” while the output also

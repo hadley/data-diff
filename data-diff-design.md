@@ -60,7 +60,7 @@ We can reduce this problem by encouraging the user to commit changes in smaller 
 With those preliminaries in place, we can outline the full reconciliation process:
 
 1. Normalize schemas.
-2. Apply rename hints.
+2. Process initial hints.
 3. Resolve row keys.
 4. Match rows, including duplicate-key groups.
 5. Create aligned datasets for comparison.
@@ -116,9 +116,20 @@ This rule allows a column to retain its identity through a transformation such a
 
 Source types that cannot be represented by these four normalized types, such as binary or nested values, are compared only when their source types are identical. They are not candidates for inferred cross-type renames; the user can supply a rename hint if needed.
 
-## Rename hints
+## Initial hint processing
 
-We next apply any rename hints, provided that both the old and new columns exist and neither has already been assigned to a different rename. Otherwise, we ignore the hint and add it to a list of issues that we surface to the user. A valid hint establishes column identity for key resolution and all subsequent comparisons; it does not assert that the column's type or values are unchanged.
+We parse and normalize all column hints before applying them; identical duplicate hints collapse to one. We reject hints whose referenced old or new columns do not exist. The remaining hints make claims against the identity bijection:
+
+* `col_rename(old, new)` claims both endpoints as one identity.
+* `col_drop(old)` reserves the old endpoint as unmatched.
+* `col_add(new)` reserves the new endpoint as unmatched.
+* `col_edit(identity)` attaches to an identity established by other hints or reconciliation rather than reserving a new endpoint.
+
+We detect conflicts across the complete hint set before mutating the identity map. Conflicts include one old column renamed to multiple new columns, multiple old columns renamed to one new column, an old endpoint both renamed and dropped, a new endpoint both renamed and added, or an edit referring to an identity contradicted by add/drop claims. For each connected group of conflicting hints, we reject every hint in the group rather than allowing input order to determine a winner. Independent valid hints still apply.
+
+Valid rename identities are applied before key resolution. Valid add/drop reservations later remove their endpoints from rename-inference candidates. A `col_add(new.b)` plus `col_drop(old.a)` is not contradictory: together they explicitly choose replacement rather than rename. Edit hints are validated after schema and cell changes are known and may coexist with renames. If an edited identity has neither a type nor value change, we ignore the hint.
+
+Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_no_change`, and `hint_unresolved_identity`. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
 
 ## Key resolution
 
@@ -190,14 +201,13 @@ For example, if old rows `[a, b, c]` become `[x, c, a, b]`, `x` is handled as an
 
 Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. We compare only columns with compatible types. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
 
-There are four steps for rename inference:
+There are three steps for rename inference:
 
-1. Apply hints.
-2. Look for exact renames.
-3. Look for approximate renames.
-4. Look for swaps.
+1. Look for exact renames.
+2. Look for approximate renames.
+3. Look for swaps.
 
-We first generate candidate lists of adds, drops, and edits, then apply any hints by removing those columns from the lists. (Plausible rename hints have already been applied before key matching). If a hint is not applicable --- for example, because the column does not exist or is unchanged --- we ignore it and report that to the user.
+We first generate candidate lists of adds, drops, and edits, excluding the endpoints reserved by valid add/drop hints and the identities protected by valid edit hints. Rename identities from initial hint processing have already been applied before key matching.
 
 We first look for exact renames. We hash each remaining removed and added column over the matched rows, then compare columns with equal hashes to verify that their values are identical. If an old column and a new column match only each other, they become a `col_rename()`. If multiple pairings are possible because columns have identical hashes/values, we match them in column order and allow the user to override the result in the UI. Initially, exact inference has no minimum row-count, cardinality, or information-content requirement; we will add one only if practical experience reveals problematic false positives.
 
