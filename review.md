@@ -265,6 +265,13 @@ MVP should explicitly require identical or narrowly compatible key types.
 **Response:**
 Yes, I think it should, since it's possible (if uncommon) for the key to be represented using the incorrect type, and the user needs to correct.
 
+**Resolution:**
+Key columns may have different compatible types. Construct one comparison plan
+per old/new key-column pair and check uniqueness after canonicalization on each
+side. Unparseable strings remain tagged string values that cannot match a typed
+value but do not invalidate a key by themselves. Missing values and `NaN`
+invalidate keys; incompatible declared key pairs fail validation.
+
 ## Full reconciliation blockers
 
 ### 13. Declared key naming after a rename hint is unclear
