@@ -58,6 +58,12 @@ pub enum DiffError {
     NonUniqueOldKey { first_row: usize, row: usize },
     /// New-side duplication requires fanout, which the MVP defers.
     UnsupportedFanout { first_row: usize, row: usize },
+    /// Same-name non-key columns cannot be compared.
+    IncompatibleColumns {
+        column: String,
+        old_type: String,
+        new_type: String,
+    },
     /// Reconciliation has not been implemented yet.
     NotImplemented,
 }
@@ -129,6 +135,14 @@ impl std::fmt::Display for DiffError {
             DiffError::UnsupportedFanout { first_row, row } => write!(
                 f,
                 "new key repeats at rows {first_row} and {row}; fanout is not supported yet"
+            ),
+            DiffError::IncompatibleColumns {
+                column,
+                old_type,
+                new_type,
+            } => write!(
+                f,
+                "column {column:?} has incompatible types {old_type} and {new_type}"
             ),
             DiffError::NotImplemented => f.write_str("reconciliation is not implemented yet"),
         }

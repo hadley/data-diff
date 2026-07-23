@@ -33,7 +33,7 @@ title: data-diff implementation plan
 - [x] **Match rows.** Hash compound keys, verify candidate matches, and classify
   rows as added, dropped, or one-to-one matched. Order matched pairs by their old
   row positions and test empty inputs, disjoint keys, and reordered rows.
-- [ ] **Reconcile the MVP schema.** Give same-name columns identities, classify
+- [x] **Reconcile the MVP schema.** Give same-name columns identities, classify
   unmatched columns as additions or drops, and independently record source-type
   changes. Reject an identified same-name pair when its types are incompatible.
   Do not infer renames.

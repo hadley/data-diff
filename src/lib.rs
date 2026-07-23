@@ -5,6 +5,7 @@ mod input;
 mod key;
 mod model;
 mod rows;
+mod schema;
 
 use arrow_array::RecordBatch;
 
@@ -27,5 +28,6 @@ pub fn diff_tables(
     validate_tables(old, new)?;
     let key = key::resolve_key(old, new, options)?;
     let _rows = rows::match_rows(&key);
+    schema::reconcile_schema(old, new, &key)?;
     Err(DiffError::NotImplemented)
 }
