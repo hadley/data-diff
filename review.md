@@ -702,6 +702,11 @@ such as `--key id --key date` would avoid escaping rules.
 **Response:**
 yes, but that's a lot more typing and key names containing commas will be very rare.
 
+**Resolution:**
+Keep the concise comma-separated `--key`. The initial CLI does not escape `,`
+or `/`; unusual names containing them require the structured engine or future
+UI. Repeated flags can be reconsidered if this becomes a practical problem.
+
 ### 38. Error behavior is absent
 
 The implementor needs exit codes and stderr/stdout rules for unreadable files,
