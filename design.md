@@ -65,10 +65,10 @@ With those preliminaries in place, we can outline the full reconciliation proces
 4. Match rows, including duplicate-key groups.
 5. Create aligned datasets for comparison.
 6. Detect column renaming.
-7. Determine column reordering.
+7. Determine row and column reordering.
 8. Determine value changes.
 
-## Column identity
+## Column identity model
 
 Column identity is a partial bijection $I \subseteq C_{old} \times C_{new}$: each old column and each new column appears in at most one pair. Paired key components and accepted rename hints reserve identities first. Remaining same-named columns receive provisional identities, and exact or approximate rename inference adds identities between unmatched columns.
 
@@ -78,11 +78,15 @@ An unmatched old column is a drop and an unmatched new column is an addition. A 
 
 ## Schema normalization
 
+### Schema comparison
+
 Before schema normalization, we validate that each input has unique top-level column names. Name equality is exact and case-sensitive, with no Unicode normalization. If duplicates exist, we reject the comparison and report every duplicated name, its side (`old` or `new`), and its one-based column positions. This is a fatal input error rather than an unresolved reconciliation issue because names are used by the CLI, hints, keys, schema matching, and result interpretation. Nested field names are outside this check because nested columns are not supported by the MVP.
 
 We first compare the two schemas, recording column additions, removals, reorderings, and type changes. Schema additions and removals recorded at this stage are provisional. If later reconciliation establishes an identity between a removed and added column, the structured diff replaces those provisional operations with the semantic rename. It does not retain redundant drop/add operations. The original schemas remain available if a consumer needs to reconstruct the initial syntactic comparison.
 
 We preserve source-type differences for display: normalization does not erase a type change merely because values remain equal. Type and value changes are determined independently. For example, converting a double-typed column containing whole numbers to an integer column produces a type-only `col_edit()` when all normalized values compare equal; it does not produce changed cells.
+
+### Normalized types
 
 For value comparison, we normalize the source types to a smaller set of flexible types:
 
@@ -93,30 +97,11 @@ For value comparison, we normalize the source types to a smaller set of flexible
 | `double` | Floating-point numbers and other real numbers that can be represented as doubles |
 | `string` | Strings, factors, categoricals, dictionaries, and enums, using their logical values rather than their underlying codes |
 
-Missing values compare equal to missing values, including when the columns have different but compatible types. A missing value does not equal any present value. Floating-point `NaN` is distinct from a missing value: all `NaN` values compare equal to one another, but do not compare equal to null.
+Source types outside these categories, such as binary or nested values, are comparable only when their source types are identical. They are not candidates for inferred cross-type renames, although a rename hint can establish their identity.
 
-Both null and floating-point `NaN` are considered missing for key validation and therefore invalidate a declared or guessed key. Outside key validation, null and `NaN` participate in value comparisons, hashing, agreement proportions, and value-frequency calculations as two distinct value categories.
+### Comparison semantics
 
-Columns with the same normalized type are compared as follows:
-
-* `boolean` values are compared exactly.
-* `int64` values are compared exactly.
-* `double` values are compared exactly, and positive and negative zero compare equal.
-* `string` values are compared byte-for-byte. We do not silently trim, fold case, or apply Unicode normalization.
-
-Integers and floating-point numbers are compatible. A floating-point value compares equal to an integer only when it represents exactly the same mathematical value. This avoids introducing matches through rounding.
-
-`string` is compatible with every other normalized type. When comparing a string column with a numeric column, we parse the strings into the numeric comparison domain. Integer-like strings may contain a fractional part or exponent provided their exact mathematical value is integral: for example, `"1"`, `"1.0"`, and `"1e0"` compare equal to integer `1`, while `"1.5"` does not. Parsing must not truncate fractional values or pass exact integers through floating point. Numeric canonicalization removes insignificant decimal zeros, so `1`, `1.0`, and `1.00` have the same canonical representation.
-
-String parsing is locale-independent and does not trim whitespace. Boolean strings use Rust's `bool::from_str`, accepting only `true` and `false`. Floating-point strings use Rust's `f64::from_str`, including its spellings for `NaN` and infinities.
-
-Integer strings normally use `i64::from_str`. To support integer values written with decimal or exponent notation, we additionally accept the ASCII grammar `[+-]?[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?`, but only when its exact mathematical value is integral and fits in `int64`. Thus `"1.0"` and `"1e0"` parse as integer `1`, while `"1.5"` and out-of-range values fail. This parser uses checked integer arithmetic and never converts through floating point.
-
-Parsing is case-sensitive, except where Rust's parser explicitly defines otherwise. Thousands separators, underscores, currency symbols, locale-specific forms, and leading or trailing whitespace are not accepted. A parse failure is a value mismatch, not an error. We don't format the typed value as a string, because formatting choices should not determine equality. Parsed representations are cached, and there are only three possible non-string target types, so this adds only linear work per string column.
-
-This rule allows a column to retain its identity through a transformation such as parsing a character date or number. We still report the string-to-typed transition as a type change.
-
-For reference, the MVP comparison matrix is:
+The MVP comparison matrix is:
 
 | Normalized type pair | Comparison |
 |---|---|
@@ -130,9 +115,17 @@ For reference, the MVP comparison matrix is:
 | `string` ↔ `double` | Parse with `f64::from_str`, then compare exactly |
 | `boolean` ↔ numeric | Incompatible |
 
-Null/null agrees across compatible types, null/present disagrees, and null is distinct from `NaN`. A parse failure is a mismatch. Hashing uses the same pair-specific canonicalization and always verifies equality after bucketing. Decimal, temporal, binary, and nested types are unsupported by the MVP.
+Null/null agrees across compatible types, while null/present disagrees. All `NaN` values agree with one another but are distinct from null. Positive and negative zero agree. Both null and `NaN` invalidate keys; elsewhere they participate in hashing, agreement, and frequency calculations as distinct categories.
 
-Source types that cannot be represented by these four normalized types, such as binary or nested values, are compared only when their source types are identical. They are not candidates for inferred cross-type renames; the user can supply a rename hint if needed.
+Decimal, temporal, binary, and nested types are unsupported by the MVP.
+
+### String parsing
+
+String parsing is locale-independent, case-sensitive except where Rust specifies otherwise, and does not trim whitespace. Boolean strings use `bool::from_str`; floating-point strings use `f64::from_str`, including its `NaN` and infinity spellings.
+
+Integer strings normally use `i64::from_str`. We also accept `[+-]?[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?` when the exact value is integral and fits in `int64`. Thus `"1"`, `"1.0"`, and `"1e0"` equal integer `1`, while `"1.5"` and out-of-range values fail. This parser uses checked integer arithmetic and never converts through floating point.
+
+Thousands separators, underscores, currency symbols, locale-specific forms, and surrounding whitespace are invalid. A parse failure is a mismatch, not an error. Parsed values are cached, keeping the work linear per string column. A successful string-to-typed comparison preserves column identity while the source-type change remains visible.
 
 ## Empty inputs
 
@@ -140,7 +133,7 @@ Row emptiness and schema emptiness are independent. We always compare schemas no
 
 If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist and have compatible types. No key can be guessed when either side is empty because there are no shared values.
 
-With no matched rows, value-based rename inference is skipped as described below. Column ordering can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
+With no matched rows, value-based rename inference is skipped as described below. Column order can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
 
 ## Initial hint processing
 
@@ -159,50 +152,58 @@ Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hint
 
 ## Key resolution
 
-Next we look for a key that provides a stable row identifier. We proceed in three steps:
+We resolve a stable row identifier from a declared key, a guessed key, or finally row number.
+
+### Key comparison
 
 Key columns need not have identical source or normalized types, but every old/new key-column pair must have compatible types. For a compound key, reconciliation constructs one comparison plan per corresponding column pair and hashes the tuple of canonicalized components.
 
 Missing values and `NaN` invalidate the key. Uniqueness is checked independently on each side after values have been canonicalized by these cross-side comparison plans. This ensures that values such as string `"1.0"` and integer `1` do not create ambiguous row identities.
 
-A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally. If a declared key contains an incompatible type pair, key validation fails and reports the pair to the user. In the MVP, compatible cross-type pairs are integer with double, and string with boolean, integer, or double; boolean and numeric columns are incompatible.
+A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally. An incompatible type pair invalidates a declared key; compatibility follows the matrix above.
 
-1. **Declared key** — If the user supplies a key set, each component identifies an old/new column pair. A component with one name refers to that name on both sides; a component with two names can identify differently named key columns. The paired form establishes column identity before key validation, like a rename hint. Every referenced column must exist exactly once on its respective side, and no old or new column may occur in more than one component. We validate uniqueness in both `old` and `new` before trusting the key:
+### Declared key
 
-   | Unique in `old` | Unique in `new` | Resolution |
-   |---|---|---|
-   | yes | yes | use the key as declared |
-   | yes | no | `new` has fanned out relative to `old` |
-   | no | --- | key is unreliable |
+If the user supplies a key set, each component identifies an old/new column pair. A component with one name refers to that name on both sides; a component with two names can identify differently named key columns. The paired form establishes column identity before key validation, like a rename hint. Every referenced column must exist exactly once on its respective side, and no old or new column may occur in more than one component. We validate uniqueness in both `old` and `new` before trusting the key:
 
-   For the fanout case, let $K_o$ and $K_n$ be the sets of distinct key values in `old` and `new`, and define the affected-key rate as
+| Unique in `old` | Unique in `new` | Resolution |
+|---|---|---|
+| yes | yes | use the key as declared |
+| yes | no | `new` has fanned out relative to `old` |
+| no | --- | key is unreliable |
 
-   $$
-   f = \frac{\left|\{k \in K_o \cap K_n : count_{new}(k) > 1\}\right|}
-            {|K_o \cap K_n|}.
-   $$
+For the fanout case, let $K_o$ and $K_n$ be the sets of distinct key values in `old` and `new`, and define the affected-key rate as
 
-   We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to the next step. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
+$$
+f = \frac{\left|\{k \in K_o \cap K_n : count_{new}(k) > 1\}\right|}
+         {|K_o \cap K_n|}.
+$$
 
-   If a declared key fails validation, reconciliation does not use it. It records an `invalid_key` issue containing the supplied components and all observed reasons, such as missing columns, incompatible types, missing values, or non-uniqueness on either side. It then continues to guessed-key resolution and, if necessary, row-number matching so that the UI still has an initial diff to display. The resulting key records its basis as `guessed` or `row_number`, rather than `declared`, and the unresolved declared-key issue remains visible. When the user supplies a replacement key, reconciliation reruns key validation and all downstream stages.
+We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to key guessing. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
 
-   Fanout is intentionally one-directional. When a declared key is unique in `old` but duplicated in `new`, each new row has one unambiguous old row to compare against. When the key is duplicated in `old`, matching multiple old rows to one new row would require inferring an aggregation, deduplication, or arbitrary pairing. Reconciliation does not attempt this and does not define a reverse-fanout event. Duplication in `old` invalidates the declared key with reason `non_unique_old`; full reconciliation proceeds to its fallback, while the MVP terminates with an invalid-key error.
+If a declared key fails validation, reconciliation records an `invalid_key` issue with all reasons, then continues to key guessing and, if necessary, row-number matching. The fallback basis is recorded as `guessed` or `row_number`, and the issue remains visible. A replacement key reruns validation and all downstream stages.
 
-2. **Guessed key** — If no declared key was provided or survives validation, we search for one. For each compatible column with the same identity on both sides, we compute uniqueness and the overlap between its sets of non-missing values. A candidate must contain no missing values, be unique in both `old` and `new`, and have at least one value in common. We do not infer fanout from a guessed key. We select the candidate with the largest number of shared values, breaking ties by column order because we assume key columns are more likely to occur early in the data.
+Fanout is intentionally one-directional: a unique old row can be compared unambiguously with multiple new rows, while multiple old rows mapping to one new row might represent aggregation, deduplication, or arbitrary pairing. We do not define reverse fanout. Duplication in `old` invalidates the key with reason `non_unique_old`; full reconciliation falls back, while the MVP terminates.
 
-   For each candidate, let $m$ be the number of shared key values and report normalized overlap as
+### Guessed key
 
-   $$
-   r = \frac{m}{\min(n_o, n_n)},
-   $$
+If no declared key survives, we consider compatible, identified single columns that contain no missing values, are unique on both sides, and share at least one value. We select the candidate with the most shared values, breaking ties by column order; guessed keys never infer fanout.
 
-   where $n_o$ and $n_n$ are the row counts of `old` and `new`. The denominator is constant across candidates, so $r$ summarizes the match but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible because candidates require at least one shared value.
+For each candidate, let $m$ be the number of shared key values and report normalized overlap as
 
-3. **Row number** — If we can't find a candidate key, we use row number. This means we can't distinguish a `row_edit()` from `row_drop()` + `row_add()`, and we display a reordering as many edits. But it allows the rest of the process to continue, and will generate an initial display that the user can refine.
+$$
+r = \frac{m}{\min(n_o, n_n)},
+$$
 
-If we reach step 2 or 3, we expose the selected matching basis in the UI so that the user can override it. An override reruns the remainder of the reconciliation process.
+where $n_o$ and $n_n$ are the row counts. The denominator is constant, so $r$ summarizes but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible.
+
+### Row-number fallback
+
+If no candidate key exists, we match by row number. This cannot distinguish a `row_edit()` from `row_drop()` + `row_add()` and represents reordering as many edits, but provides an initial display. Guessed and row-number bases are visible and overrideable in the UI; an override reruns all downstream stages.
 
 ## Row matching
+
+### Classifying key groups
 
 With a key in hand, we hash each row's key value on both sides. For a retained key, which is unique in `old`, we classify each key group in this order:
 
@@ -217,37 +218,31 @@ Side presence is checked before new-side multiplicity. A duplicated key can only
 
 Added and dropped rows are atomic row events. Their cells are not emitted as changed cells and do not participate in row/column edit summarization. Likewise, added and dropped columns remain schema events rather than generating a changed cell for every matched row. The cell-level diff contains only comparisons between identified columns in matched or fanout-related rows.
 
-Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. Once column identities have been resolved, we compare each identified non-key column between the old row and every new row in the group.
+### Fanout events
 
-Each fanout is a self-contained event containing the old row coordinate, all corresponding new row coordinates, and its changed cell pairs. Fanout cells are not added to the top-level changed-cell set, do not participate in row/column edit summarization, and are not used for rename inference. Added and dropped columns remain schema operations rather than being expanded into fanout cell changes. A fanout with no changed non-key cells remains an event because the duplication itself is the important change.
+For a shared key duplicated in `new`, all new rows form one fanout group. Once column identities are resolved, we compare every identified non-key column between the old row and each new row.
+
+A fanout event contains the old row coordinate, all new row coordinates, and its changed cell pairs. These cells remain inside the event and are excluded from the top-level cell set, edit summarization, and rename inference. Added and dropped columns remain schema operations. The fanout remains an event even when all comparable values are unchanged.
 
 ## Aligned matched rows
 
 We create `old_matching` and `new_matching` from the one-to-one common rows. Matched pairs are ordered by their original position in `old`: `old_matching` contains each old row in that order, and `new_matching` contains its corresponding new row in the same position. The two tables are therefore aligned for column hashing and cell comparison without requiring a total ordering over key values. Each entry retains both rows' original positions for output coordinates. Added, dropped, and fanout rows remain outside these tables.
 
-Before aligning the matched rows, we compare their identities in the original old and new input orders. Added, dropped, and fanout rows are excluded. We find a longest common subsequence (LCS) of these identities. Rows in the LCS retained their relative order; rows outside it are the minimum set of rows that must move to explain the reordering. Because matched-row identities are unique, we use the same linearithmic longest-increasing-subsequence algorithm as for column ordering.
-
-We break ties by retaining the LCS whose sequence of original old-row positions is lexicographically earliest. The structured diff records each moved row using its collapsed old/new coordinate. An empty list means that relative order did not change.
-
-For example, if old rows `[a, b, c]` become `[x, c, a, b]`, `x` is handled as an addition, the LCS retains `[a, b]`, and `c` is the sole moved row. Fanout rows are excluded because a one-to-many relationship does not have a single position on the new side; their ordering remains part of the fanout event.
-
 ## Rename inference
 
 Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. We compare only columns with compatible types. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
 
-There are three steps for rename inference:
-
-1. Look for exact renames.
-2. Look for approximate renames.
-3. Look for swaps.
-
 We first generate candidate lists of adds, drops, and edits, excluding the endpoints reserved by valid add/drop hints and the identities protected by valid edit hints. Rename identities from initial hint processing have already been applied before key matching.
 
-We first look for exact renames. We hash each remaining removed and added column over the matched rows, then compare columns with equal hashes to verify that their values are identical. If an old column and a new column match only each other, they become a `col_rename()`. If multiple pairings are possible because columns have identical hashes/values, we match them in column order and allow the user to override the result in the UI. Initially, exact inference has no minimum row-count, cardinality, or information-content requirement; we will add one only if practical experience reveals problematic false positives.
+### Exact renames
 
-Next we look for approximate renames among the remaining unmatched removed and added columns. We expect rename-and-modify to be relatively rare, so this is a small, bounded search. We impose fixed limits on both the number of candidate pairs and the number of matched rows examined. Candidate pairs are processed in deterministic endpoint groups. We accept a rename only after every candidate incident to both its old and new endpoint has been examined. If the pair budget is exhausted, we retain renames from fully examined groups and leave endpoints from incomplete groups unresolved rather than treating their unexamined pairs as non-matches. If there are too many matched rows, we take a deterministic sample based on the key so that repeated runs produce the same result; completing inference over that defined sample is not budget exhaustion.
+We hash each remaining removed and added column over the matched rows, then verify equal-hash pairs. A mutually unique exact pair becomes a `col_rename()`; ambiguous exact pairs are matched in column order and remain overrideable. Initially there is no minimum row-count or information-content requirement.
 
-We require at least 20 aligned, one-to-one row pairs before attempting approximate inference. All aligned pairs count as observations, including missing values: null/null agrees, while null/present disagrees. If fewer than 20 pairs are available, we retain the columns as additions and removals and record an `approximate_rename_insufficient_rows` issue. The minimum is an implementation parameter that can be tuned with practical experience.
+### Approximate renames
+
+Among remaining pairs, approximate rename-and-modify inference uses bounded candidate counts and matched rows. Candidate pairs are processed in deterministic endpoint groups. We accept a rename only after examining every candidate incident to both endpoints. If the pair budget is exhausted, completed groups remain accepted and incomplete endpoints remain unresolved. Large row sets use a deterministic key-based sample; completing inference over that sample is not budget exhaustion.
+
+Approximate inference requires at least 20 aligned pairs. All pairs count, including null/null agreements and null/present disagreements. With fewer rows, we retain additions/removals and record `approximate_rename_insufficient_rows`. The minimum is tunable.
 
 For each compatible pair in the sample, let $p_o$ be the observed proportion of equal values. Raw agreement is less informative for low-cardinality columns, where unrelated columns may often agree by chance, so we also calculate the expected agreement from the two columns' value frequencies:
 
@@ -263,41 +258,43 @@ $$
 \kappa = \frac{p_o - p_e}{1 - p_e}
 $$
 
-A pair is an approximate-rename candidate if $p_o > 0.9$ and $\kappa > 0.8$. If $p_e = 1$, $\kappa$ is undefined, and the pair is not a candidate. These initial thresholds are deliberately conservative and can be tuned with experience.
+A pair is a candidate if $p_o > 0.9$ and $\kappa > 0.8$. If $p_e = 1$, $\kappa$ is undefined and the pair is rejected. These thresholds are deliberately conservative and tunable.
 
-We accept a candidate only when it is the sole candidate for both the old and new columns. If candidates overlap --- for example, if one old column plausibly matches two new columns ---  we leave resolution up to the user. We deliberately avoid more complex assignment algorithms: ambiguity here is unusual, and user input is more valuable than a sophisticated guess.
+We accept only mutually unique candidates; overlapping candidates remain for the user rather than invoking a complex assignment algorithm.
 
-Finally, we check whether pairs of heavily edited, same-named columns might actually have been swapped. A same-name pair is heavily edited when fewer than 50% of its aligned values agree. Columns `a` and `b` form a swap candidate when at least 20 aligned, one-to-one rows are available; both same-name pairs have $p_o < 0.5$; both cross-pairs `old.a`/`new.b` and `old.b`/`new.a` have compatible types; and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
+### Swaps
+
+We also test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when at least 20 aligned rows exist, both same-name pairs have $p_o < 0.5$, both cross-pairs have compatible types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
 
 Agreement, missing values, parsing, deterministic sampling, and expected agreement use the same rules as approximate rename inference. We accept a swap only when each involved column belongs to exactly one candidate; competing swaps remain unresolved for the user. An accepted swap atomically updates the identity bijection as described above, replacing the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. The 50%, 90%, 80%, and 20-row thresholds are tunable implementation parameters.
 
-## Column ordering
+## Ordering changes
 
-Once column identities have been resolved, we compare the relative order of the identified columns. We remove dropped columns from the old sequence and added columns from the new sequence, then replace every remaining column with its resolved identity. Renaming a column without moving it therefore does not count as a reordering, and inserting or removing a column does not by itself make the surrounding columns appear to move.
+Rows and columns use the same ordering algorithm. We compare their resolved identity sequences after excluding additions and drops; fanout rows are also excluded because they have no single new position. Renames retain identity and therefore do not count as moves.
 
-We find a longest common subsequence (LCS) of the two identity sequences. Columns in the LCS retained their relative order; columns outside it are the minimum set of columns that must move to explain the reordering. Because column identities are unique, this can be implemented as a longest-increasing-subsequence problem in linearithmic time rather than with a general quadratic LCS algorithm.
+We find a longest common subsequence (LCS). Identities in the LCS retained relative order; those outside it are the minimum set that must move. Because identities are unique, this is a linearithmic longest-increasing-subsequence problem. When multiple LCSs exist, we retain the one whose old-position sequence is lexicographically earliest. Moved identities use collapsed old/new coordinates; an empty list means no reordering.
 
-There may be multiple longest common subsequences. We deterministically retain the one whose sequence of original old-column positions is lexicographically earliest. This tends to treat an earlier part of the old schema as stable and describe later columns as moving around it.
+For rows, `[a, b, c]` → `[x, c, a, b]` treats `x` as an addition, retains `[a, b]`, and reports `c` as moved. Fanout ordering stays inside the fanout event.
 
-For example, inserting `x` to transform `[a, b]` into `[x, a, b]` is only a column addition: after removing `x`, the two identity sequences are identical. Transforming `[a, b, c]` into `[c, a, b]` retains the subsequence `[a, b]` and reports `c` as the single moved column. Transforming `[a, b, c]` into `[c, a]` first removes the dropped column `b`, then compares `[a, c]` with `[c, a]`; the tie-break retains `a` and reports `c` as moved.
-
-The structured diff records each moved column using its collapsed old/new coordinate. An empty list means that relative order did not change.
+For columns, `[a, b]` → `[x, a, b]` is only an addition. `[a, b, c]` → `[c, a, b]` reports only `c` as moved. For `[a, b, c]` → `[c, a]`, drop `b`, compare `[a, c]` with `[c, a]`, retain `a` by the tie-break, and report `c`.
 
 ## Value changes
 
+### Cell comparison
+
 Now that we have row keys and consistent column identities, we compare non-key cell values over the one-to-one matched rows. This produces a top-level set of changed cells, `[(row1, col1), (row2, col2), ...]`, scattered across rows and columns. We retain the complete one-to-one cell-level change set for display and later summarization. Changed cells from one-to-many comparisons remain nested inside their fanout events as described above.
-
-`col_edit()` is a semantic event for an identified column with a type change, summarized value changes, or both. Each event records independent `type_changed` and `values_changed` aspects. The original and normalized schemas and complete cell diff remain the evidence for those aspects rather than competing semantic operations. A type change whose normalized values all compare equal is displayed only in the schema section: it has `type_changed: true`, `values_changed: false`, no changed cells, and no value-difference display. A source type change must never manufacture changed cells.
-
-Type changes force their columns into the edit summary before minimum-cover optimization. If such a column does contain changed cells, those cells set `values_changed: true` and are already covered by the forced column event, so we remove them before summarizing the remaining graph. The complete cell set remains available for display.
 
 Key columns are excluded from the top-level changed-cell set because unequal key values identify different rows rather than an edited cell. However, an identified key column still produces a `col_edit()` event when its source type changes or its representation is otherwise transformed while canonical key values remain equal. For example, changing key values from string `"001"` to integer `1` is a column edit even though those values match for row identity. Key-column edits are derived directly from schema or representation differences and do not participate in the row/column minimum-cover graph. A key column may also be renamed; rename and edit are independent semantic facts. The initial implementation only needs to detect key-column edits from source-type changes.
 
-A valid `col_edit()` hint forces a column to be represented as a column event if it contains at least one changed cell. We first select the hinted columns and remove their incident cells from the change set. We then summarize the remaining cells normally. This preserves all observed changes while preventing a hinted column edit from being reinterpreted as a collection of row edits. A type-only edit has no incident changed cells to remove and is already represented by the schema comparison. We ignore and report a `col_edit()` hint for an absent column or one with neither value nor type changes.
+### Column edit events
 
-Before minimum-cover optimization, we coalesce all columns forced by type changes or valid `col_edit()` hints into one event per identity and remove every changed-cell edge incident to them. We compute an exact minimum vertex cover of the remaining graph. The final summary is therefore minimum subject to the forced column events; it is not necessarily a globally minimum cover of the original graph. Forced events and the remaining summary events together must still cover every changed cell.
+`col_edit()` records independent `type_changed` and `values_changed` aspects for an identified column. Schemas and cells remain the underlying evidence. A type-only change has no changed cells and appears only in the schema display; source-type changes never manufacture cells. Rename and edit are independent facts.
 
-For the remaining cell-level change set, we need to decide whether to report `row_edit()`, `col_edit()`, or both, reducing it to the minimum additional set of row and column events that accounts for every remaining changed cell.
+Before summarization, we force columns with type changes or valid `col_edit()` hints into the edit set, coalescing duplicates by identity. A hint is ignored and reported if its column is absent or has neither type nor value changes. Incident cells set `values_changed: true` and are removed from the graph, while remaining available in the complete cell set.
+
+### Minimum vertex cover
+
+For the remaining cells, we choose the minimum additional set of `row_edit()` and `col_edit()` events. The final summary is therefore minimum subject to forced column events, not necessarily a global minimum of the original graph.
 
 We model this as a bipartite graph with one vertex per affected row, one vertex per affected column, and an edge for every changed cell. Choosing rows to mark `row_edit()` and columns to mark `col_edit()` so that every changed cell is covered by at least one marked row or column is then a **minimum vertex-cover problem on a bipartite graph**. Unlike vertex cover on a general graph, which is NP-hard, the bipartite case can be solved exactly in polynomial time. König's theorem tells us that the size of the minimum vertex cover equals the size of the maximum matching, and the cover can be recovered from the matching by the standard alternating-path construction.
 
@@ -305,13 +302,17 @@ This objective depends only on the number of events, not on the proportion of va
 
 There can be multiple minimum vertex covers. Any minimum cover is acceptable; the only semantic requirement is that it contains the fewest possible events. The implementation should use stable traversal and iteration order so that repeated runs on the same input produce the same cover, but no particular minimum cover is preferred over another. Tests should generally assert minimum size and complete edge coverage rather than a particular tied cover, except when testing the chosen implementation's determinism.
 
+### Bounded optimization
+
 Maximum matching is superlinear in the worst case, so we apply it only within fixed budgets for vertices, edges, and elapsed work. We always maintain a valid cover, initially choosing all affected vertices from the smaller side of the bipartite graph. During bounded optimization we retain any smaller valid cover found. If exact optimization does not finish, we return the best valid cover found with `optimal: false`; every changed cell remains covered, but the summary may contain more events than necessary. The concrete budgets are implementation parameters that should be chosen through benchmarking.
 
 # Implementation
 
+## Architecture
+
 The first implementation will be written in Rust, with the reconciliation engine implemented as a library and a small command-line binary used to exercise it. The engine takes two typed tables plus optional keys and column hints, and returns a structured diff. Eventually, the UI will render that diff, report any issues, and rerun reconciliation when the user changes a key or hint. Keeping this boundary narrow will make the reconciliation logic easy to test without involving the UI.
 
-The goal of the first implementation pass is to work out the reconciliation process, not to build the UI. It should therefore write the structured diff as JSON, including any issues or unresolved ambiguities. This gives us an inspectable output for developing fixtures and refining the algorithms while postponing presentation decisions until the underlying model is stable.
+## Command line
 
 The initial command-line interface should be:
 
@@ -323,6 +324,10 @@ data-diff old.parquet new.parquet --key customer_id/id,date,region_code/region
 
 We still need to decide how other hints will be supplied. That decision is not required for the MVP, which does not support hints and accepts only bare, same-name key components. Paired key components should be added with rename-hint support in implementation step 3. Later, the engine should accept hints independently of whatever command-line or UI syntax we choose.
 
+## Structured output
+
+The first implementation is intended to refine reconciliation, not build the UI. It writes an inspectable JSON diff, including issues and ambiguities, for developing fixtures and algorithms.
+
 The structured diff should preserve information rather than prematurely reducing it. At a minimum, it needs to contain:
 
 * the original and normalized schemas, plus the resolved semantic schema differences;
@@ -333,7 +338,9 @@ The structured diff should preserve information rather than prematurely reducing
 * the chosen row/column summary; and
 * ignored hints, unresolved ambiguities, and exhausted computation budgets.
 
-The JSON output only needs to identify operations and their coordinates; it does not need to include old or new cell values. Coordinates refer to one-based row and column positions in the original inputs. We use the same collapsing convention for every old/new relationship:
+### Coordinates
+
+The JSON output identifies operations and coordinates without embedding cell values, avoiding encodings for large integers, decimals, `NaN`, infinities, temporal, binary, or nested values. Coordinates refer to one-based positions in the original inputs. We use the same collapsing convention for every old/new relationship:
 
 * A one-sided coordinate is an integer.
 * An old/new position is a single integer when the positions are the same, and `[old, new]` otherwise.
@@ -342,6 +349,8 @@ The JSON output only needs to identify operations and their coordinates; it does
 Additions and removals are stored separately, so they do not require a sentinel coordinate. Arrays are emitted in deterministic input/coordinate order. An empty array means that a stage ran and found no corresponding changes; `null` means that the stage was not run or did not produce a resolved result, with the reason recorded as an issue.
 
 The complete resolved mapping between old and new columns is stored as `identities`. A rename is derived when the names at the two ends of an identity differ, so it is not also stored as a separate operation. Additions and removals must be stored explicitly because they have no identity on the other side. Edits are also stored explicitly because identity alone does not imply that a column's type or values changed.
+
+### Example
 
 For example, an experimental result might look like:
 
@@ -399,6 +408,8 @@ For example, an experimental result might look like:
 
 Here old column 3 and new column 2 have the same identity; because their schema names differ, this represents a rename from `value` to `amount`. Their values also changed, so the same identity occurs in `edited` with `values_changed: true`. The example is illustrative rather than a stable public contract: the representation can evolve as we use it for testing and experimentation.
 
+### Bounded results
+
 Reaching a computation budget does not suppress a usable result or stop downstream reconciliation. For example, a valid summary returned before exact optimization finishes might look like:
 
 ```json
@@ -420,7 +431,7 @@ Reaching a computation budget does not suppress a usable result or stop downstre
 
 The summary still covers every changed cell; `optimal: false` means only that a smaller cover might exist. Similarly, partial inference uses `exhaustive: false` to indicate unexamined candidates while retaining usable identities and continuing downstream.
 
-Coordinate-only output avoids defining JSON encodings for values such as large integers, decimals, `NaN`, infinities, dates, timestamps, binary data, or nested values.
+## Comparison infrastructure
 
 Each comparison should use a comparison plan derived from the two column types. Hashing and equality within that plan must use the same canonicalization, so values that compare equal always have equal hashes. Key matching, rename inference, and cell comparison should all use this shared comparison layer. Operations should be deterministic: samples, ambiguous exact matches, and tie-breaks must depend only on the input data and its original ordering.
 
@@ -431,6 +442,8 @@ Hash equality is never sufficient for value equality. Hashes form candidate buck
 Expensive stages accept explicit budgets and return the best valid result completed within them. An inference stage records whether its search was exhaustive and, when it was not, the exhausted budget and unresolved coordinates or candidates. An optimization stage such as summarization records whether its valid result is optimal. Downstream stages continue using partial results and inherit an `incomplete_input` marker when their interpretation may change after more upstream work. Unexamined candidates must never be treated as confirmed non-matches. Increasing a budget or adding a hint reruns the affected stage and its downstream consumers, so partial results may improve or change.
 
 ## MVP
+
+### Scope
 
 The MVP should exercise the complete path from two Parquet files to a JSON description of their differences while avoiding inference. It should require the user to supply a key using bare components whose columns have the same names in both datasets. Because it has no resolution UI or key guessing, a key that is missing, contains missing values, has incompatible types, or is not unique on either side terminates the comparison with an error. It does not need to support fanout, guessed keys, paired key components, column hints, rename inference, or an interactive UI.
 
@@ -445,6 +458,8 @@ The MVP supports:
 * nulls within any supported typed column.
 
 The MVP rejects decimals; binary and fixed-size binary values; lists, structs, maps, and other nested values; dates, times, timestamps, durations, and intervals; and any other Arrow or Parquet logical type not listed above. If either input contains an unsupported column, the MVP rejects the entire comparison and identifies the column and its source type. It does not silently omit the column or return a partial diff. Support for these types can be added later.
+
+### Behavior
 
 The MVP behavior is summarized below:
 
@@ -469,6 +484,8 @@ The MVP behavior is summarized below:
 
 This table specifies engine outcomes, not process-level exit codes, stderr formatting, or other supported-CLI guarantees.
 
+### End-to-end path
+
 For this restricted case, the engine should:
 
 1. Read the two files and compare their schemas.
@@ -480,13 +497,15 @@ For this restricted case, the engine should:
 
 Initially, the JSON can list affected rows, columns, and cells without trying to find the optimal `row_edit()`/`col_edit()` summary. This makes the reconciliation result easy to inspect while establishing the data structures needed by every later stage.
 
-It's also important to build a solid testing system so that it's easy to generate variable inputs and compactly assert that the results are correct. It's very important that the tests be easy to read and understand in isolation.
+### Testing
+
+The test system should make variable inputs easy to generate and results compact to assert. Every test should remain readable and understandable in isolation.
 
 ## Implementation order
 
 Once the end-to-end MVP works, additional reconciliation features should be added in dependency order:
 
-1. **Value-change summarization.** Add minimum bipartite vertex cover and deterministic tie-breaking. This improves the presentation without changing row or column identity.
+1. **Value-change summarization.** Add minimum bipartite vertex cover with stable selection among tied covers. This improves the presentation without changing row or column identity.
 2. **Key guessing.** Find eligible single-column keys, rank them by the number of matched rows, and report $r$ as a normalized overlap summary. Let the user override the result, rerunning row matching and all downstream stages after an override.
 3. **Rename hints.** Add `col_rename()` before key resolution, then `col_add()`, `col_drop()`, and `col_edit()` at their respective reconciliation stages. Surface ignored or contradictory hints in the UI.
 4. **Exact rename inference.** Use the aligned matched rows to detect identical removed/added columns. This depends on stable row matching but requires no heuristic thresholds.
