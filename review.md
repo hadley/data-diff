@@ -637,6 +637,11 @@ whether it belongs in the MVP are unspecified.
 **Response:**
 lets drop it for now. Move reading https://data-dict.tidyverse.org to future work.
 
+**Resolution:**
+Removed `data-dict.yaml` from declared-key resolution. Future work may
+investigate data-dict metadata, with discovery, supported fields, validation,
+and precedence designed when the integration is implemented.
+
 ### 34. Normalized overlap `r` is introduced late
 
 Line 244 requires reporting `r`, but its definition only appears in the future

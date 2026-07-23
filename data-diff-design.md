@@ -141,7 +141,7 @@ Missing values and `NaN` invalidate the key. Uniqueness is checked independently
 
 A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally. If a declared key contains an incompatible type pair, key validation fails and reports the pair to the user. In the MVP, compatible cross-type pairs are integer with double, and string with boolean, integer, or double; boolean and numeric columns are incompatible.
 
-1. **Declared key** — If the user supplies a key set, either directly or through `data-dict.yaml`, each component identifies an old/new column pair. A component with one name refers to that name on both sides; a component with two names can identify differently named key columns. The paired form establishes column identity before key validation, like a rename hint. Every referenced column must exist exactly once on its respective side, and no old or new column may occur in more than one component. We validate uniqueness in both `old` and `new` before trusting the key:
+1. **Declared key** — If the user supplies a key set, each component identifies an old/new column pair. A component with one name refers to that name on both sides; a component with two names can identify differently named key columns. The paired form establishes column identity before key validation, like a rename hint. Every referenced column must exist exactly once on its respective side, and no old or new column may occur in more than one component. We validate uniqueness in both `old` and `new` before trusting the key:
 
    | Unique in `old` | Unique in `new` | Resolution |
    |---|---|---|
@@ -428,6 +428,10 @@ The MVP rejects dates, times, timestamps, durations, and intervals. Future tempo
 Compatibility and conversion rules should be defined separately for each category. Only timestamps that represent instants should be converted to UTC. Changes in source units and time-zone metadata should remain visible as schema differences even when normalized values compare equal.
 
 When temporal parsing is added, strings should use the applicable ISO 8601 representation, with the exact accepted profiles specified separately for dates, local times, zoned instants, and unzoned timestamps.
+
+## Data dictionaries
+
+Future work should investigate reading key declarations and other metadata from [data-dict](https://data-dict.tidyverse.org). File discovery, supported metadata, validation, and precedence relative to command-line or UI choices should be designed when this integration is implemented.
 
 ## Compound key guessing with HyUCC
 
