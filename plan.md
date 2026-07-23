@@ -4,14 +4,14 @@ title: data-diff implementation plan
 
 # MVP todo
 
-- [ ] **Scaffold the library, CLI, and test harness.** Create one Rust package with
+- [x] **Scaffold the library, CLI, and test harness.** Create one Rust package with
   a library that accepts two Arrow `RecordBatch` values plus options and a thin
   `data-diff` binary that reads Parquet files. Add concise builders for in-memory
   test tables, a placeholder result assertion, and temporary Parquet fixtures.
   The initial `cargo test` should exercise one library call and one CLI
   invocation; complete structured diff assertion helpers arrive with the result
   model. Start from the shared dependency baseline described below.
-- [ ] **Define the result model.** Add types for schemas, column identities, keys,
+- [x] **Define the result model.** Add types for schemas, column identities, keys,
   row matches, ordering changes, changed cells, and errors. Implement one-based
   collapsed coordinates and deterministic JSON serialization, with focused unit
   tests for every coordinate shape.

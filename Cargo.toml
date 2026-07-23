@@ -1,0 +1,26 @@
+[package]
+name = "data-diff"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+arrow-array = "54"
+arrow-schema = "54"
+arrow-select = "54"
+clap = { version = "4", features = ["derive"] }
+parquet = { version = "54", default-features = false, features = [
+    "arrow",
+    "snap",
+    "flate2",
+    "lz4",
+    "zstd",
+    "brotli",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+indoc = "2"
+insta = { version = "1", features = ["json"] }
