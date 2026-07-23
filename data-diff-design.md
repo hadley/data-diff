@@ -68,6 +68,14 @@ With those preliminaries in place, we can outline the full reconciliation proces
 7. Determine column reordering.
 8. Determine value changes.
 
+## Column identity
+
+Column identity is a partial bijection $I \subseteq C_{old} \times C_{new}$: each old column and each new column appears in at most one pair. Paired key components and accepted rename hints reserve identities first. Remaining same-named columns receive provisional identities, and exact or approximate rename inference adds identities between unmatched columns.
+
+Swap detection atomically replaces two provisional same-name identities. For example, `old.a` → `new.a` and `old.b` → `new.b` become `old.a` → `new.b` and `old.b` → `new.a`. Because identity is a bipartite coordinate map rather than a name-to-name graph, this is not considered a rename cycle. Any hint or inference that would reuse an old or new endpoint is contradictory or ambiguous and cannot mutate the map.
+
+An unmatched old column is a drop and an unmatched new column is an addition. A rename is derived whenever the schema names at the ends of a final identity differ. Type changes, edits, cell coordinates, and column-order analysis attach to the final identity. The structured diff stores the complete final bijection in `columns.identities` using collapsed coordinates.
+
 ## Schema normalization
 
 We first compare the two schemas, recording column additions, removals, reorderings, and type changes. Schema additions and removals recorded at this stage are provisional. If later reconciliation establishes an identity between a removed and added column, the structured diff replaces those provisional operations with the semantic rename. It does not retain redundant drop/add operations. The original schemas remain available if a consumer needs to reconstruct the initial syntactic comparison.

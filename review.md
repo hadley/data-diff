@@ -472,6 +472,13 @@ bijective mapping model is needed.
 **Response:**
 Yes, include a bijective map
 
+**Resolution:**
+Column identity is a partial bijection between old and new column coordinates.
+Hints reserve endpoints, same-name identities are provisional, rename inference
+adds unmatched pairs, and swap detection atomically replaces two pairs.
+Unmatched endpoints are drops/adds; renames derive from differing endpoint
+names. Any operation that reuses an endpoint is contradictory or ambiguous.
+
 ### 25. “Heavily edited” is undefined
 
 Swap detection says it examines heavily edited columns, but gives no threshold
