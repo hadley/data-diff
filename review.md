@@ -590,6 +590,14 @@ one after only summary construction times out. The result should say:
 **Response:**
 Yes
 
+**Resolution:**
+Budgeted stages return the best valid partial result rather than suppressing
+downstream work. Rename pairs are processed in endpoint groups and accepted
+only when all candidates incident to both endpoints were examined. Minimum
+cover always retains a valid cover and marks it `optimal: false` if exact
+search stops. Incomplete stages identify unresolved work, and dependent
+downstream results carry `incomplete_input`.
+
 ## Smaller mistakes and inconsistencies
 
 ### 31. There are five normalized types, not four
