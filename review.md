@@ -170,6 +170,13 @@ explicit rule.
 **Response:**
 So maybe we don't need to sort then? We just match?
 
+**Resolution:**
+Do not sort keys. Align one-to-one matches in original old-row order:
+`old_matching` contains the old rows in that order and `new_matching` contains
+their corresponding new rows in the same positions. Retain both original row
+coordinates. This provides deterministic alignment without requiring a total
+order over heterogeneous or compound keys.
+
 ### 8. Supported MVP Parquet types are unclear
 
 Line 229 says to normalize supported scalar types, while line 100 says

@@ -63,7 +63,7 @@ With those preliminaries in place, we can outline the full reconciliation proces
 2. Apply rename hints.
 3. Resolve row keys.
 4. Match rows, including duplicate-key groups.
-5. Create canonical datasets for comparison.
+5. Create aligned datasets for comparison.
 6. Detect column renaming.
 7. Determine column reordering.
 8. Determine value changes.
@@ -143,11 +143,11 @@ With a key in hand, we hash each row's key value on both sides:
 
 Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. We align the old row with each new row in the group so that we can compare their values. These one-to-many alignments are kept separate from the one-to-one matches used to infer column renames.
 
-## Canonical row ordering
+## Aligned matched rows
 
-We then create `old_matching` and `new_matching`, which contain only the one-to-one common rows, ordered by key. We use these datasets for all subsequent steps.
+We create `old_matching` and `new_matching` from the one-to-one common rows. Matched pairs are ordered by their original position in `old`: `old_matching` contains each old row in that order, and `new_matching` contains its corresponding new row in the same position. The two tables are therefore aligned for column hashing and cell comparison without requiring a total ordering over key values. Each entry retains both rows' original positions for output coordinates. Added, dropped, and fanout rows remain outside these tables.
 
-Before canonical ordering, we compare the matched-row identities in their original old and new input orders. Added, dropped, and fanout rows are excluded. We find a longest common subsequence (LCS) of these identities. Rows in the LCS retained their relative order; rows outside it are the minimum set of rows that must move to explain the reordering. Because matched-row identities are unique, we use the same linearithmic longest-increasing-subsequence algorithm as for column ordering.
+Before aligning the matched rows, we compare their identities in the original old and new input orders. Added, dropped, and fanout rows are excluded. We find a longest common subsequence (LCS) of these identities. Rows in the LCS retained their relative order; rows outside it are the minimum set of rows that must move to explain the reordering. Because matched-row identities are unique, we use the same linearithmic longest-increasing-subsequence algorithm as for column ordering.
 
 We break ties by retaining the LCS whose sequence of original old-row positions is lexicographically earliest. The structured diff records each moved row using its collapsed old/new coordinate. An empty list means that relative order did not change.
 
@@ -155,7 +155,7 @@ For example, if old rows `[a, b, c]` become `[x, c, a, b]`, `x` is handled as an
 
 ## Rename inference
 
-Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the canonically ordered, one-to-one matched rows; fanout groups are excluded. We compare only columns with compatible types. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
+Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. We compare only columns with compatible types. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
 
 There are four steps for rename inference:
 
@@ -212,7 +212,7 @@ We model this as a bipartite graph with one vertex per affected row, one vertex 
 
 This objective depends only on the number of events, not on the proportion of values changed within each row or column. For example, if three changed cells all belong to one column, we report one `col_edit()` rather than three `row_edit()` events, even if most values in that column are unchanged.
 
-There can be multiple covers with the same number of events. We resolve these deterministically, preferring columns over rows, then original column order or canonical row order. These preferences are only tie-breakers and must never increase the number of events.
+There can be multiple covers with the same number of events. We resolve these deterministically, preferring columns over rows, then original column order or aligned row order. These preferences are only tie-breakers and must never increase the number of events.
 
 Maximum matching is superlinear in the worst case, so we apply it only within fixed budgets for vertices, edges, and elapsed work. If the changed-cell graph exceeds any budget, we retain the complete cell-level diff but do not guess a row/column summary. Instead, we ask the user whether to summarize primarily by rows or by columns. The concrete budgets are implementation parameters that should be chosen through benchmarking.
 
@@ -323,7 +323,7 @@ Once the end-to-end MVP works, additional reconciliation features should be adde
 1. **Value-change summarization.** Add minimum bipartite vertex cover and deterministic tie-breaking. This improves the presentation without changing row or column identity.
 2. **Key guessing.** Find eligible single-column keys, rank them by the number of matched rows, and report $r$ as a normalized overlap summary. Let the user override the result, rerunning row matching and all downstream stages after an override.
 3. **Rename hints.** Add `col_rename()` before key resolution, then `col_add()`, `col_drop()`, and `col_edit()` at their respective reconciliation stages. Surface ignored or contradictory hints in the UI.
-4. **Exact rename inference.** Use the canonically matched rows to detect identical removed/added columns. This depends on stable row matching but requires no heuristic thresholds.
+4. **Exact rename inference.** Use the aligned matched rows to detect identical removed/added columns. This depends on stable row matching but requires no heuristic thresholds.
 5. **Declared-key fanout.** Permit limited duplication in `new` for a declared key, keeping fanout groups separate from the one-to-one rows used for rename inference.
 6. **Approximate rename inference.** Add chance-corrected agreement and resolution of ambiguous mappings. At this stage, it can examine all candidate pairs and matched rows.
 7. **Swap detection.** Compare heavily edited same-named columns for the relatively rare case where two columns have exchanged identities.
