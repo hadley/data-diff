@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::Serialize;
 
 /// Options that influence reconciliation.
@@ -10,6 +12,26 @@ pub struct DiffOptions {
 /// An error that prevents a complete diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffError {
+    /// A Parquet input could not be opened or decoded.
+    ReadParquet { path: PathBuf, message: String },
+    /// Top-level column names are not unique.
+    DuplicateColumnNames {
+        side: Side,
+        duplicates: Vec<DuplicateColumnName>,
+    },
+    /// A column is outside the MVP type set.
+    UnsupportedColumn {
+        side: Side,
+        column: String,
+        source_type: String,
+    },
+    /// An unsigned value cannot be represented as an `int64`.
+    IntegerOutOfRange {
+        side: Side,
+        column: String,
+        source_type: String,
+        row: usize,
+    },
     /// Reconciliation has not been implemented yet.
     NotImplemented,
 }
@@ -17,12 +39,65 @@ pub enum DiffError {
 impl std::fmt::Display for DiffError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            DiffError::ReadParquet { path, message } => {
+                write!(f, "cannot read {}: {message}", path.display())
+            }
+            DiffError::DuplicateColumnNames { side, duplicates } => {
+                write!(f, "{side} has duplicate column names: ")?;
+                for (index, duplicate) in duplicates.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{} at {:?}", duplicate.name, duplicate.positions)?;
+                }
+                Ok(())
+            }
+            DiffError::UnsupportedColumn {
+                side,
+                column,
+                source_type,
+            } => write!(
+                f,
+                "{side} column {column:?} has unsupported type {source_type}"
+            ),
+            DiffError::IntegerOutOfRange {
+                side,
+                column,
+                source_type,
+                row,
+            } => write!(
+                f,
+                "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
+            ),
             DiffError::NotImplemented => f.write_str("reconciliation is not implemented yet"),
         }
     }
 }
 
 impl std::error::Error for DiffError {}
+
+/// Which input produced a validation issue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Old,
+    New,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Side::Old => f.write_str("old"),
+            Side::New => f.write_str("new"),
+        }
+    }
+}
+
+/// Every occurrence of one duplicated top-level name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateColumnName {
+    pub name: String,
+    pub positions: Vec<usize>,
+}
 
 /// A one-based old/new position, collapsed when the positions agree.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -52,8 +52,16 @@ impl Drop for TempDir {
 
 /// Write one batch as a Parquet fixture.
 pub fn write_parquet(path: &Path, batch: &RecordBatch) {
+    write_parquet_batches(path, std::slice::from_ref(batch));
+}
+
+/// Write multiple batches to one Parquet file in their given order.
+pub fn write_parquet_batches(path: &Path, batches: &[RecordBatch]) {
+    assert!(!batches.is_empty());
     let file = std::fs::File::create(path).unwrap();
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
-    writer.write(batch).unwrap();
+    let mut writer = ArrowWriter::try_new(file, batches[0].schema(), None).unwrap();
+    for batch in batches {
+        writer.write(batch).unwrap();
+    }
     writer.close().unwrap();
 }

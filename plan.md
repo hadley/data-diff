@@ -15,7 +15,7 @@ title: data-diff implementation plan
   row matches, ordering changes, changed cells, and errors. Implement one-based
   collapsed coordinates and deterministic JSON serialization, with focused unit
   tests for every coordinate shape.
-- [ ] **Load and validate inputs.** Read both Parquet files into memory, reject
+- [x] **Load and validate inputs.** Read both Parquet files into memory, reject
   duplicate top-level names and unsupported types, concatenate row groups into
   one `RecordBatch` per side, eagerly validate that unsigned values fit in
   `int64`, and retain source and normalized schemas. Test each supported physical
