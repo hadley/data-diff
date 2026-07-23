@@ -732,6 +732,12 @@ exact original files.
 **Response:**
 Correct, again this is just for internal work.
 
+**Resolution:**
+Coordinate-only applies to operations, not schema metadata: the result retains
+names and types in its old/new schemas. It is interpreted alongside the
+original inputs during experimentation; standalone archival portability is not
+a goal.
+
 ### 40. Determinism needs a stability boundary
 
 “Repeated runs” might mean within one process, one binary version, or across
