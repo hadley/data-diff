@@ -162,7 +162,9 @@ With a key in hand, we hash each row's key value on both sides. For a retained k
 
 Side presence is checked before new-side multiplicity. A duplicated key can only be fanout when an old row exists to fan out from; otherwise every new row in the group is an addition.
 
-Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. We align the old row with each new row in the group so that we can compare their values. These one-to-many alignments are kept separate from the one-to-one matches used to infer column renames.
+Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. Once column identities have been resolved, we compare each identified non-key column between the old row and every new row in the group.
+
+Each fanout is a self-contained event containing the old row coordinate, all corresponding new row coordinates, and its changed cell pairs. Fanout cells are not added to the top-level changed-cell set, do not participate in row/column edit summarization, and are not used for rename inference. Added and dropped columns remain schema operations rather than being expanded into fanout cell changes. A fanout with no changed non-key cells remains an event because the duplication itself is the important change.
 
 ## Aligned matched rows
 
@@ -223,7 +225,7 @@ The structured diff records each moved column using its collapsed old/new coordi
 
 ## Value changes
 
-Now that we have row keys and consistent column identities, we compare non-key cell values in `old` and `new`. This produces a set of changed cells, `[(row1, col1), (row2, col2), ...]`, scattered across rows and columns. We retain the complete cell-level change set for display and later summarization.
+Now that we have row keys and consistent column identities, we compare non-key cell values over the one-to-one matched rows. This produces a top-level set of changed cells, `[(row1, col1), (row2, col2), ...]`, scattered across rows and columns. We retain the complete one-to-one cell-level change set for display and later summarization. Changed cells from one-to-many comparisons remain nested inside their fanout events as described above.
 
 A valid `col_edit()` hint forces a column to be represented as a column event if it contains at least one changed cell. We first select the hinted columns and remove their incident cells from the change set. We then summarize the remaining cells normally. This preserves all observed changes while preventing a hinted column edit from being reinterpreted as a collection of row edits. A type-only edit has no incident changed cells to remove and is already represented by the schema comparison. We ignore and report a `col_edit()` hint for an absent column or one with neither value nor type changes.
 

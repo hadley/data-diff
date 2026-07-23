@@ -373,6 +373,14 @@ and row/column summary, or only shown inside the fanout event?
 **Response:**
 Only in the fanout event
 
+**Resolution:**
+Each fanout event contains its old row, all corresponding new rows, and changed
+cell pairs from comparing every identified non-key column. These cells remain
+nested in the event and are excluded from the top-level changed-cell set,
+rename inference, and row/column edit summarization. Schema adds/drops are not
+expanded into cells, and an event remains even when its non-key values are
+unchanged.
+
 ### 19. Added/dropped row cells need an explicit policy
 
 Presumably cells in added and removed rows are not “changed cells,” since the
