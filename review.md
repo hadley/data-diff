@@ -407,6 +407,13 @@ represented separately.
 **Response:**
 Should be included with other col_edit() changes
 
+**Resolution:**
+Key columns do not generate changed cells because unequal keys identify
+different rows. They do generate `col_edit()` events for source-type or other
+representation changes when canonical keys remain equal. These edits sit
+outside the minimum-cover graph, and may coexist with a rename. The initial
+implementation only needs to detect source-type changes.
+
 ### 21. Exact rename inference can have very weak evidence
 
 Any two removed/added columns that are identical over matched rows become
