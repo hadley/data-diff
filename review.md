@@ -357,6 +357,12 @@ should presumably be added rows. Classification needs precedence rules.
 **Response:**
 Correct
 
+**Resolution:**
+Classify side presence before new-side multiplicity. An old-only key is a drop;
+a new-only key produces additions regardless of duplication; a shared key with
+one new row is a one-to-one match; and a shared key with multiple new rows is a
+fanout group.
+
 ### 18. Fanout value comparisons conflict with canonical-dataset wording
 
 Line 135 says old rows are aligned to every new fanout row so their values can

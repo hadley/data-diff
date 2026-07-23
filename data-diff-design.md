@@ -151,12 +151,16 @@ If we reach step 2 or 3, we expose the selected matching basis in the UI so that
 
 ## Row matching
 
-With a key in hand, we hash each row's key value on both sides:
+With a key in hand, we hash each row's key value on both sides. For a retained key, which is unique in `old`, we classify each key group in this order:
 
-* Keys present only in `old` → `row_drop()`.
-* Keys present only in `new` → `row_add()`.
-* Keys duplicated in `new` → `row_fanout()`.
-* Keys present in both → matched rows, carried forward for cell comparison.
+| Present in `old` | Number of rows in `new` | Result |
+|---|---:|---|
+| yes | 0 | one `row_drop()` |
+| no | 1 or more | all corresponding rows are `row_add()` |
+| yes | 1 | one-to-one matched row |
+| yes | 2 or more | one `row_fanout()` group |
+
+Side presence is checked before new-side multiplicity. A duplicated key can only be fanout when an old row exists to fan out from; otherwise every new row in the group is an addition.
 
 Uniqueness is required for one-to-one row matching, but not for grouping. If the key is unique in `old` but a key value occurs multiple times in `new`, all of the new rows belong to a `row_fanout()` group for that value. We align the old row with each new row in the group so that we can compare their values. These one-to-many alignments are kept separate from the one-to-one matches used to infer column renames.
 
