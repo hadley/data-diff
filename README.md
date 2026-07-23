@@ -38,6 +38,24 @@ sequence and the post-MVP roadmap.
 
 ## Development
 
+Build and run directly from the checkout:
+
+```console
+cargo build
+cargo run -- old.parquet new.parquet --key customer_id,date,region
+```
+
+The debug binary is written to `target/debug/data-diff`. To install the current
+checkout into Cargo's binary directory instead:
+
+```console
+cargo install --path .
+data-diff old.parquet new.parquet --key customer_id,date,region
+```
+
+Re-run `cargo install --path . --force` after changing the source if you want to
+replace the installed binary. For local development checks:
+
 ```console
 cargo test
 cargo clippy --all-targets -- -D warnings
@@ -46,3 +64,5 @@ cargo fmt --all -- --check
 
 Algorithm tests construct compact Arrow tables in memory. Parquet and CLI tests
 are limited to the file and process boundaries.
+
+See [demo/README.md](demo/README.md) for ready-to-run sample datasets.
