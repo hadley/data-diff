@@ -1,7 +1,7 @@
 # data-diff
 
-`data-diff` compares two Parquet files and emits a semantic, coordinate-only
-JSON diff for human inspection.
+`data-diff` compares two Parquet files and emits a semantic diff as either
+coordinate JSON or a compact, operation-oriented summary.
 
 ## Usage
 
@@ -10,9 +10,33 @@ data-diff old.parquet new.parquet --key customer_id,date,region
 ```
 
 `--key` is required. It accepts a comma-separated simple or compound key whose
-columns have the same names in both files. Output is pretty JSON on stdout.
-Input, schema, and key errors are written to stderr and return a non-zero exit
-status.
+columns have the same names in both files. Output is compact-array JSON on
+stdout by default. Input, schema, and key errors are written to stderr and
+return a non-zero exit status.
+
+For a more human-oriented result, select the operation format:
+
+```console
+data-diff old.parquet new.parquet --key id --format human
+```
+
+It emits one operation per line:
+
+```text
+col_drop("product")
+col_add("stock")
+col_order("price", 3 -> 1)
+col_edit("price", values)
+row_drop(2)
+row_add(3)
+row_order(3 -> 1)
+cell_edit((1, "price") -> (2, "price"))
+```
+
+Column names are quoted, and row and column coordinates are one-based. This
+initial human format intentionally identifies rows by position and does not
+include old or new cell values. An unchanged comparison emits `no_changes()`.
+Use `--format json` when consuming the complete structured result.
 
 ## MVP behavior
 

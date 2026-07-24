@@ -26,11 +26,13 @@ so the result contains two changed cells and two value-edited columns.
 ```console
 cargo run --quiet -- \
   demo/mixed-old.parquet demo/mixed-new.parquet \
-  --key id
+  --key id --format human
 ```
 
 This pair reorders columns and rows, drops `product` and row `102`, adds `stock`
-and row `104`, and changes the prices of the two matched rows.
+and row `104`, and changes the prices of the two matched rows. The human format
+shows these as `col_*`, `row_*`, and `cell_edit` operations; omit
+`--format human` to inspect the complete JSON representation.
 
 ## Type-only changes
 

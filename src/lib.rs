@@ -2,6 +2,7 @@
 
 mod cells;
 mod compare;
+mod human;
 mod input;
 mod json;
 mod key;
@@ -12,6 +13,7 @@ mod schema;
 
 use arrow_array::RecordBatch;
 
+pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
 pub use json::write_json;
 pub use model::{

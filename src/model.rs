@@ -193,6 +193,13 @@ impl Coordinate {
             Self(CoordinateRepr::Moved([old, new]))
         }
     }
+
+    pub(crate) fn positions(&self) -> (usize, usize) {
+        match self.0 {
+            CoordinateRepr::Same(position) => (position, position),
+            CoordinateRepr::Moved([old, new]) => (old, new),
+        }
+    }
 }
 
 impl Serialize for Coordinate {
@@ -229,6 +236,15 @@ impl CellCoordinate {
             Self(CellCoordinateRepr::Same(old))
         } else {
             Self(CellCoordinateRepr::Moved([old, new]))
+        }
+    }
+
+    pub(crate) fn positions(&self) -> ((usize, usize), (usize, usize)) {
+        match self.0 {
+            CellCoordinateRepr::Same([row, column]) => ((row, column), (row, column)),
+            CellCoordinateRepr::Moved([[old_row, old_column], [new_row, new_column]]) => {
+                ((old_row, old_column), (new_row, new_column))
+            }
         }
     }
 }
