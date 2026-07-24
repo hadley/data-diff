@@ -4,7 +4,10 @@ title: data-diff implementation plan
 
 # Todo
 
-Each checked item should be committed before starting the next one.
+Development now proceeds at a slower, review-first pace. Treat each new plan as
+a separate PR-sized change: branch, implement it, present it for careful review, and
+leave it uncommitted. The project owner will decide when to commit after review.
+Do not begin the next plan until that review is complete.
 
 - [ ] **Establish compact summary test infrastructure.** Scaffold an internal
   summary module with small graph and cover types. Add test-only edge-list
