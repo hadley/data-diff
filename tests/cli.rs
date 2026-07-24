@@ -14,7 +14,9 @@ fn help_describes_the_initial_interface() {
         .expect("failed to run data-diff");
 
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let stdout = String::from_utf8(output.stdout)
+        .expect("stdout is UTF-8")
+        .replace("data-diff.exe", "data-diff");
     insta::assert_snapshot!(stdout, @r"
     Compare two tabular data files
 
