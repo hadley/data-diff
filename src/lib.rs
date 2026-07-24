@@ -10,6 +10,7 @@ mod model;
 mod order;
 mod rows;
 mod schema;
+mod summary;
 
 use arrow_array::RecordBatch;
 
@@ -18,8 +19,8 @@ pub use input::{read_parquet, validate_tables};
 pub use json::write_json;
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, KeyBasis, KeyDiff, NormalizedType, OrderDiff, RowsDiff,
-    Schemas, Side,
+    DiffOptions, DuplicateColumnName, EditSummary, KeyBasis, KeyDiff, NormalizedType, OrderDiff,
+    RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -37,6 +38,7 @@ pub fn diff_tables(
     let schema = schema::reconcile_schema(old, new, &key)?;
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
+    let summary = summary::summarize(&cells);
 
     Ok(Diff {
         schemas,
@@ -99,6 +101,23 @@ pub fn diff_tables(
                 )
             })
             .collect(),
+        summary: EditSummary {
+            optimal: summary.optimal,
+            columns: summary
+                .columns
+                .iter()
+                .map(|column| ColumnEdit {
+                    column: Coordinate::from_zero_based(column.old, column.new),
+                    type_changed: column.type_changed,
+                    values_changed: column.values_changed,
+                })
+                .collect(),
+            rows: summary
+                .rows
+                .iter()
+                .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .collect(),
+        },
     })
 }
 

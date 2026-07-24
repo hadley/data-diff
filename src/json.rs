@@ -107,7 +107,8 @@ impl Formatter for CompactArrayFormatter {
 #[cfg(test)]
 mod tests {
     use crate::{
-        CellCoordinate, ColumnsDiff, Diff, KeyBasis, KeyDiff, OrderDiff, RowsDiff, Schemas,
+        CellCoordinate, ColumnsDiff, Diff, EditSummary, KeyBasis, KeyDiff, OrderDiff, RowsDiff,
+        Schemas,
     };
 
     use super::write_json;
@@ -127,6 +128,7 @@ mod tests {
                 CellCoordinate::from_zero_based(0, 2, 1, 0),
                 CellCoordinate::from_zero_based(2, 2, 0, 0),
             ],
+            summary: EditSummary::default(),
         };
         let mut output = Vec::new();
 

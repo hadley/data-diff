@@ -4,42 +4,44 @@ title: data-diff implementation plan
 
 # Todo
 
-Development now proceeds at a slower, review-first pace. Treat each new plan as
-a separate PR-sized change: branch, implement it, present it for careful review, and
-leave it uncommitted. The project owner will decide when to commit after review.
-Do not begin the next plan until that review is complete.
+Development now proceeds at a slower, review-first pace. Before implementing a
+new plan, create a dedicated branch from `main`; never develop a next step
+directly on `main`. Treat each plan as a separate PR-sized change, present the
+finished branch for careful review, and leave its changes uncommitted. The
+project owner alone decides when to commit after review. Do not begin the next
+plan until that review is complete.
 
-- [ ] **Establish compact summary test infrastructure.** Scaffold an internal
+- [x] **Establish compact summary test infrastructure.** Scaffold an internal
   summary module with small graph and cover types. Add test-only edge-list
   construction, cover-validity assertions, and a brute-force optimum oracle.
   Test those helpers directly so this commit remains green before the production
   algorithm exists.
-- [ ] **Compute an exact minimum bipartite vertex cover.** Find a maximum
+- [x] **Compute an exact minimum bipartite vertex cover.** Find a maximum
   matching with stable Hopcroft–Karp traversal and recover a cover with the
   standard alternating-path construction. Use the compact fixtures for focused
   shapes, then exhaustively compare every graph up to 3 × 3 with the brute-force
   oracle. Do not add budgets, a new dependency, or an approximate fallback.
-- [ ] **Define the edit-summary result model.** Add a separate `summary` to
+- [x] **Define the edit-summary result model.** Add a separate `summary` to
   `Diff`, containing `optimal`, selected column edits, and selected row edits.
   Reuse the existing collapsed coordinates and column-edit aspects. Preserve
   `columns.edited` and `cells` as complete evidence rather than changing their
   current meaning.
-- [ ] **Prepare forced column edits and the residual graph.** Force every
+- [x] **Prepare forced column edits and the residual graph.** Force every
   source-type edit into the summary, mark it as value-edited when it has an
   incident changed cell, and remove its incident cells from optimization.
   Convert the remaining cells into deterministic dense row and column vertices
   without losing their original old/new coordinates.
-- [ ] **Integrate summarization into reconciliation.** Run it after complete
+- [x] **Integrate summarization into reconciliation.** Run it after complete
   cell comparison, emit selected edits in original old-side order, and verify
   that every changed cell is covered by a forced or selected event. Empty cell
   sets, type-only changes, moved identities, and added or dropped rows and
   columns must retain their existing behavior.
-- [ ] **Expose the summary at output boundaries.** Serialize the new summary in
+- [x] **Expose the summary at output boundaries.** Serialize the new summary in
   deterministic JSON. Update human output to use summary `col_edit` and
   `row_edit` operations instead of the redundant evidence-level value edits and
   individual `cell_edit` operations; JSON continues to retain all underlying
   cells and evidence-level column edits.
-- [ ] **Complete the acceptance pass.** Add focused library and CLI coverage,
+- [x] **Complete the acceptance pass.** Add focused library and CLI coverage,
   confirm byte-identical repeated output, update the README and demo, run tests,
   strict Clippy, formatting, and diff checks, and manually inspect one
   row-dominant and one column-dominant summary.
@@ -254,7 +256,7 @@ value operations.
 
 This step is complete when:
 
-* every checklist item is checked and committed;
+* every checklist item is checked and ready for owner review;
 * every complete small graph passes brute-force optimality comparison;
 * every changed cell is covered by at least one summary event;
 * forced type edits are coalesced and excluded from residual optimization;
@@ -265,6 +267,11 @@ This step is complete when:
 * the full test, Clippy, formatting, and diff checks pass.
 
 # Next steps
+
+Each item below becomes its own detailed plan and dedicated branch from `main`.
+Implement only that plan, leave the result uncommitted for owner review, and do
+not start the following item until the owner has reviewed and committed the
+current work.
 
 Add later reconciliation features in dependency order, giving each isolated
 fixtures, integration coverage, and determinism checks:
