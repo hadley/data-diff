@@ -6,8 +6,7 @@ use crate::schema::SchemaMatches;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CellChanges {
-    pub cells: Vec<ChangedCell>,
-    pub columns: Vec<ChangedColumn>,
+    pub columns: Vec<ColumnChanges>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,11 +18,36 @@ pub(crate) struct ChangedCell {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChangedColumn {
+pub(crate) struct ColumnChanges {
     pub old: usize,
     pub new: usize,
     pub type_changed: bool,
-    pub values_changed: bool,
+    pub rows: Vec<(usize, usize)>,
+}
+
+impl CellChanges {
+    pub(crate) fn changed_cells(&self) -> Vec<ChangedCell> {
+        let mut cells = self
+            .columns
+            .iter()
+            .flat_map(|column| {
+                column.rows.iter().map(|&(old_row, new_row)| ChangedCell {
+                    old_row,
+                    old_column: column.old,
+                    new_row,
+                    new_column: column.new,
+                })
+            })
+            .collect::<Vec<_>>();
+        cells.sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
+        cells
+    }
+}
+
+impl ColumnChanges {
+    pub(crate) fn values_changed(&self) -> bool {
+        !self.rows.is_empty()
+    }
 }
 
 pub(crate) fn compare_cells(
@@ -34,7 +58,7 @@ pub(crate) fn compare_cells(
 ) -> CellChanges {
     let mut result = CellChanges::default();
     for identity in &schema.identities {
-        let mut values_changed = false;
+        let mut changed_rows = Vec::new();
         if !identity.is_key {
             let old_values = old.column(identity.old);
             let new_values = new.column(identity.new);
@@ -44,28 +68,19 @@ pub(crate) fn compare_cells(
             let new_values = plan.canonicalize_new(new_values.as_ref());
             for &(old_row, new_row) in &rows.matched {
                 if old_values[old_row] != new_values[new_row] {
-                    values_changed = true;
-                    result.cells.push(ChangedCell {
-                        old_row,
-                        old_column: identity.old,
-                        new_row,
-                        new_column: identity.new,
-                    });
+                    changed_rows.push((old_row, new_row));
                 }
             }
         }
-        if identity.type_changed || values_changed {
-            result.columns.push(ChangedColumn {
+        if identity.type_changed || !changed_rows.is_empty() {
+            result.columns.push(ColumnChanges {
                 old: identity.old,
                 new: identity.new,
                 type_changed: identity.type_changed,
-                values_changed,
+                rows: changed_rows,
             });
         }
     }
-    result
-        .cells
-        .sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
     result
 }
 
@@ -76,7 +91,7 @@ mod tests {
     use arrow_array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{Field, Schema};
 
-    use super::{ChangedCell, ChangedColumn, compare_cells};
+    use super::{ChangedCell, ColumnChanges, compare_cells};
     use crate::DiffOptions;
     use crate::key::resolve_key;
     use crate::rows::match_rows;
@@ -117,7 +132,7 @@ mod tests {
         let changes = changes(&old, &new);
 
         assert_eq!(
-            changes.cells,
+            changes.changed_cells(),
             [
                 ChangedCell {
                     old_row: 0,
@@ -145,8 +160,23 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(changes.columns.len(), 2);
-        assert!(changes.columns.iter().all(|column| column.values_changed));
+        assert_eq!(
+            changes.columns,
+            [
+                ColumnChanges {
+                    old: 1,
+                    new: 2,
+                    type_changed: false,
+                    rows: vec![(0, 1), (1, 0)],
+                },
+                ColumnChanges {
+                    old: 2,
+                    new: 0,
+                    type_changed: false,
+                    rows: vec![(0, 1), (1, 0)],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -160,7 +190,7 @@ mod tests {
             ("value", Arc::new(Int64Array::from(vec![20, 99]))),
         ]);
 
-        assert!(changes(&old, &new).cells.is_empty());
+        assert!(changes(&old, &new).changed_cells().is_empty());
     }
 
     #[test]
@@ -174,7 +204,7 @@ mod tests {
             ("add", Arc::new(Int64Array::from(vec![99]))),
         ]);
 
-        assert!(changes(&old, &new).cells.is_empty());
+        assert!(changes(&old, &new).changed_cells().is_empty());
     }
 
     #[test]
@@ -195,27 +225,27 @@ mod tests {
         assert_eq!(
             changes.columns,
             [
-                ChangedColumn {
+                ColumnChanges {
                     old: 0,
                     new: 0,
                     type_changed: true,
-                    values_changed: false,
+                    rows: vec![],
                 },
-                ChangedColumn {
+                ColumnChanges {
                     old: 1,
                     new: 1,
                     type_changed: true,
-                    values_changed: false,
+                    rows: vec![],
                 },
-                ChangedColumn {
+                ColumnChanges {
                     old: 2,
                     new: 2,
                     type_changed: true,
-                    values_changed: true,
+                    rows: vec![(0, 0)],
                 },
             ]
         );
-        assert_eq!(changes.cells.len(), 1);
+        assert_eq!(changes.changed_cells().len(), 1);
     }
 
     #[test]
@@ -237,14 +267,14 @@ mod tests {
 
         let changes = changes(&old, &new);
 
-        assert!(changes.cells.is_empty());
+        assert!(changes.changed_cells().is_empty());
         assert_eq!(
             changes.columns,
-            [ChangedColumn {
+            [ColumnChanges {
                 old: 1,
                 new: 1,
                 type_changed: true,
-                values_changed: false,
+                rows: vec![],
             }]
         );
     }

@@ -14,7 +14,9 @@ fn help_describes_the_initial_interface() {
         .expect("failed to run data-diff");
 
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let stdout = String::from_utf8(output.stdout)
+        .expect("stdout is UTF-8")
+        .replace("data-diff.exe", "data-diff");
     insta::assert_snapshot!(stdout, @r"
     Compare two tabular data files
 
@@ -26,7 +28,7 @@ fn help_describes_the_initial_interface() {
 
     Options:
           --key <KEY>        Comma-separated, same-name key columns
-          --format <FORMAT>  Output representation [default: json] [possible values: json, human]
+          --format <FORMAT>  Output representation [default: human] [possible values: json, human]
       -h, --help             Print help
       -V, --version          Print version
     ");
@@ -46,7 +48,7 @@ fn compares_two_parquet_files_as_json() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "id"])
+        .args(["--key", "id", "--format", "json"])
         .output()
         .expect("failed to run data-diff");
 
@@ -108,6 +110,11 @@ fn compares_two_parquet_files_as_json() {
             "source_type": "Utf8"
           }
         ]
+      },
+      "summary": {
+        "columns": [],
+        "optimal": true,
+        "rows": []
       }
     }
     "#);
@@ -152,7 +159,7 @@ fn reports_mixed_changes_from_real_parquet_files() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "id"])
+        .args(["--key", "id", "--format", "json"])
         .output()
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -163,6 +170,18 @@ fn reports_mixed_changes_from_real_parquet_files() {
     assert_eq!(value["rows"]["added"], json!([3]));
     assert_eq!(value["order"]["rows"], json!([[2, 1]]));
     assert_eq!(value["cells"], json!([[[1, 2], [2, 1]], [[2, 2], [1, 1]]]));
+    assert_eq!(
+        value["summary"],
+        json!({
+            "optimal": true,
+            "columns": [{
+                "column": [2, 1],
+                "type_changed": false,
+                "values_changed": true
+            }],
+            "rows": []
+        })
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(r#""cells": [[[1, 2], [2, 1]], [[2, 2], [1, 1]]]"#));
 }
@@ -187,7 +206,7 @@ fn reports_mixed_changes_in_human_format() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "id", "--format", "human"])
+        .args(["--key", "id"])
         .output()
         .unwrap();
 
@@ -201,8 +220,6 @@ fn reports_mixed_changes_in_human_format() {
     row_drop(3)
     row_add(3)
     row_order(2 -> 1)
-    cell_edit((1, "value") -> (2, "value"))
-    cell_edit((2, "value") -> (1, "value"))
     "#);
 }
 
@@ -224,7 +241,7 @@ fn empty_files_still_report_type_only_schema_changes() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "id"])
+        .args(["--key", "id", "--format", "json"])
         .output()
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -238,5 +255,16 @@ fn empty_files_still_report_type_only_schema_changes() {
             {"column": 1, "type_changed": true, "values_changed": false},
             {"column": 2, "type_changed": true, "values_changed": false}
         ])
+    );
+    assert_eq!(
+        value["summary"],
+        json!({
+            "optimal": true,
+            "columns": [
+                {"column": 1, "type_changed": true, "values_changed": false},
+                {"column": 2, "type_changed": true, "values_changed": false}
+            ],
+            "rows": []
+        })
     );
 }

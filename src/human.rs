@@ -25,7 +25,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             column_name(&diff.schemas.old, old)
         ));
     }
-    for edit in &diff.columns.edited {
+    for edit in &diff.summary.columns {
         let (old, new) = edit.column.positions();
         let mut details = Vec::new();
         if edit.type_changed {
@@ -59,20 +59,12 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let (old, new) = coordinate.positions();
         operations.push(format!("row_order({old} -> {new})"));
     }
-    for cell in &diff.cells {
-        let ((old_row, old_column), (new_row, new_column)) = cell.positions();
-        let old = format!(
-            "({old_row}, {})",
-            column_name(&diff.schemas.old, old_column)
-        );
-        let new = format!(
-            "({new_row}, {})",
-            column_name(&diff.schemas.new, new_column)
-        );
-        if old_row == new_row && old_column == new_column {
-            operations.push(format!("cell_edit({old})"));
+    for coordinate in &diff.summary.rows {
+        let (old, new) = coordinate.positions();
+        if old == new {
+            operations.push(format!("row_edit({old})"));
         } else {
-            operations.push(format!("cell_edit({old} -> {new})"));
+            operations.push(format!("row_edit({old} -> {new})"));
         }
     }
 
@@ -158,9 +150,23 @@ mod tests {
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
-        cell_edit((1, "value") -> (2, "value"))
-        cell_edit((2, "value") -> (1, "value"))
         "#);
+    }
+
+    #[test]
+    fn summarizes_multiple_cells_as_one_row_edit() {
+        let old = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("a", Arc::new(Int64Array::from(vec![10, 20]))),
+            ("b", Arc::new(Int64Array::from(vec![30, 40]))),
+        ]);
+        let new = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("a", Arc::new(Int64Array::from(vec![10, 21]))),
+            ("b", Arc::new(Int64Array::from(vec![30, 41]))),
+        ]);
+
+        assert_eq!(render(&old, &new), "row_edit(2)");
     }
 
     #[test]

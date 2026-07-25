@@ -37,6 +37,27 @@ fn main() {
 
     write(
         &output,
+        "scatter-old.parquet",
+        table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+            ("a", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+            ("b", Arc::new(Int64Array::from(vec![40, 50, 60]))),
+            ("c", Arc::new(Int64Array::from(vec![70, 80, 90]))),
+        ]),
+    );
+    write(
+        &output,
+        "scatter-new.parquet",
+        table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+            ("a", Arc::new(Int64Array::from(vec![11, 20, 30]))),
+            ("b", Arc::new(Int64Array::from(vec![41, 50, 60]))),
+            ("c", Arc::new(Int64Array::from(vec![70, 81, 91]))),
+        ]),
+    );
+
+    write(
+        &output,
         "mixed-old.parquet",
         table(vec![
             ("id", Arc::new(Int64Array::from(vec![101, 102, 103]))),

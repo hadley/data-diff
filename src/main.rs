@@ -6,8 +6,8 @@ use data_diff::{DiffOptions, diff_tables, read_parquet, write_human, write_json}
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum OutputFormat {
-    #[default]
     Json,
+    #[default]
     Human,
 }
 

@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow_array::{Int64Array, StringArray};
+use arrow_array::{Int32Array, Int64Array, StringArray};
 use data_diff::{DiffOptions, diff_tables};
 use serde_json::json;
 
@@ -45,6 +45,125 @@ fn combines_schema_row_order_and_cell_changes() {
     assert_eq!(value["order"]["columns"], json!([[2, 1]]));
     assert_eq!(value["order"]["rows"], json!([[2, 1]]));
     assert_eq!(value["cells"], json!([[[1, 2], [2, 1]], [[2, 2], [1, 1]]]));
+    assert_eq!(
+        value["summary"],
+        json!({
+            "optimal": true,
+            "columns": [{
+                "column": [2, 1],
+                "type_changed": false,
+                "values_changed": true
+            }],
+            "rows": []
+        })
+    );
+}
+
+#[test]
+fn summary_combines_row_and_column_edits_minimally() {
+    let old = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("a", Arc::new(Int64Array::from(vec![0, 0, 0]))),
+        ("b", Arc::new(Int64Array::from(vec![0, 0, 0]))),
+        ("c", Arc::new(Int64Array::from(vec![0, 0, 0]))),
+    ]);
+    let new = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("a", Arc::new(Int64Array::from(vec![1, 0, 0]))),
+        ("b", Arc::new(Int64Array::from(vec![1, 0, 0]))),
+        ("c", Arc::new(Int64Array::from(vec![0, 1, 1]))),
+    ]);
+
+    let value = serde_json::to_value(
+        diff_tables(
+            &old,
+            &new,
+            &DiffOptions {
+                key: vec!["id".into()],
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        value["summary"],
+        json!({
+            "optimal": true,
+            "columns": [{
+                "column": 4,
+                "type_changed": false,
+                "values_changed": true
+            }],
+            "rows": [1]
+        })
+    );
+}
+
+#[test]
+fn summary_forces_and_coalesces_type_edits() {
+    let old = common::batch([
+        ("id", Arc::new(Int32Array::from(vec![1, 2]))),
+        ("value", Arc::new(Int32Array::from(vec![10, 20]))),
+    ]);
+    let new = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+        ("value", Arc::new(Int64Array::from(vec![11, 20]))),
+    ]);
+
+    let value = serde_json::to_value(
+        diff_tables(
+            &old,
+            &new,
+            &DiffOptions {
+                key: vec!["id".into()],
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        value["summary"],
+        json!({
+            "optimal": true,
+            "columns": [
+                {"column": 1, "type_changed": true, "values_changed": false},
+                {"column": 2, "type_changed": true, "values_changed": true}
+            ],
+            "rows": []
+        })
+    );
+    assert_eq!(value["cells"], json!([[1, 2]]));
+}
+
+#[test]
+fn selected_row_retains_its_moved_coordinate() {
+    let old = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+        ("a", Arc::new(Int64Array::from(vec![10, 20]))),
+        ("b", Arc::new(Int64Array::from(vec![30, 40]))),
+    ]);
+    let new = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![2, 1]))),
+        ("a", Arc::new(Int64Array::from(vec![20, 11]))),
+        ("b", Arc::new(Int64Array::from(vec![40, 31]))),
+    ]);
+
+    let value = serde_json::to_value(
+        diff_tables(
+            &old,
+            &new,
+            &DiffOptions {
+                key: vec!["id".into()],
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(value["summary"]["columns"], json!([]));
+    assert_eq!(value["summary"]["rows"], json!([[1, 2]]));
 }
 
 #[test]
@@ -82,6 +201,10 @@ fn disjoint_keys_are_all_atomic_row_events() {
     assert_eq!(value["rows"]["added"], json!([1, 2]));
     assert_eq!(value["rows"]["matched"], json!([]));
     assert_eq!(value["cells"], json!([]));
+    assert_eq!(
+        value["summary"],
+        json!({"optimal": true, "columns": [], "rows": []})
+    );
 }
 
 #[test]
@@ -101,4 +224,8 @@ fn empty_inputs_preserve_schema_and_classify_the_other_side() {
     assert_eq!(both_empty["schemas"]["old"][0]["name"], "id");
     assert_eq!(both_empty["rows"]["matched"], json!([]));
     assert_eq!(both_empty["cells"], json!([]));
+    assert_eq!(
+        both_empty["summary"],
+        json!({"optimal": true, "columns": [], "rows": []})
+    );
 }

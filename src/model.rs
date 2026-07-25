@@ -238,15 +238,6 @@ impl CellCoordinate {
             Self(CellCoordinateRepr::Moved([old, new]))
         }
     }
-
-    pub(crate) fn positions(&self) -> ((usize, usize), (usize, usize)) {
-        match self.0 {
-            CellCoordinateRepr::Same([row, column]) => ((row, column), (row, column)),
-            CellCoordinateRepr::Moved([[old_row, old_column], [new_row, new_column]]) => {
-                ((old_row, old_column), (new_row, new_column))
-            }
-        }
-    }
 }
 
 impl Serialize for CellCoordinate {
@@ -329,6 +320,24 @@ pub struct OrderDiff {
     pub rows: Vec<Coordinate>,
 }
 
+/// A minimum semantic summary of row and column edits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EditSummary {
+    pub optimal: bool,
+    pub columns: Vec<ColumnEdit>,
+    pub rows: Vec<Coordinate>,
+}
+
+impl Default for EditSummary {
+    fn default() -> Self {
+        Self {
+            optimal: true,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+}
+
 /// An inspectable, coordinate-only table diff.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Diff {
@@ -338,6 +347,7 @@ pub struct Diff {
     pub rows: RowsDiff,
     pub order: OrderDiff,
     pub cells: Vec<CellCoordinate>,
+    pub summary: EditSummary,
 }
 
 #[cfg(test)]
@@ -345,8 +355,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, KeyBasis, KeyDiff,
-        NormalizedType, OrderDiff, RowsDiff, Schemas,
+        CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, EditSummary,
+        KeyBasis, KeyDiff, NormalizedType, OrderDiff, RowsDiff, Schemas,
     };
 
     #[test]
@@ -407,6 +417,15 @@ mod tests {
             },
             order: OrderDiff::default(),
             cells: vec![CellCoordinate::from_zero_based(0, 0, 1, 0)],
+            summary: EditSummary {
+                optimal: true,
+                columns: vec![ColumnEdit {
+                    column: Coordinate::from_zero_based(0, 0),
+                    type_changed: false,
+                    values_changed: true,
+                }],
+                rows: vec![Coordinate::from_zero_based(0, 1)],
+            },
         };
 
         insta::assert_json_snapshot!(diff, @r#"
@@ -472,8 +491,29 @@ mod tests {
                 1
               ]
             ]
-          ]
+          ],
+          "summary": {
+            "optimal": true,
+            "columns": [
+              {
+                "column": 1,
+                "type_changed": false,
+                "values_changed": true
+              }
+            ],
+            "rows": [
+              [
+                1,
+                2
+              ]
+            ]
+          }
         }
         "#);
+    }
+
+    #[test]
+    fn empty_summary_is_still_optimal() {
+        assert!(EditSummary::default().optimal);
     }
 }
