@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create PR"
+  short_description: "Prepare and submit a reviewed GitHub PR"
+  default_prompt: "Use $create-pr to prepare a GitHub pull request for this work."
