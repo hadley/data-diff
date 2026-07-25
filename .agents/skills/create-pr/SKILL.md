@@ -46,17 +46,15 @@ Write in accessible, plain language — avoid jargon and deep implementation det
 
 4. **Draft the title and body** following the **PR style** section above. Base
    the summary on the actual diff versus the base branch
-   (`git diff <base>...HEAD`), not just the latest commit. End the body with:
-
-   ```
-   🤖 Generated with [Claude Code](https://claude.com/claude-code)
-   ```
+   (`git diff <base>...HEAD`), not just the latest commit.
 
 5. **Open the draft locally for the user to preview.** Write the body to a file
-   and open it so the user can read it in their editor:
+   and open it so the user can read it in their editor. When running inside VS
+   Code, use the environment's native file-opening tool. Otherwise, use the
+   Positron CLI with the file's absolute path:
 
    ```bash
-   open /path/to/pr-body.md   # macOS; use xdg-open on Linux
+   positron /path/to/pr-body.md
    ```
 
    State the **title** in chat alongside it (the file holds only the body). Then
