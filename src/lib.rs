@@ -39,6 +39,7 @@ pub fn diff_tables(
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
     let summary = summary::summarize(&cells);
+    let changed_cells = cells.changed_cells();
 
     Ok(Diff {
         schemas,
@@ -56,7 +57,7 @@ pub fn diff_tables(
                 .map(|column| ColumnEdit {
                     column: Coordinate::from_zero_based(column.old, column.new),
                     type_changed: column.type_changed,
-                    values_changed: column.values_changed,
+                    values_changed: column.values_changed(),
                 })
                 .collect(),
         },
@@ -89,8 +90,7 @@ pub fn diff_tables(
                 .map(|&(old, new)| Coordinate::from_zero_based(old, new))
                 .collect(),
         },
-        cells: cells
-            .cells
+        cells: changed_cells
             .iter()
             .map(|cell| {
                 CellCoordinate::from_zero_based(

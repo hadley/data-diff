@@ -2,65 +2,58 @@
 
 use std::collections::VecDeque;
 
-use crate::cells::{CellChanges, ChangedColumn};
+use crate::cells::CellChanges;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SummaryChanges {
     pub optimal: bool,
-    pub columns: Vec<ChangedColumn>,
+    pub columns: Vec<SummaryColumn>,
     pub rows: Vec<(usize, usize)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SummaryColumn {
+    pub old: usize,
+    pub new: usize,
+    pub type_changed: bool,
+    pub values_changed: bool,
+}
+
 pub(crate) fn summarize(changes: &CellChanges) -> SummaryChanges {
-    // Type changes must remain column edits. Cell comparison already records
-    // whether each also changed values; remove their cells before optimization.
+    // Type changes must remain column edits, so only other columns participate
+    // in optimization.
     let mut columns = changes
         .columns
         .iter()
         .filter(|column| column.type_changed)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut forced = columns
-        .iter()
-        .map(|column| (column.old, column.new))
-        .collect::<Vec<_>>();
-    forced.sort_unstable();
-    let residual = changes
-        .cells
-        .iter()
-        .filter(|cell| {
-            forced
-                .binary_search(&(cell.old_column, cell.new_column))
-                .is_err()
+        .map(|column| SummaryColumn {
+            old: column.old,
+            new: column.new,
+            type_changed: true,
+            values_changed: column.values_changed(),
         })
+        .collect::<Vec<_>>();
+    let residual_columns = changes
+        .columns
+        .iter()
+        .filter(|column| !column.type_changed && column.values_changed())
         .collect::<Vec<_>>();
 
     // Each remaining cell is an edge between its matched-row identity and
     // identified-column identity. Dense stable IDs keep the solver independent
     // of Arrow and preserve deterministic output order.
-    let mut rows = residual
+    let mut rows = residual_columns
         .iter()
-        .map(|cell| (cell.old_row, cell.new_row))
+        .flat_map(|column| column.rows.iter().copied())
         .collect::<Vec<_>>();
     rows.sort_unstable();
     rows.dedup();
-    let mut residual_columns = residual
-        .iter()
-        .map(|cell| (cell.old_column, cell.new_column))
-        .collect::<Vec<_>>();
-    residual_columns.sort_unstable();
-    residual_columns.dedup();
-    let edges = residual
-        .iter()
-        .map(|cell| {
-            (
-                rows.binary_search(&(cell.old_row, cell.new_row)).unwrap(),
-                residual_columns
-                    .binary_search(&(cell.old_column, cell.new_column))
-                    .unwrap(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    for (column, changes) in residual_columns.iter().enumerate() {
+        for row in &changes.rows {
+            edges.push((rows.binary_search(row).unwrap(), column));
+        }
+    }
     let cover =
         BipartiteGraph::new(rows.len(), residual_columns.len(), &edges).minimum_vertex_cover();
 
@@ -70,10 +63,10 @@ pub(crate) fn summarize(changes: &CellChanges) -> SummaryChanges {
         .map(|&index| rows[index])
         .collect::<Vec<_>>();
     for &index in &cover.right {
-        let (old, new) = residual_columns[index];
-        columns.push(ChangedColumn {
-            old,
-            new,
+        let column = residual_columns[index];
+        columns.push(SummaryColumn {
+            old: column.old,
+            new: column.new,
             type_changed: false,
             values_changed: true,
         });
@@ -86,12 +79,14 @@ pub(crate) fn summarize(changes: &CellChanges) -> SummaryChanges {
         columns,
         rows: selected_rows,
     };
-    debug_assert!(changes.cells.iter().all(|cell| {
-        summary
-            .columns
-            .iter()
-            .any(|column| column.old == cell.old_column && column.new == cell.new_column)
-            || summary.rows.contains(&(cell.old_row, cell.new_row))
+    debug_assert!(changes.columns.iter().all(|column| {
+        column.rows.iter().all(|row| {
+            summary
+                .columns
+                .iter()
+                .any(|selected| selected.old == column.old && selected.new == column.new)
+                || summary.rows.contains(row)
+        })
     }));
     summary
 }
@@ -286,8 +281,8 @@ impl Matching {
 
 #[cfg(test)]
 mod tests {
-    use super::{BipartiteGraph, VertexCover, summarize};
-    use crate::cells::{CellChanges, ChangedCell, ChangedColumn};
+    use super::{BipartiteGraph, SummaryColumn, VertexCover, summarize};
+    use crate::cells::{CellChanges, ColumnChanges};
 
     fn graph(left: usize, right: usize, edges: &[(usize, usize)]) -> BipartiteGraph {
         BipartiteGraph::new(left, right, edges)
@@ -442,15 +437,10 @@ mod tests {
     #[test]
     fn forced_columns_are_coalesced_before_optimization() {
         let changes = CellChanges {
-            cells: vec![
-                changed_cell(0, 0, 1, 1),
-                changed_cell(1, 0, 0, 1),
-                changed_cell(0, 2, 1, 0),
-            ],
             columns: vec![
-                changed_column(0, 1, true, true),
-                changed_column(2, 0, false, true),
-                changed_column(3, 3, true, false),
+                changed_column(0, 1, true, &[(0, 1), (1, 0)]),
+                changed_column(2, 0, false, &[(0, 1)]),
+                changed_column(3, 3, true, &[]),
             ],
         };
 
@@ -459,8 +449,8 @@ mod tests {
             super::SummaryChanges {
                 optimal: true,
                 columns: vec![
-                    changed_column(0, 1, true, true),
-                    changed_column(3, 3, true, false),
+                    summary_column(0, 1, true, true),
+                    summary_column(3, 3, true, false),
                 ],
                 rows: vec![(0, 1)],
             }
@@ -470,45 +460,43 @@ mod tests {
     #[test]
     fn selected_vertices_retain_moved_identities() {
         let column_dominant = CellChanges {
-            cells: vec![changed_cell(0, 2, 2, 0), changed_cell(1, 2, 0, 0)],
-            columns: vec![changed_column(2, 0, false, true)],
+            columns: vec![changed_column(2, 0, false, &[(0, 2), (1, 0)])],
         };
         let row_dominant = CellChanges {
-            cells: vec![changed_cell(0, 1, 2, 2), changed_cell(0, 2, 2, 1)],
             columns: vec![
-                changed_column(1, 2, false, true),
-                changed_column(2, 1, false, true),
+                changed_column(1, 2, false, &[(0, 2)]),
+                changed_column(2, 1, false, &[(0, 2)]),
             ],
         };
 
         assert_eq!(
             summarize(&column_dominant).columns,
-            [changed_column(2, 0, false, true)]
+            [summary_column(2, 0, false, true)]
         );
         assert_eq!(summarize(&row_dominant).rows, [(0, 2)]);
-    }
-
-    fn changed_cell(
-        old_row: usize,
-        old_column: usize,
-        new_row: usize,
-        new_column: usize,
-    ) -> ChangedCell {
-        ChangedCell {
-            old_row,
-            old_column,
-            new_row,
-            new_column,
-        }
     }
 
     fn changed_column(
         old: usize,
         new: usize,
         type_changed: bool,
+        rows: &[(usize, usize)],
+    ) -> ColumnChanges {
+        ColumnChanges {
+            old,
+            new,
+            type_changed,
+            rows: rows.to_vec(),
+        }
+    }
+
+    fn summary_column(
+        old: usize,
+        new: usize,
+        type_changed: bool,
         values_changed: bool,
-    ) -> ChangedColumn {
-        ChangedColumn {
+    ) -> SummaryColumn {
+        SummaryColumn {
             old,
             new,
             type_changed,
