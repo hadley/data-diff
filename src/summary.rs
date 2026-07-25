@@ -12,29 +12,27 @@ pub(crate) struct SummaryChanges {
 }
 
 pub(crate) fn summarize(changes: &CellChanges) -> SummaryChanges {
-    // Type changes must remain column edits. Remove their incident cells before
-    // optimization, while recording whether each forced edit also changed values.
+    // Type changes must remain column edits. Cell comparison already records
+    // whether each also changed values; remove their cells before optimization.
     let mut columns = changes
         .columns
         .iter()
         .filter(|column| column.type_changed)
-        .map(|column| {
-            let mut column = column.clone();
-            column.values_changed = changes
-                .cells
-                .iter()
-                .any(|cell| cell.old_column == column.old && cell.new_column == column.new);
-            column
-        })
+        .cloned()
         .collect::<Vec<_>>();
-    let forced = columns
+    let mut forced = columns
         .iter()
         .map(|column| (column.old, column.new))
         .collect::<Vec<_>>();
+    forced.sort_unstable();
     let residual = changes
         .cells
         .iter()
-        .filter(|cell| !forced.contains(&(cell.old_column, cell.new_column)))
+        .filter(|cell| {
+            forced
+                .binary_search(&(cell.old_column, cell.new_column))
+                .is_err()
+        })
         .collect::<Vec<_>>();
 
     // Each remaining cell is an edge between its matched-row identity and
@@ -405,6 +403,19 @@ mod tests {
             }
         );
         assert_eq!(graph.minimum_vertex_cover(), first);
+    }
+
+    #[test]
+    fn disconnected_components_choose_a_row_and_a_column() {
+        let graph = graph(3, 3, &[(0, 0), (0, 1), (1, 2), (2, 2)]);
+
+        assert_eq!(
+            graph.minimum_vertex_cover(),
+            VertexCover {
+                left: vec![0],
+                right: vec![2],
+            }
+        );
     }
 
     #[test]
