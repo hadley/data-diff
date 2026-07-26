@@ -12,17 +12,16 @@ current work.
 Complete maintenance work and add reconciliation features in dependency order,
 giving each isolated fixtures, integration coverage, and determinism checks:
 
-1. Guess eligible single-column keys and allow users to override the guess.
-2. Add paired key components and validated rename/add/drop/edit hints.
-3. Infer exact renames from aligned matched rows.
-4. Support bounded declared-key fanout while keeping fanout cells separate.
-5. Add approximate rename inference and then swap detection, initially
+1. Add paired key components and validated rename/add/drop/edit hints.
+2. Infer exact renames from aligned matched rows.
+3. Support bounded declared-key fanout while keeping fanout cells separate.
+4. Add approximate rename inference and then swap detection, initially
    examining all matched rows.
-6. Benchmark the complete pipeline and introduce deterministic sampling,
+5. Benchmark the complete pipeline and introduce deterministic sampling,
    computation budgets, valid partial results, and incomplete-stage reporting.
    This is also when edit summarization gains a bounded valid-cover fallback and
    may emit `optimal: false`.
-7. Expand scalar type support, then design a bounded large-data execution model
+6. Expand scalar type support, then design a bounded large-data execution model
    and interactive UI.
 
 Defer decisions about hint syntax, UI presentation, thresholds, and concrete
