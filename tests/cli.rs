@@ -185,7 +185,7 @@ fn reports_a_missing_key_when_nothing_can_be_guessed() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "no key was supplied and no eligible key could be guessed\n"
+        "no key was supplied and no eligible key could be guessed; supply --key\n"
     );
 }
 

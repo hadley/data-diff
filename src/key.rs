@@ -188,9 +188,6 @@ fn unique_buckets(
 }
 
 fn validate_components(keys: &[String]) -> Result<Vec<&str>, DiffError> {
-    if keys.is_empty() {
-        return Err(DiffError::MissingKey);
-    }
     let mut seen = HashSet::new();
     let mut components = Vec::with_capacity(keys.len());
     for component in keys {
@@ -291,7 +288,10 @@ pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+    use arrow_array::{
+        ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, RecordBatchOptions,
+        StringArray,
+    };
     use arrow_schema::{Field, Schema};
 
     use super::{candidate_overlap, resolve_key};
@@ -532,20 +532,34 @@ mod tests {
     }
 
     #[test]
-    fn guessed_key_reuses_the_candidate_canonical_values() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![2, 1])))]);
-        let new = table(vec![("id", Arc::new(Float64Array::from(vec![1.0, 2.0])))]);
+    fn overlap_is_normalized_by_the_smaller_side() {
+        let old = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2, 3])))]);
+        let new = table(vec![("id", Arc::new(Int64Array::from(vec![3, 2])))]);
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
         assert_eq!(
-            key.old,
-            vec![vec![CanonicalValue::Int(2)], vec![CanonicalValue::Int(1)]]
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 2,
+                possible: 2,
+            })
         );
-        assert_eq!(
-            key.new,
-            vec![vec![CanonicalValue::Int(1)], vec![CanonicalValue::Int(2)]]
-        );
+    }
+
+    #[test]
+    fn rows_without_columns_leave_nothing_to_guess() {
+        let old = RecordBatch::try_new_with_options(
+            Arc::new(Schema::empty()),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(2)),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            resolve_key(&old, &old, &options(&[])),
+            Err(DiffError::MissingKey)
+        ));
     }
 
     #[test]

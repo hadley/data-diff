@@ -99,9 +99,9 @@ impl std::fmt::Display for DiffError {
                 f,
                 "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
             ),
-            DiffError::MissingKey => {
-                f.write_str("no key was supplied and no eligible key could be guessed")
-            }
+            DiffError::MissingKey => f.write_str(
+                "no key was supplied and no eligible key could be guessed; supply --key",
+            ),
             DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
             DiffError::PairedKeyUnsupported { component } => {
                 write!(f, "paired key component {component:?} is not supported yet")
