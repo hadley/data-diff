@@ -1,10 +1,16 @@
 use std::io::{self, Write};
 
-use crate::{ColumnSchema, Diff};
+use crate::{ColumnSchema, Diff, KeyBasis};
 
 /// Write a compact, operation-oriented description of a diff.
+///
+/// The first line always announces the resolved key; it is informational
+/// context rather than a change operation, so `no_changes()` still follows it
+/// when nothing changed.
 pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     let mut operations = Vec::new();
+
+    operations.push(key_context(diff));
 
     for &position in &diff.columns.dropped {
         operations.push(format!(
@@ -68,10 +74,40 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         }
     }
 
-    if operations.is_empty() {
-        writer.write_all(b"no_changes()")
-    } else {
-        writer.write_all(operations.join("\n").as_bytes())
+    if operations.len() == 1 {
+        operations.push("no_changes()".to_owned());
+    }
+    writer.write_all(operations.join("\n").as_bytes())
+}
+
+fn key_context(diff: &Diff) -> String {
+    let component_name =
+        |coordinate: &crate::Coordinate| column_name(&diff.schemas.old, coordinate.positions().0);
+    match diff.key.basis {
+        KeyBasis::Declared => {
+            let components = diff
+                .key
+                .columns
+                .iter()
+                .map(component_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("col_key(declared: [{components}])")
+        }
+        KeyBasis::Guessed => {
+            let name = diff
+                .key
+                .columns
+                .first()
+                .map(component_name)
+                .unwrap_or_else(|| "#0".to_owned());
+            let overlap = diff
+                .key
+                .overlap
+                .map(|overlap| serde_json::to_string(&overlap).expect("numbers always serialize"))
+                .unwrap_or_else(|| "0".to_owned());
+            format!("col_key(guessed: {name}, overlap: {overlap})")
+        }
     }
 }
 
@@ -115,18 +151,25 @@ mod tests {
         .unwrap()
     }
 
-    fn render(old: &RecordBatch, new: &RecordBatch) -> String {
+    fn render_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> String {
         let diff = diff_tables(
             old,
             new,
             &DiffOptions {
-                key: vec!["id".into()],
+                key: key
+                    .iter()
+                    .map(|component| (*component).to_owned())
+                    .collect(),
             },
         )
         .unwrap();
         let mut output = Vec::new();
         write_human(&mut output, &diff).unwrap();
         String::from_utf8(output).unwrap()
+    }
+
+    fn render(old: &RecordBatch, new: &RecordBatch) -> String {
+        render_with(old, new, &["id"])
     }
 
     #[test]
@@ -143,6 +186,7 @@ mod tests {
         ]);
 
         insta::assert_snapshot!(render(&old, &new), @r#"
+        col_key(declared: ["id"])
         col_drop("drop")
         col_add("add")
         col_order("value", 3 -> 1)
@@ -151,6 +195,52 @@ mod tests {
         row_add(3)
         row_order(2 -> 1)
         "#);
+    }
+
+    #[test]
+    fn announces_a_declared_compound_key() {
+        let old = table(vec![
+            ("group", Arc::new(StringArray::from(vec!["a"]))),
+            ("id", Arc::new(Int64Array::from(vec![1]))),
+        ]);
+
+        assert_eq!(
+            render_with(&old, &old, &["group", "id"]),
+            "col_key(declared: [\"group\", \"id\"])\nno_changes()"
+        );
+    }
+
+    #[test]
+    fn announces_a_guessed_key_with_its_normalized_overlap() {
+        let old = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+            ("value", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+        ]);
+        let new = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![3, 1, 4]))),
+            ("value", Arc::new(Int64Array::from(vec![31, 10, 40]))),
+        ]);
+
+        insta::assert_snapshot!(render_with(&old, &new, &[]), @r#"
+        col_key(guessed: "id", overlap: 0.6666666666666666)
+        row_drop(2)
+        row_add(3)
+        row_order(3 -> 1)
+        row_edit(3 -> 1)
+        "#);
+    }
+
+    #[test]
+    fn a_guessed_key_without_changes_still_reports_no_changes() {
+        let old = table(vec![(
+            "line\n\"quoted\"",
+            Arc::new(Int64Array::from(vec![1, 2])),
+        )]);
+
+        assert_eq!(
+            render_with(&old, &old, &[]),
+            "col_key(guessed: \"line\\n\\\"quoted\\\"\", overlap: 1.0)\nno_changes()"
+        );
     }
 
     #[test]
@@ -166,7 +256,10 @@ mod tests {
             ("b", Arc::new(Int64Array::from(vec![30, 41]))),
         ]);
 
-        assert_eq!(render(&old, &new), "row_edit(2)");
+        assert_eq!(
+            render(&old, &new),
+            "col_key(declared: [\"id\"])\nrow_edit(2)"
+        );
     }
 
     #[test]
@@ -176,7 +269,10 @@ mod tests {
             ("value", Arc::new(Int64Array::from(vec![10]))),
         ]);
 
-        assert_eq!(render(&table, &table), "no_changes()");
+        assert_eq!(
+            render(&table, &table),
+            "col_key(declared: [\"id\"])\nno_changes()"
+        );
     }
 
     #[test]
@@ -187,6 +283,9 @@ mod tests {
         ]);
         let new = table(vec![("id", Arc::new(Int64Array::from(vec![1])))]);
 
-        assert_eq!(render(&old, &new), r#"col_drop("line\n\"quoted\"")"#);
+        assert_eq!(
+            render(&old, &new),
+            "col_key(declared: [\"id\"])\ncol_drop(\"line\\n\\\"quoted\\\"\")"
+        );
     }
 }

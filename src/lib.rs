@@ -19,8 +19,8 @@ pub use input::{read_parquet, validate_tables};
 pub use json::write_json;
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, EditSummary, KeyBasis, KeyDiff, NormalizedType, OrderDiff,
-    RowsDiff, Schemas, Side,
+    DiffOptions, DuplicateColumnName, EditSummary, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,
+    OrderDiff, RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -62,12 +62,13 @@ pub fn diff_tables(
                 .collect(),
         },
         key: KeyDiff {
-            basis: KeyBasis::Declared,
+            basis: key.basis,
             columns: key
                 .columns
                 .iter()
                 .map(|column| Coordinate::from_zero_based(column.old, column.new))
                 .collect(),
+            overlap: key.overlap,
         },
         rows: RowsDiff {
             added: one_based(&rows.added),

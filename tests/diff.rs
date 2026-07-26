@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use arrow_array::{Int32Array, Int64Array, StringArray};
-use data_diff::{DiffOptions, diff_tables};
+use data_diff::{DiffError, DiffOptions, diff_tables};
 use serde_json::json;
 
 #[test]
@@ -164,6 +164,110 @@ fn selected_row_retains_its_moved_coordinate() {
 
     assert_eq!(value["summary"]["columns"], json!([]));
     assert_eq!(value["summary"]["rows"], json!([[1, 2]]));
+}
+
+#[test]
+fn default_options_guess_a_key_and_align_reordered_rows() {
+    let old = common::batch([
+        ("customer_id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("value", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+    ]);
+    let new = common::batch([
+        ("value", Arc::new(Int64Array::from(vec![30, 10, 21]))),
+        ("customer_id", Arc::new(Int64Array::from(vec![3, 1, 2]))),
+    ]);
+
+    let value =
+        serde_json::to_value(diff_tables(&old, &new, &DiffOptions::default()).unwrap()).unwrap();
+
+    assert_eq!(
+        value["key"],
+        json!({
+            "basis": "guessed",
+            "columns": [[1, 2]],
+            "overlap": 1.0,
+        })
+    );
+    assert_eq!(value["rows"]["matched"], json!([[1, 2], [2, 3], [3, 1]]));
+    assert_eq!(value["rows"]["added"], json!([]));
+    assert_eq!(value["rows"]["dropped"], json!([]));
+    assert_eq!(value["cells"], json!([[[2, 2], [3, 1]]]));
+}
+
+#[test]
+fn an_explicit_key_overrides_a_stronger_eligible_guess() {
+    let old = common::batch([
+        ("weak", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+    ]);
+    let new = common::batch([
+        ("weak", Arc::new(Int64Array::from(vec![1, 4, 5]))),
+        ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+    ]);
+    let options = DiffOptions {
+        key: vec!["weak".into()],
+    };
+
+    let value = serde_json::to_value(diff_tables(&old, &new, &options).unwrap()).unwrap();
+
+    assert_eq!(value["key"], json!({"basis": "declared", "columns": [1]}));
+    assert_eq!(value["rows"]["matched"], json!([1]));
+}
+
+#[test]
+fn a_guessed_key_stays_out_of_top_level_changed_cells() {
+    let old = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+        ("value", Arc::new(Int64Array::from(vec![10, 20]))),
+    ]);
+    let new = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+        ("value", Arc::new(Int64Array::from(vec![10, 21]))),
+    ]);
+
+    let value =
+        serde_json::to_value(diff_tables(&old, &new, &DiffOptions::default()).unwrap()).unwrap();
+
+    assert_eq!(value["key"]["basis"], json!("guessed"));
+    assert_eq!(value["cells"], json!([[2, 2]]));
+}
+
+#[test]
+fn automatic_resolution_without_an_eligible_key_is_an_error() {
+    let empty = common::batch([("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
+    let rows = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+    let disjoint = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+
+    assert_eq!(
+        diff_tables(&empty, &rows, &DiffOptions::default()).unwrap_err(),
+        DiffError::MissingKey
+    );
+    assert_eq!(
+        diff_tables(&rows, &empty, &DiffOptions::default()).unwrap_err(),
+        DiffError::MissingKey
+    );
+    assert_eq!(
+        diff_tables(&rows, &disjoint, &DiffOptions::default()).unwrap_err(),
+        DiffError::MissingKey
+    );
+}
+
+#[test]
+fn repeated_guessed_comparisons_are_byte_identical() {
+    let old = common::batch([
+        ("a", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("b", Arc::new(Int64Array::from(vec![7, 8, 9]))),
+    ]);
+    let new = common::batch([
+        ("a", Arc::new(Int64Array::from(vec![2, 3, 4]))),
+        ("b", Arc::new(Int64Array::from(vec![9, 8, 7]))),
+    ]);
+    let options = DiffOptions::default();
+
+    let first = serde_json::to_vec(&diff_tables(&old, &new, &options).unwrap()).unwrap();
+    let second = serde_json::to_vec(&diff_tables(&old, &new, &options).unwrap()).unwrap();
+
+    assert_eq!(first, second);
 }
 
 #[test]

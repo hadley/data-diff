@@ -14,14 +14,21 @@ cargo install --path .
 
 The commands below use that installed `data-diff` binary.
 
-## Basic value edits
+## Basic value edits with a guessed key
+
+```console
+data-diff demo/basic-old.parquet demo/basic-new.parquet
+```
+
+With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(guessed: "id", overlap: 1.0)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
+
+## Declaring the key explicitly
 
 ```console
 data-diff demo/basic-old.parquet demo/basic-new.parquet --key id
 ```
 
-All rows and columns retain identity. Row 2 changes in both `name` and `score`,
-which is summarized as one `row_edit(2)`.
+The same comparison with a declared key produces the same operations behind a `col_key(declared: ["id"])` line. An explicit `--key` always overrides guessing, which matters when the strongest same-name overlap is not the real row identity.
 
 ## Scattered value edits
 

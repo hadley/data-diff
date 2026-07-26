@@ -20,14 +20,14 @@ fn help_describes_the_initial_interface() {
     insta::assert_snapshot!(stdout, @r"
     Compare two tabular data files
 
-    Usage: data-diff [OPTIONS] --key <KEY> <OLD> <NEW>
+    Usage: data-diff [OPTIONS] <OLD> <NEW>
 
     Arguments:
       <OLD>  Original Parquet file
       <NEW>  Modified Parquet file
 
     Options:
-          --key <KEY>        Comma-separated, same-name key columns
+          --key <KEY>        Comma-separated, same-name key columns; when omitted, a single-column key is guessed
           --format <FORMAT>  Output representation [default: human] [possible values: json, human]
       -h, --help             Print help
       -V, --version          Print version
@@ -118,6 +118,75 @@ fn compares_two_parquet_files_as_json() {
       }
     }
     "#);
+}
+
+#[test]
+fn guesses_a_key_when_the_flag_is_omitted() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+        ("label", Arc::new(StringArray::from(vec!["a", "b", "c"]))),
+    ]);
+    let new = common::batch([
+        ("id", Arc::new(Int64Array::from(vec![1, 2, 4]))),
+        ("label", Arc::new(StringArray::from(vec!["a", "B", "d"]))),
+    ]);
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .output()
+        .expect("failed to run data-diff");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(guessed: "id", overlap: 0.6666666666666666)
+    row_drop(3)
+    row_add(3)
+    row_edit(2)
+    "#);
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--format", "json"])
+        .output()
+        .expect("failed to run data-diff");
+    let value: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        value["key"],
+        json!({
+            "basis": "guessed",
+            "columns": [1],
+            "overlap": 0.666_666_666_666_666_6,
+        })
+    );
+}
+
+#[test]
+fn reports_a_missing_key_when_nothing_can_be_guessed() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+    let new = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .output()
+        .expect("failed to run data-diff");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "no key was supplied and no eligible key could be guessed\n"
+    );
 }
 
 #[test]
@@ -213,6 +282,7 @@ fn reports_mixed_changes_in_human_format() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["id"])
     col_drop("drop")
     col_add("add")
     col_order("value", 2 -> 1)
