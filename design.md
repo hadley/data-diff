@@ -8,7 +8,7 @@ This document lays out the design of a data-diff tool for tabular files, initial
 
 A few principles:
 
-* `data-diff` is a visual tool for humans: there's no goal to make patches or machine-readable output part of the final product. This gives us considerable freedom in the UI, including asking the user to resolve ambiguities and choose the display that they find most useful.
+* `data-diff` is a visual tool for humans: there's no goal to make patches or machine-readable output part of the final product. This gives us considerable freedom in the UI, including asking the user to resolve ambiguities and choose the display that they find most useful. An early JSON output existed as scaffolding while the human format was being built and has since been removed.
 
 * We require row identifiers (keys) to produce the most semantically meaningful diffs. If no key is supplied at the command line, we guess and allow the user to override interactively.
 
@@ -285,6 +285,8 @@ For columns, `[a, b]` → `[x, a, b]` is only an addition. `[a, b, c]` → `[c, 
 ### Cell comparison
 
 Now that we have row keys and consistent column identities, we compare non-key cell values over the one-to-one matched rows. This produces a top-level set of changed cells, `[(row1, col1), (row2, col2), ...]`, scattered across rows and columns. We retain the complete one-to-one cell-level change set for display and later summarization. Changed cells from one-to-many comparisons remain nested inside their fanout events as described above.
+
+Retaining that set is a constraint on the result model rather than on any current output. The only output is the compact human format, which deliberately summarizes: it reports the minimum set of row and column edits and never enumerates the cells beneath them. The complete change set stays in the library `Diff` value, where reconciliation and summarization consume it and where tests observe it directly. Giving users access to that evidence again — most likely through library-level access to `Diff`, and eventually through the interactive UI — is future work, and until then no rendering of it exists.
 
 Key columns are excluded from the top-level changed-cell set because unequal key values identify different rows rather than an edited cell. However, an identified key column still produces a `col_edit()` event when its source type changes or its representation is otherwise transformed while canonical key values remain equal. For example, changing key values from string `"001"` to integer `1` is a column edit even though those values match for row identity. Key-column edits are derived directly from schema or representation differences and do not participate in the row/column minimum-cover graph. A key column may also be renamed; rename and edit are independent semantic facts. The initial implementation only needs to detect key-column edits from source-type changes.
 

@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use serde::Serialize;
-
 /// Options that influence reconciliation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
@@ -177,8 +175,7 @@ pub struct DuplicateColumnName {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coordinate(CoordinateRepr);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum CoordinateRepr {
     Same(usize),
     Moved([usize; 2]),
@@ -204,21 +201,11 @@ impl Coordinate {
     }
 }
 
-impl Serialize for Coordinate {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
 /// A one-based old/new cell coordinate, collapsed when both positions agree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellCoordinate(CellCoordinateRepr);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum CellCoordinateRepr {
     Same([usize; 2]),
     Moved([[usize; 2]; 2]),
@@ -242,18 +229,8 @@ impl CellCoordinate {
     }
 }
 
-impl Serialize for CellCoordinate {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
 /// A type in the MVP comparison domain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NormalizedType {
     Boolean,
     Int64,
@@ -262,7 +239,7 @@ pub enum NormalizedType {
 }
 
 /// One column in an input schema.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnSchema {
     pub name: String,
     pub source_type: String,
@@ -270,14 +247,14 @@ pub struct ColumnSchema {
 }
 
 /// The original and normalized input schemas.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Schemas {
     pub old: Vec<ColumnSchema>,
     pub new: Vec<ColumnSchema>,
 }
 
 /// Evidence that an identified column changed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnEdit {
     pub column: Coordinate,
     pub type_changed: bool,
@@ -285,7 +262,7 @@ pub struct ColumnEdit {
 }
 
 /// Resolved column identities and schema events.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColumnsDiff {
     pub identities: Vec<Coordinate>,
     pub added: Vec<usize>,
@@ -294,8 +271,7 @@ pub struct ColumnsDiff {
 }
 
 /// How the row key was selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyBasis {
     Declared,
     Guessed,
@@ -318,26 +294,16 @@ impl KeyOverlap {
     }
 }
 
-impl Serialize for KeyOverlap {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_f64(self.ratio())
-    }
-}
-
 /// The resolved row key.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyDiff {
     pub basis: KeyBasis,
     pub columns: Vec<Coordinate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<KeyOverlap>,
 }
 
 /// Row matching events.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RowsDiff {
     pub added: Vec<usize>,
     pub dropped: Vec<usize>,
@@ -345,14 +311,14 @@ pub struct RowsDiff {
 }
 
 /// Minimal relative-order changes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OrderDiff {
     pub columns: Vec<Coordinate>,
     pub rows: Vec<Coordinate>,
 }
 
 /// A minimum semantic summary of row and column edits.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditSummary {
     pub optimal: bool,
     pub columns: Vec<ColumnEdit>,
@@ -370,7 +336,7 @@ impl Default for EditSummary {
 }
 
 /// An inspectable, coordinate-only table diff.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diff {
     pub schemas: Schemas,
     pub columns: ColumnsDiff,
@@ -383,198 +349,25 @@ pub struct Diff {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::{
-        CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, EditSummary,
-        KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas,
-    };
+    use super::{Coordinate, EditSummary, KeyOverlap};
 
     #[test]
     fn coordinate_collapses_equal_positions() {
-        let coordinate = Coordinate::from_zero_based(1, 1);
-        assert_eq!(serde_json::to_value(coordinate).unwrap(), json!(2));
+        assert_eq!(Coordinate::from_zero_based(1, 1).positions(), (2, 2));
     }
 
     #[test]
     fn coordinate_retains_moved_positions() {
-        let coordinate = Coordinate::from_zero_based(2, 0);
-        assert_eq!(serde_json::to_value(coordinate).unwrap(), json!([3, 1]));
+        assert_eq!(Coordinate::from_zero_based(2, 0).positions(), (3, 1));
     }
 
     #[test]
-    fn cell_collapses_when_both_positions_agree() {
-        let cell = CellCoordinate::from_zero_based(1, 2, 1, 2);
-        assert_eq!(serde_json::to_value(cell).unwrap(), json!([2, 3]));
-    }
-
-    #[test]
-    fn cell_retains_both_positions_when_either_moves() {
-        let cell = CellCoordinate::from_zero_based(0, 2, 3, 1);
-        assert_eq!(serde_json::to_value(cell).unwrap(), json!([[1, 3], [4, 2]]));
-    }
-
-    #[test]
-    fn diff_serializes_in_stable_field_order() {
-        let diff = Diff {
-            schemas: Schemas {
-                old: vec![ColumnSchema {
-                    name: "id".into(),
-                    source_type: "INT64".into(),
-                    normalized_type: NormalizedType::Int64,
-                }],
-                new: vec![ColumnSchema {
-                    name: "id".into(),
-                    source_type: "INT64".into(),
-                    normalized_type: NormalizedType::Int64,
-                }],
-            },
-            columns: ColumnsDiff {
-                identities: vec![Coordinate::from_zero_based(0, 0)],
-                edited: vec![ColumnEdit {
-                    column: Coordinate::from_zero_based(0, 0),
-                    type_changed: false,
-                    values_changed: true,
-                }],
-                ..ColumnsDiff::default()
-            },
-            key: KeyDiff {
-                basis: KeyBasis::Declared,
-                columns: vec![Coordinate::from_zero_based(0, 0)],
-                overlap: None,
-            },
-            rows: RowsDiff {
-                matched: vec![Coordinate::from_zero_based(0, 1)],
-                ..RowsDiff::default()
-            },
-            order: OrderDiff::default(),
-            cells: vec![CellCoordinate::from_zero_based(0, 0, 1, 0)],
-            summary: EditSummary {
-                optimal: true,
-                columns: vec![ColumnEdit {
-                    column: Coordinate::from_zero_based(0, 0),
-                    type_changed: false,
-                    values_changed: true,
-                }],
-                rows: vec![Coordinate::from_zero_based(0, 1)],
-            },
+    fn overlap_normalizes_shared_by_possible() {
+        let overlap = KeyOverlap {
+            shared: 2,
+            possible: 3,
         };
-
-        insta::assert_json_snapshot!(diff, @r#"
-        {
-          "schemas": {
-            "old": [
-              {
-                "name": "id",
-                "source_type": "INT64",
-                "normalized_type": "int64"
-              }
-            ],
-            "new": [
-              {
-                "name": "id",
-                "source_type": "INT64",
-                "normalized_type": "int64"
-              }
-            ]
-          },
-          "columns": {
-            "identities": [
-              1
-            ],
-            "added": [],
-            "dropped": [],
-            "edited": [
-              {
-                "column": 1,
-                "type_changed": false,
-                "values_changed": true
-              }
-            ]
-          },
-          "key": {
-            "basis": "declared",
-            "columns": [
-              1
-            ]
-          },
-          "rows": {
-            "added": [],
-            "dropped": [],
-            "matched": [
-              [
-                1,
-                2
-              ]
-            ]
-          },
-          "order": {
-            "columns": [],
-            "rows": []
-          },
-          "cells": [
-            [
-              [
-                1,
-                1
-              ],
-              [
-                2,
-                1
-              ]
-            ]
-          ],
-          "summary": {
-            "optimal": true,
-            "columns": [
-              {
-                "column": 1,
-                "type_changed": false,
-                "values_changed": true
-              }
-            ],
-            "rows": [
-              [
-                1,
-                2
-              ]
-            ]
-          }
-        }
-        "#);
-    }
-
-    #[test]
-    fn overlap_serializes_as_a_normalized_ratio() {
-        let key = KeyDiff {
-            basis: KeyBasis::Guessed,
-            columns: vec![Coordinate::from_zero_based(2, 2)],
-            overlap: Some(KeyOverlap {
-                shared: 2,
-                possible: 3,
-            }),
-        };
-        assert_eq!(
-            serde_json::to_value(&key).unwrap(),
-            json!({
-                "basis": "guessed",
-                "columns": [3],
-                "overlap": 0.666_666_666_666_666_6,
-            })
-        );
-    }
-
-    #[test]
-    fn declared_keys_omit_overlap() {
-        let key = KeyDiff {
-            basis: KeyBasis::Declared,
-            columns: vec![Coordinate::from_zero_based(0, 0)],
-            overlap: None,
-        };
-        assert_eq!(
-            serde_json::to_string(&key).unwrap(),
-            r#"{"basis":"declared","columns":[1]}"#
-        );
+        assert_eq!(overlap.ratio(), 2.0 / 3.0);
     }
 
     #[test]
