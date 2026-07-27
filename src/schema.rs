@@ -71,23 +71,12 @@ pub(crate) fn reconcile_schema(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch};
-    use arrow_schema::{Field, Schema};
+    use arrow_array::RecordBatch;
+    use test_support::table;
 
     use super::{ColumnIdentity, SchemaMatches, reconcile_schema};
     use crate::key::resolve_key;
     use crate::{DiffError, DiffOptions};
-
-    fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        let arrays = columns.into_iter().map(|(_, values)| values).collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-    }
 
     fn reconcile(old: &RecordBatch, new: &RecordBatch) -> Result<SchemaMatches, DiffError> {
         let options = DiffOptions {
@@ -99,16 +88,16 @@ mod tests {
 
     #[test]
     fn identifies_same_names_and_classifies_unmatched_columns() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("drop", Arc::new(Int64Array::from(vec![1]))),
-            ("value", Arc::new(Float64Array::from(vec![1.0]))),
-        ]);
-        let new = table(vec![
-            ("value", Arc::new(Float64Array::from(vec![1.0]))),
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("add", Arc::new(Int64Array::from(vec![1]))),
-        ]);
+        let old = table! {
+            "id" => [1],
+            "drop" => [1],
+            "value" => [1.0],
+        };
+        let new = table! {
+            "value" => [1.0],
+            "id" => [1],
+            "add" => [1],
+        };
 
         assert_eq!(
             reconcile(&old, &new).unwrap(),
@@ -135,14 +124,14 @@ mod tests {
 
     #[test]
     fn records_key_and_non_key_type_changes() {
-        let old = table(vec![
-            ("id", Arc::new(Int32Array::from(vec![1]))),
-            ("value", Arc::new(Int32Array::from(vec![1]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("value", Arc::new(Float64Array::from(vec![1.0]))),
-        ]);
+        let old = table! {
+            "id" => i32[1],
+            "value" => i32[1],
+        };
+        let new = table! {
+            "id" => [1],
+            "value" => [1.0],
+        };
 
         let schema = reconcile(&old, &new).unwrap();
 
@@ -153,14 +142,14 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_same_name_columns() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("flag", Arc::new(BooleanArray::from(vec![true]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("flag", Arc::new(Int64Array::from(vec![1]))),
-        ]);
+        let old = table! {
+            "id" => [1],
+            "flag" => [true],
+        };
+        let new = table! {
+            "id" => [1],
+            "flag" => [1],
+        };
 
         assert_eq!(
             reconcile(&old, &new).unwrap_err(),

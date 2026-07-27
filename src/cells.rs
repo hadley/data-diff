@@ -86,25 +86,14 @@ pub(crate) fn compare_cells(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow_array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
-    use arrow_schema::{Field, Schema};
+    use arrow_array::RecordBatch;
+    use test_support::table;
 
     use super::{ChangedCell, ColumnChanges, compare_cells};
     use crate::DiffOptions;
     use crate::key::resolve_key;
     use crate::rows::match_rows;
     use crate::schema::reconcile_schema;
-
-    fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        let arrays = columns.into_iter().map(|(_, values)| values).collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-    }
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
@@ -124,16 +113,16 @@ mod tests {
 
     #[test]
     fn reports_complete_cells_in_old_coordinate_order() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("a", Arc::new(Int64Array::from(vec![10, 20]))),
-            ("b", Arc::new(Int64Array::from(vec![30, 40]))),
-        ]);
-        let new = table(vec![
-            ("b", Arc::new(Int64Array::from(vec![41, 31]))),
-            ("id", Arc::new(Int64Array::from(vec![2, 1]))),
-            ("a", Arc::new(Int64Array::from(vec![21, 11]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+        let new = table! {
+            "b" => [41, 31],
+            "id" => [2, 1],
+            "a" => [21, 11],
+        };
 
         let changes = changes(&old, &new);
 
@@ -187,14 +176,14 @@ mod tests {
 
     #[test]
     fn a_guessed_key_column_is_excluded_like_a_declared_one() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 20]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 21]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [10, 21],
+        };
 
         // "id" shares both values and "value" only one, so guessing selects
         // "id"; the selected column is excluded whatever the basis.
@@ -211,44 +200,44 @@ mod tests {
 
     #[test]
     fn added_and_dropped_rows_do_not_manufacture_cells() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 20]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![2, 3]))),
-            ("value", Arc::new(Int64Array::from(vec![20, 99]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [2, 3],
+            "value" => [20, 99],
+        };
 
         assert!(changes(&old, &new).changed_cells().is_empty());
     }
 
     #[test]
     fn added_and_dropped_columns_do_not_manufacture_cells() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("drop", Arc::new(Int64Array::from(vec![10]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("add", Arc::new(Int64Array::from(vec![99]))),
-        ]);
+        let old = table! {
+            "id" => [1],
+            "drop" => [10],
+        };
+        let new = table! {
+            "id" => [1],
+            "add" => [99],
+        };
 
         assert!(changes(&old, &new).changed_cells().is_empty());
     }
 
     #[test]
     fn type_changes_are_independent_of_value_changes() {
-        let old = table(vec![
-            ("id", Arc::new(Int32Array::from(vec![1]))),
-            ("same", Arc::new(Int32Array::from(vec![10]))),
-            ("changed", Arc::new(Int32Array::from(vec![20]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("same", Arc::new(Int64Array::from(vec![10]))),
-            ("changed", Arc::new(Float64Array::from(vec![21.0]))),
-        ]);
+        let old = table! {
+            "id" => i32[1],
+            "same" => i32[10],
+            "changed" => i32[20],
+        };
+        let new = table! {
+            "id" => [1],
+            "same" => [10],
+            "changed" => [21.0],
+        };
 
         let changes = changes(&old, &new);
 
@@ -280,20 +269,14 @@ mod tests {
 
     #[test]
     fn compatible_nulls_and_nan_do_not_change() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            (
-                "value",
-                Arc::new(StringArray::from(vec![None, Some("NaN")])),
-            ),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            (
-                "value",
-                Arc::new(Float64Array::from(vec![None, Some(f64::NAN)])),
-            ),
-        ]);
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [None, Some("NaN")],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [None, Some(f64::NAN)],
+        };
 
         let changes = changes(&old, &new);
 

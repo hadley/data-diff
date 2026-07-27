@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT"
 
+[workspace]
+members = ["test-support"]
+
 [dependencies]
 arrow-array = "54"
 arrow-cast = "54"
@@ -23,3 +26,4 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 insta = "1"
+test-support = { path = "test-support" }

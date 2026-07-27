@@ -1,9 +1,8 @@
 mod common;
 
 use std::process::Command;
-use std::sync::Arc;
 
-use arrow_array::{Int32Array, Int64Array, StringArray};
+use test_support::table;
 
 #[test]
 fn help_describes_the_initial_interface() {
@@ -37,10 +36,10 @@ fn compares_two_identical_parquet_files() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("label", Arc::new(StringArray::from(vec!["a", "b"]))),
-    ]);
+    let old = table! {
+        "id" => [1, 2],
+        "label" => ["a", "b"],
+    };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &old);
 
@@ -63,14 +62,14 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-        ("label", Arc::new(StringArray::from(vec!["a", "b", "c"]))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2, 4]))),
-        ("label", Arc::new(StringArray::from(vec!["a", "B", "d"]))),
-    ]);
+    let old = table! {
+        "id" => [1, 2, 3],
+        "label" => ["a", "b", "c"],
+    };
+    let new = table! {
+        "id" => [1, 2, 4],
+        "label" => ["a", "B", "d"],
+    };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &new);
 
@@ -94,8 +93,8 @@ fn reports_a_missing_key_when_nothing_can_be_guessed() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-    let new = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+    let old = table! { "id" => [1, 2] };
+    let new = table! { "id" => [3, 4] };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &new);
 
@@ -136,16 +135,16 @@ fn reports_mixed_changes_in_human_format() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2, 4]))),
-        ("value", Arc::new(Int64Array::from(vec![10, 20, 40]))),
-        ("drop", Arc::new(StringArray::from(vec!["x", "y", "z"]))),
-    ]);
-    let new = common::batch([
-        ("value", Arc::new(Int64Array::from(vec![21, 11, 30]))),
-        ("id", Arc::new(Int64Array::from(vec![2, 1, 3]))),
-        ("add", Arc::new(StringArray::from(vec!["a", "b", "c"]))),
-    ]);
+    let old = table! {
+        "id" => [1, 2, 4],
+        "value" => [10, 20, 40],
+        "drop" => ["x", "y", "z"],
+    };
+    let new = table! {
+        "value" => [21, 11, 30],
+        "id" => [2, 1, 3],
+        "add" => ["a", "b", "c"],
+    };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &new);
 
@@ -174,14 +173,14 @@ fn empty_files_still_report_type_only_schema_changes() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = common::batch([
-        ("id", Arc::new(Int32Array::from(Vec::<i32>::new()))),
-        ("value", Arc::new(Int32Array::from(Vec::<i32>::new()))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(Vec::<i64>::new()))),
-        ("value", Arc::new(Int64Array::from(Vec::<i64>::new()))),
-    ]);
+    let old = table! {
+        "id" => i32[],
+        "value" => i32[],
+    };
+    let new = table! {
+        "id" => i64[],
+        "value" => i64[],
+    };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &new);
 

@@ -127,25 +127,11 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray};
-    use arrow_schema::{Field, Schema};
+    use arrow_array::RecordBatch;
+    use test_support::table;
 
     use super::write_human;
     use crate::{DiffOptions, diff_tables};
-
-    fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        RecordBatch::try_new(
-            Arc::new(Schema::new(fields)),
-            columns.into_iter().map(|(_, values)| values).collect(),
-        )
-        .unwrap()
-    }
 
     fn render_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> String {
         let diff = diff_tables(
@@ -170,16 +156,16 @@ mod tests {
 
     #[test]
     fn writes_mixed_changes_as_one_operation_per_line() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 4]))),
-            ("drop", Arc::new(StringArray::from(vec!["x", "y", "z"]))),
-            ("value", Arc::new(Int32Array::from(vec![10, 20, 40]))),
-        ]);
-        let new = table(vec![
-            ("value", Arc::new(Int64Array::from(vec![21, 11, 30]))),
-            ("id", Arc::new(Int64Array::from(vec![2, 1, 3]))),
-            ("add", Arc::new(StringArray::from(vec!["a", "b", "c"]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2, 4],
+            "drop" => ["x", "y", "z"],
+            "value" => i32[10, 20, 40],
+        };
+        let new = table! {
+            "value" => [21, 11, 30],
+            "id" => [2, 1, 3],
+            "add" => ["a", "b", "c"],
+        };
 
         insta::assert_snapshot!(render(&old, &new), @r#"
         col_key(declared: ["id"])
@@ -195,10 +181,10 @@ mod tests {
 
     #[test]
     fn announces_a_declared_compound_key() {
-        let old = table(vec![
-            ("group", Arc::new(StringArray::from(vec!["a"]))),
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-        ]);
+        let old = table! {
+            "group" => ["a"],
+            "id" => [1],
+        };
 
         assert_eq!(
             render_with(&old, &old, &["group", "id"]),
@@ -208,14 +194,14 @@ mod tests {
 
     #[test]
     fn announces_a_guessed_key_with_its_normalized_overlap() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![3, 1, 4]))),
-            ("value", Arc::new(Int64Array::from(vec![31, 10, 40]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2, 3],
+            "value" => [10, 20, 30],
+        };
+        let new = table! {
+            "id" => [3, 1, 4],
+            "value" => [31, 10, 40],
+        };
 
         insta::assert_snapshot!(render_with(&old, &new, &[]), @r#"
         col_key(guessed: ["id"], overlap: 0.67)
@@ -228,10 +214,7 @@ mod tests {
 
     #[test]
     fn a_guessed_key_without_changes_still_reports_no_changes() {
-        let old = table(vec![(
-            "line\n\"quoted\"",
-            Arc::new(Int64Array::from(vec![1, 2])),
-        )]);
+        let old = table! { "line\n\"quoted\"" => [1, 2] };
 
         assert_eq!(
             render_with(&old, &old, &[]),
@@ -241,16 +224,16 @@ mod tests {
 
     #[test]
     fn summarizes_multiple_cells_as_one_row_edit() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("a", Arc::new(Int64Array::from(vec![10, 20]))),
-            ("b", Arc::new(Int64Array::from(vec![30, 40]))),
-        ]);
-        let new = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("a", Arc::new(Int64Array::from(vec![10, 21]))),
-            ("b", Arc::new(Int64Array::from(vec![30, 41]))),
-        ]);
+        let old = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "a" => [10, 21],
+            "b" => [30, 41],
+        };
 
         assert_eq!(
             render(&old, &new),
@@ -260,10 +243,10 @@ mod tests {
 
     #[test]
     fn writes_an_explicit_operation_when_nothing_changed() {
-        let table = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("value", Arc::new(Int64Array::from(vec![10]))),
-        ]);
+        let table = table! {
+            "id" => [1],
+            "value" => [10],
+        };
 
         assert_eq!(
             render(&table, &table),
@@ -273,11 +256,11 @@ mod tests {
 
     #[test]
     fn quotes_unusual_column_names() {
-        let old = table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1]))),
-            ("line\n\"quoted\"", Arc::new(Int64Array::from(vec![10]))),
-        ]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![1])))]);
+        let old = table! {
+            "id" => [1],
+            "line\n\"quoted\"" => [10],
+        };
+        let new = table! { "id" => [1] };
 
         assert_eq!(
             render(&old, &new),

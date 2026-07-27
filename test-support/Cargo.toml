@@ -1,0 +1,10 @@
+[package]
+name = "test-support"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+arrow-array = "54"
+arrow-schema = "54"

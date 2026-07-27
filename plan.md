@@ -1,142 +1,156 @@
 ---
-title: Drop JSON output
+title: Compact test fixture construction
 ---
 
 # Todo
 
-- [x] **Remove the JSON output path.** Delete `src/json.rs`, its `mod json;` declaration, and the `write_json` re-export from `src/lib.rs`. In `src/main.rs`, delete the `OutputFormat` enum, the `--format` argument, and the `clap::ValueEnum` import, leaving one unconditional `write_human` call that keeps its current error message and trailing newline.
-- [x] **Strip serialization from the result model.** In `src/model.rs`, remove the `use serde::Serialize` import, every `Serialize` derive, every `#[serde(...)]` attribute, and the three hand-written `impl Serialize` blocks for `Coordinate`, `CellCoordinate`, and `KeyOverlap`. Every field, constructor, and variant keeps its current name, visibility, and meaning; `KeyOverlap::ratio()` stays because `human.rs` reports it.
-- [x] **Prune dependencies left without a consumer.** Drop `serde` from `[dependencies]`, drop the unused `indoc` dev-dependency, and reduce `insta` to its default features once no `assert_json_snapshot!` remains. Keep `serde_json`, which `human::quote` still uses to quote and escape column names, and refresh `Cargo.lock`.
-- [x] **Rewrite the library integration tests against `Diff`.** Replace every `serde_json::to_value(diff)` assertion in `tests/diff.rs` with a direct assertion on the corresponding `Diff` field, building expected coordinates with the public `Coordinate::from_zero_based` and `CellCoordinate::from_zero_based`. Keep each surviving test's current granularity rather than collapsing them into whole-value comparisons, and remove the two tests that belong below it: delete the one whose claims are already made stage by stage, folding its composed claim into its neighbour, and move declared-key precedence into `key.rs`.
-- [x] **Restate the determinism guarantee.** Convert both byte-comparison tests to assert structural equality of the two `Diff` values and byte equality of their rendered human output, so determinism covers both the retained evidence and the artifact users actually see.
-- [x] **Rework CLI coverage around the single output format.** Update the help snapshot, convert the JSON-based process tests to human-output assertions, and delete the mixed-change JSON test that now only duplicates its human-format twin.
-- [x] **Prune the model's serialization-shape tests.** In `src/model.rs`, replace the JSON assertions with `positions()` and `ratio()` assertions where behavior is still observable, and delete the tests whose only subject was the JSON document shape.
-- [x] **Record the evidence deferral in `design.md`.** State that the CLI emits only the human format, that the complete cell-level change set is retained in the library `Diff` value, and that exposing that evidence to users again is future work.
-- [x] **Update the README.** Remove the JSON format from the summary, usage, and behavior sections, and add re-exposing the complete result to the list of things `data-diff` does not do yet.
-- [x] **Complete the acceptance pass.** Run the full test suite, strict Clippy, formatting, and diff checks, and confirm repeated runs still produce byte-identical output.
+- [x] **Add the `test-support` workspace member.** Turn the root `Cargo.toml` into a workspace with one member, add `test-support/Cargo.toml` depending on `arrow-array` and `arrow-schema` at the versions the root crate pins, and add `test-support = { path = "test-support" }` to the root `[dev-dependencies]` so both the inline `#[cfg(test)]` modules and the integration tests can use it. Refresh `Cargo.lock`.
+- [x] **Implement the fixture value model.** In `test-support/src/lib.rs`, add the `CellValue` trait, its `Kind` classification, the `Cell` value enum, the annotation vocabulary, and the array builder that turns a list of cells and a resolved Arrow type into an `ArrayRef`.
+- [x] **Implement the `column!` and `table!` macros.** Cover the annotated and unannotated forms, the empty-list form, and the zero-column form, and add `rows_without_columns`. Give the crate its own unit tests asserting the produced `DataType`, null placement, row count, and field nullability for every form the fixtures use, the exact keys and dictionary of `dict` and the exact bytes of `binary`, and a `#[should_panic]` case for each run-time misuse through both macros.
+- [x] **Convert the five behavior modules.** Rewrite the fixtures in `src/cells.rs`, `src/human.rs`, `src/key.rs`, `src/rows.rs`, and `src/schema.rs` to `table!`, delete each module's local `fn table`, and confirm each test module's imports no longer mention `std::sync::Arc` or any Arrow array type.
+- [x] **Convert the representation modules.** Rewrite the fixtures in `src/input.rs` and `src/compare.rs`, and delete `input.rs`'s local `fn table` and `fn empty`. Keep explicit Arrow construction where an Arrow type is the subject of the assertion, which after this step means `compare.rs`'s hand-encoded dictionary alone; leave a comment there saying why it stays.
+- [x] **Convert the integration tests.** Replace `common::batch` and `common::empty_batch` with `table!` in `tests/diff.rs`, `tests/cli.rs`, `tests/input.rs`, and `tests/smoke.rs`, and delete both helpers from `tests/common/mod.rs`, which keeps `TempDir` and the Parquet writers.
+- [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, confirm no inline snapshot changed, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-`data-diff` is a visual tool for humans, and `design.md` states that machine-readable output is not a goal of the final product. The JSON format was an early scaffold for inspecting the result before the human format existed; it now has no place in the product but still shapes the result model, the CLI surface, the dependency list, and almost every integration test.
+Every fixture in the suite is written as `("id", Arc::new(Int64Array::from(vec![1, 2, 3])))`, and the same `fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch` is copied into six modules and duplicated again as `common::batch` for the integration tests. The scaffolding is longer than the data it carries, so a two-column fixture takes six lines and the shape of the table has to be decoded rather than read.
 
-Remove it, leaving the human format as the only output, and leave behind a result model that carries exactly the same evidence with none of the serialization machinery:
+Replace both with one shared construction helper that infers the Arrow array type from the literal values:
 
-```console
-data-diff old.parquet new.parquet
+```rust
+let old = table! {
+    "id" => [1, 2, 3],
+    "value" => [10, 20, 30],
+};
 ```
 
-This is a subtraction with no behavior change. Every diff that succeeds today succeeds afterwards, with byte-identical human output; every diff that fails today fails afterwards with the same message and exit status.
+A successful result is a suite that mentions Arrow only where an Arrow type is genuinely part of what a test says: the `RecordBatch` and `ArrayRef` parameters of a module's own pipeline helpers, the `DataType` enumerations that two tests are entirely about, and one hand-encoded dictionary whose subject is the encoding. This is a pure refactor: every existing assertion keeps its current meaning, every fixture keeps its current Arrow types, no inline snapshot changes, and the suite stays green throughout.
 
 # Scope
 
-The step removes the JSON output path and every fragment that existed only to serve it, then rewrites the tests that were written through it.
+## What changes
 
-## What is removed
-
-* `src/json.rs`, including `write_json` and the `CompactArrayFormatter` that kept coordinate arrays on one line.
-* The `mod json;` declaration and the `pub use json::write_json;` re-export in `src/lib.rs`.
-* The `OutputFormat` enum, the `--format` flag, and the format match in `src/main.rs`.
-* Every `Serialize` derive, `#[serde(...)]` attribute, and hand-written `Serialize` implementation in `src/model.rs`.
-* The `serde` dependency, the unused `indoc` dev-dependency, and `insta`'s `json` feature.
+* One new workspace member, `test-support`, holding the fixture macros and the small helpers that go with them.
+* The fixtures and imports of the seven inline test modules that build tables or arrays: `cells`, `human`, `key`, `rows`, `schema`, `input`, and `compare`.
+* The fixtures of the four integration test files, and the removal of `batch` and `empty_batch` from `tests/common/mod.rs`.
+* `Cargo.toml`, which gains a `[workspace]` section and one dev-dependency, and `Cargo.lock`.
 
 ## What stays and why
 
-The result model keeps every type, field, constructor, and doc comment it has today. `cells`, `columns.identities`, `rows.matched`, and the rest retain their current meanings even though nothing prints them: they are the complete cell-level evidence that `design.md` treats as a central invariant, and the human format deliberately summarizes rather than enumerates them.
+Every assertion, test name, and inline snapshot stays exactly as it is. The fixtures must produce the same Arrow types they produce today, because several tests are about those types: `human.rs` snapshots `type "Int32" -> "Int64"`, `cells.rs` asserts `type_changed` across `Int32`, `Int64`, and `Float64`, and `input.rs` enumerates every supported Arrow representation. Any snapshot change during this step is a bug in the conversion, not an update to accept.
 
-`serde_json` stays in `[dependencies]`. `human::quote` uses `serde_json::to_string` to render column names as quoted, escaped JSON strings, which is what makes unusual names unambiguous in the human format. Hand-rolling that escaping to shed the dependency is a separate question and is not part of this step.
+`tests/common/mod.rs` keeps `TempDir`, `write_parquet`, and `write_parquet_batches`. They are Parquet fixtures shared between integration test binaries, not table construction, and moving them would pull a `parquet` dependency into `test-support` for no benefit to this step.
 
-`Coordinate` and `CellCoordinate` keep their private `CoordinateRepr` and `CellCoordinateRepr` enums. Those enums are reachable from `from_zero_based` and `positions()`, so they are not dead code, and the collapsed old/new form is the coordinate vocabulary `design.md` uses throughout. Flattening them into plain old/new fields would be a behavior-preserving simplification, but it belongs with the step that decides how the retained evidence is displayed again, not with this removal.
+`src/input.rs` and `src/compare.rs` keep the Arrow imports their subjects require. `rejects_every_unsupported_type_family` enumerates `DataType` variants and `comparison_matrix_accepts_only_compatible_pairs` enumerates `DataType` pairs; both are about the Arrow type system and should keep naming it directly, and `dictionary_strings_use_logical_values` keeps building its dictionary by hand for the reason given under conversion notes. What those modules lose everywhere else is the `Arc::new(SomeArray::from(vec![...]))` wrapping around their data.
 
-`KeyOverlap` keeps its exact `shared` and `possible` counts and its `ratio()` accessor. Exact counts are what preserve `Eq` on `KeyDiff` and `Diff`, and `human.rs` calls `ratio()` for the `overlap:` field.
+Unit tests stay inline in their production module, as the settled conventions require. `test-support` is a fixture library, not a home for tests.
 
 ## Explicitly deferred
 
-* Re-exposing the complete cell-level diff, which will most likely be library-only access to `Diff`, possibly with public coordinate accessors.
-* Any change to what the human format prints, including rendering cells.
-* Removing `serde_json` by writing the string escaping by hand.
-* Simplifying the collapsed coordinate representations.
-* Compacting test table construction, which is the next queued step and must not be mixed into this one.
+* Moving `TempDir` and the Parquet writers out of `tests/common/mod.rs`.
+* Any change to what the tests assert, including the granularity or naming of existing tests.
+* Any change to production code. `src/lib.rs` and the eleven production modules are untouched apart from their inline test modules.
+* Extending the fixture vocabulary beyond the Arrow types the current fixtures use; new types arrive with the steps that need them.
 
-# Test-rewrite design
+# Fixture helper design
 
-## Library integration tests
+## Where it lives
 
-`tests/diff.rs` is rewritten rather than dropped alongside the format it was written through, because it is the only coverage of three things. It exercises the assembly in `diff_tables` itself, including the zero-based to one-based translation applied to every index: no unit test calls `diff_tables`, so an off-by-one there, or `old` and `new` swapped in one `Coordinate::from_zero_based` call, passes the entire unit suite. It observes the public fields no output prints — `cells`, `columns.identities`, `rows.matched`, `summary.optimal`, and the exact `key.overlap` counts — which after this step is the only place the retained cell-level evidence is observed at all, making this file the working guard on the invariant `design.md` is asked to restate below. And it checks cross-stage consistency on a single input, where the unit tests feed each stage hand-built inputs standing in for the previous one.
+The helper has to be reachable from inline `#[cfg(test)]` modules under `src/` and from integration tests under `tests/`. A `#[cfg(test)]` module inside the crate is invisible to integration tests, which link the crate compiled without `cfg(test)`; a feature-gated `pub mod` would put fixture code in the public API and would have to stay compiled out of normal builds by hand. A separate crate consumed as a path dev-dependency has neither problem: dev-dependencies are available to both kinds of test target and to neither the library nor the binary.
 
-Delete `disjoint_keys_are_all_atomic_row_events`. Its classification assertions restate `rows.rs`'s `disjoint_keys_make_every_row_atomic` on the same fixture values, and its empty-`cells` assertion restates `cells.rs`'s `added_and_dropped_rows_do_not_manufacture_cells`. Its one composed claim — that a fully disjoint pair yields no cells and an empty summary through the public entry point — moves into `empty_inputs_preserve_schema_and_classify_the_other_side` as a fourth case, which is renamed `unmatched_rows_are_classified_without_cells_or_edits` and keeps its existing schema-retention assertion.
+The root `Cargo.toml` becomes a workspace root with one member. CI already runs `cargo build --workspace --all-targets` and `cargo test --workspace`, so no workflow change is needed.
 
-Move `an_explicit_key_overrides_a_stronger_eligible_guess` into `key.rs`. Declared-key precedence is a key-resolution rule, and `key.rs` currently asserts it only in `declared_keys_bypass_the_zero_row_guard`, which covers the zero-row case; nothing covers a declared key winning over a stronger eligible candidate on non-empty inputs. As a unit test it asserts the declared basis, the absent overlap, and the selected column on inputs where a different column is the stronger candidate. The downstream half of the integration test, that the weaker declared key then drives row matching, follows mechanically from the resolved key and is covered by `rows.rs`. Keep `automatic_resolution_without_an_eligible_key_is_an_error`: the absence of any usable key is worth pinning at the public entry point even though `key.rs` covers each ineligibility rule.
+`test-support` does not re-export `RecordBatch` or `ArrayRef`. Re-exporting the types that appear in a crate's own API is conventional where it saves the caller a dependency or pins them to one version of a type, and neither applies here: `arrow-array` is an ordinary dependency of the package, so both test targets can already name it, and one workspace on one pinned version has no skew to prevent. What would be left is cosmetic — making the word `arrow` disappear from imports — at the price of misstating where a well-known type comes from. Five local helpers name `RecordBatch` or `ArrayRef` in their signatures and import it from `arrow_array` directly, which is honest and costs one line each.
 
-Move `a_guessed_key_stays_out_of_top_level_changed_cells` into `cells.rs` as `a_guessed_key_column_is_excluded_like_a_declared_one`. Key exclusion is a cell-comparison rule that `cells.rs` already covers for a declared key, and cell comparison cannot see the basis, so the claim needs a unit test with a guessed key rather than a whole-pipeline one. The test helper there gains a `changes_with` variant that resolves automatically when no key is named.
+## Syntax
 
-Delete `summary_forces_and_coalesces_type_edits`; every claim it makes exists upstream. `cells.rs`'s `type_changes_are_independent_of_value_changes` covers a key column whose type changes without producing cells and a column that changes in both type and value, `schema.rs`'s `records_key_and_non_key_type_changes` covers type changes on and off the key, `summary.rs`'s `forced_columns_are_coalesced_before_optimization` covers forcing a cell-free type-changed column into the summary, and the CLI's `empty_files_still_report_type_only_schema_changes` now shows the whole path end to end as printed output.
-
-The remaining tests currently read the diff through `serde_json::to_value` and assert against `json!` literals with one-based coordinates. Each assertion becomes a direct comparison against the matching `Diff` field, with expected values built through the public constructors:
+A column is a name, an optional type annotation, and a list of values:
 
 ```rust
-assert_eq!(
-    diff.columns.identities,
-    vec![
-        Coordinate::from_zero_based(0, 1),
-        Coordinate::from_zero_based(1, 0),
-    ]
-);
+let old = table! {
+    "id" => [1, 2, 3],
+    "label" => ["a", "b", "c"],
+    "small" => i32[10, 20, 30],
+    "score" => [Some(1.5), None],
+    "blank" => i64[],
+};
 ```
 
-`from_zero_based` names its convention at every call site, so no local one-based helper is introduced. `Vec<usize>` fields such as `columns.added` and `rows.dropped` are already one-based and compare against plain vectors unchanged. `summary` compares against a constructed `EditSummary`, and `key` against a constructed `KeyDiff` including `Some(KeyOverlap { shared, possible })`, which replaces today's float assertion with exact counts.
+Names are string literals, which is what a column name is, and which keeps unusual names such as `"line\n\"quoted\""` in the same form as every other fixture. `=>` separates the name from the values so the two halves of a column read apart at a glance.
 
-Assertions stay field-by-field at their current granularity. Comparing whole `Diff` values would force every test to spell out both schemas and would obscure what each test is about.
-
-## Determinism
-
-Today both determinism tests compare `serde_json::to_vec` output byte-for-byte. Restate the guarantee as two assertions over the same pair of runs:
+The annotation is a bare token immediately before the bracket, so the common case carries no annotation at all and the exceptional case reads as a typed array literal. `column!` takes the same right-hand side and produces an `ArrayRef` for the tests that compare arrays rather than tables:
 
 ```rust
-assert_eq!(first, second);
-assert_eq!(render(&first), render(&second));
+let (old, new) = values(column!(["1", "1.0"]), column!([1, 1]));
 ```
 
-Structural equality of the two `Diff` values is the broader check: it covers the retained evidence the human format never prints, and because every field is `Eq` — including `KeyOverlap`, which stores counts rather than a float — the comparison is exact and total. Byte equality of `write_human` output preserves the guarantee in the form users observe. Both determinism tests, declared-key and guessed-key, get both assertions.
+Two further forms cover the tables that have no columns to infer from. `table! {}` is the schema-preserving empty batch that `common::empty_batch` and `rows.rs`'s empty branch build today, and `rows_without_columns(2)` is the columnless two-row batch that `key.rs` builds with `RecordBatchOptions`.
 
-## Model unit tests
+## Type inference
 
-The tests in `src/model.rs` that assert a JSON document shape have no subject once serialization is gone:
+Each value list is a Rust array literal, so all its elements share one Rust type, and that type determines the Arrow type. A `CellValue` trait maps each supported Rust type to a `Kind` and to a `Cell`; the blanket implementation for `Option<T>` inherits `T`'s kind, so a column of nulls still knows what it is:
 
-* `coordinate_collapses_equal_positions` and `coordinate_retains_moved_positions` become assertions on `positions()`, which is `pub(crate)` and reachable from the inline test module.
-* `cell_collapses_when_both_positions_agree` and `cell_retains_both_positions_when_either_moves` are deleted. `CellCoordinate` has no accessor, and adding a `pub(crate)` one with no production caller would be dead code under strict Clippy. Cell coordinates remain covered by equality in `tests/diff.rs`.
-* `diff_serializes_in_stable_field_order` and `declared_keys_omit_overlap` are deleted; field order is not a property of a Rust value, and a declared key's absent overlap is asserted where keys are resolved.
-* `overlap_serializes_as_a_normalized_ratio` becomes a `ratio()` assertion.
-* `empty_summary_is_still_optimal` is unchanged.
+| Rust value type | `Kind` | Arrow type without annotation |
+| --- | --- | --- |
+| `bool` | `Bool` | `Boolean` |
+| `i32`, `i64` | `Int` | `Int64` |
+| `u64` | `Int` | `Int64` |
+| `f32`, `f64` | `Double` | `Float64` |
+| `&str` | `Text` | `Utf8` |
+| `Option<T>` | `T`'s kind | `T`'s type, with nulls where `None` |
 
-## CLI tests
+Integer literals fall back to `i32` and float literals to `f64` when nothing else constrains them, and both map to the `Int` and `Double` kinds, so `[1, 2, 3]` builds the `Int64` column the fixtures overwhelmingly want and `[1.5]` builds a `Float64` one. `u64` is implemented because one fixture needs values above `i64::MAX`; cells hold integers as `i128` so that range survives to the builder. This was verified against `rustc` before the plan was written, including the `Option` and empty-list forms.
 
-* The help snapshot loses its `--format` line.
-* `compares_two_parquet_files_as_json` becomes a human-format test over an identical pair, asserting `col_key(declared: ["id"])` followed by `no_changes()`, a successful status, and empty stderr. It remains the one test that proves a clean run writes nothing to stderr.
-* `guesses_a_key_when_the_flag_is_omitted` keeps its human snapshot and loses the second invocation that re-ran the binary for JSON.
-* `reports_mixed_changes_from_real_parquet_files` is deleted. Its schema, row, and order assertions duplicate `reports_mixed_changes_in_human_format` on the same fixture shape, its cell and summary assertions duplicate `combines_schema_row_order_and_cell_changes` in `tests/diff.rs`, and its remaining assertion was about the compact-array JSON formatter.
-* `empty_files_still_report_type_only_schema_changes` becomes a human snapshot of the two type-only `col_edit` lines.
-* `reports_a_missing_key_when_nothing_can_be_guessed`, `failure_writes_context_only_to_stderr`, and `reports_mixed_changes_in_human_format` are unchanged.
+An annotation overrides the inferred Arrow type for the column's kind. The vocabulary is exactly what the current fixtures need: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`, `str`, `large_str`, `dict`, and `binary`. `dict` builds a `Dictionary(Int8, Utf8)` column whose dictionary holds the distinct values in first-appearance order, so its keys carry no information beyond the logical values; `binary` builds a `Binary` column from the bytes of its string values.
 
-`use serde_json::json;` disappears from both `tests/cli.rs` and `tests/diff.rs`; the crate remains reachable there through `human::quote`'s dependency but nothing in the tests needs it.
+Because the dictionary form encodes rather than transcribes, it is only correct for a test whose subject is the logical values. A test that is about the encoding itself keeps building its `DictionaryArray` by hand, as `src/compare.rs` does below. Assigning keys by sorted rather than first-appearance order was considered and rejected: it happens to reproduce today's encoding for one fixture, which would make that test's strength depend on an incidental helper policy rather than on what the test says.
 
-# Documentation
+An unannotated empty list has no element type, which the compiler rejects; the message to the test author is that an empty column must say what it is, as `"blank" => i64[]`. Fields are created nullable, exactly as all six current helpers create them, and a `table!` whose columns disagree in length panics through `RecordBatch::try_new`.
 
-`design.md` gains the deferral. The introduction's first principle already says machine-readable output is not a goal; extend the cell-comparison section to say that the complete one-to-one change set is retained in the library result model, that no current output renders it, and that giving users access to it again is future work. The invariant now constrains the library rather than the CLI, and the wording should say so plainly.
+## Failure behavior
 
-`README.md` loses JSON from its opening sentence, loses the `--format json` example and the paragraph introducing it, and states that the human format is the only output. Add re-exposing the complete result to the closing list of deferred capabilities. `demo/README.md` never mentioned JSON and needs no change beyond a read-through confirming its commands remain accurate.
+Three misuses are caught at run time and panic: an unknown annotation, an annotation whose Arrow type cannot hold the kind it was given (`dict[1, 2]`), and a value outside the annotated width (`u8[300]`). The builder raises these, so its message names the annotation and the offending value but cannot name a column. `table!` passes each column's name into the builder as context and `column!` passes none, so a table failure reads `column "id": 4294967296 does not fit u32` and the same failure from `column!` drops the prefix. The two misuses the compiler already catches — an unannotated empty list, and a value type with no `CellValue` implementation — stay compile errors and are documented rather than tested.
+
+## The helper's own tests
+
+`test-support` gets an inline `#[cfg(test)] mod tests`. A silently wrong helper would weaken every fixture in the suite at once, so its behavior is pinned directly rather than only through its callers:
+
+* the inferred Arrow type for each kind, and the resulting type for each annotation in the vocabulary;
+* `None` placement within a column, a typed empty column, the zero-column table, `rows_without_columns`, row counts, and field nullability;
+* the exact contents of the two annotations that transform their values rather than storing them — that `dict["b", "a", "b"]` has keys `[0, 1, 0]` over the dictionary `["b", "a"]`, and that `binary["a"]` holds `b"a"` — since a mistake there would be invisible in the `DataType` alone; and
+* a `#[should_panic(expected = ...)]` test for each of the three run-time misuses, including one through `table!` to pin the column-name prefix and one through `column!` to pin its absence.
+
+# Conversion notes
+
+Most fixtures convert mechanically. The cases that need a decision:
+
+* `key.rs`'s `guessing_breaks_ties_by_old_column_order` builds its two identical columns through a `shared()` closure that exists only to clone an `ArrayRef`; the columns become two literal lists.
+* `key.rs`'s `rows_without_columns_leave_nothing_to_guess` builds its batch with `RecordBatchOptions::new().with_row_count(Some(2))`, which becomes the `rows_without_columns(2)` helper and lets the module drop its last Arrow import.
+* `rows.rs`'s local helper special-cases an empty column list to build a schema-less batch; that branch becomes `table! {}` at the one call site that needs it, and the special case disappears with the helper.
+* `input.rs`'s `normalizes_every_supported_arrow_representation` becomes a single `table!` with one annotated column per representation, which is the test's actual subject stated directly. Its dictionary column becomes `dict["a"]`, one row like every other column in that table: today's fixture stores one key over a two-value dictionary, and the unused second value is invisible to the assertion, which only reads the column's normalized type. `dict["a", "b"]` would be two rows against every other column's one and would fail in `RecordBatch::try_new`. `rejects_unsupported_types` becomes `binary["a"]`.
+* `input.rs`'s `rejects_first_out_of_range_unsigned_integer` becomes `u64[Some(1), None, Some(i64::MAX as u64 + 1), Some(u64::MAX)]`.
+* `input.rs`'s `concatenates_batches_in_input_order` and the integration test `parquet_batches_become_one_table_in_file_order` read their result back by downcasting to `Int64Array`, which would keep an array type imported into two tests that are about batch concatenation rather than about Arrow. Both compare the resulting column against a fixture column instead, which says the same thing about the same values and additionally compares the column's type and null mask.
+* `compare.rs` builds arrays rather than tables, so its fixtures become `column!` and lose their `std::sync::Arc::new` wrapping. Its bit-pattern and boundary values — `f64::from_bits(...)`, `-0.0`, `i64::MIN`, `None::<&str>` — are ordinary expressions inside the list and stay exactly as they read today.
+* `compare.rs`'s `dictionary_strings_use_logical_values` is the one fixture that keeps its explicit `DictionaryArray` construction. It stores keys `[1, 0]` over the dictionary `["a", "b"]` precisely so that storage order and logical order disagree, which is what makes it evidence that canonicalization follows the keys. Rebuilt as `dict["b", "a"]` the helper would emit keys `[0, 1]` over `["b", "a"]`, where an implementation that ignored the keys and read the dictionary positionally would still pass. Inventing a second syntax that spells out keys and dictionary separately would serve this one test only; the test is about the encoding, so it states the encoding. This is the reason `compare.rs` keeps importing `Arc`, `Int8Type`, `Int8Array`, `DictionaryArray`, and `StringArray`, and a comment on the fixture records why it was not converted.
+* The integration tests keep their `mod common;` for `TempDir` and the Parquet writers, but their `common::batch([...])` calls become `table! { ... }` and `common::empty_batch()` becomes `table! {}`.
+
+# Verification
+
+The refactor is behavior-preserving, so the evidence is that nothing moved:
+
+* Every inline snapshot in `src/human.rs` and `tests/cli.rs` passes unchanged. Because insta snapshots are inline, an accidental type change shows up as a failing assertion rather than a silent update, and the diff for this step must contain no snapshot edits.
+* The determinism tests in `tests/diff.rs` continue to assert structural equality of repeated `Diff` values and byte equality of their rendered output, on fixtures built through the new helper.
+* The test count is unchanged apart from the new `test-support` unit tests; no test is added, removed, renamed, or merged.
+* The acceptance pass runs `cargo build --workspace --all-targets`, which is what CI runs and what confirms the new workspace layout builds every target; `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; and `git diff --check`.
 
 # Definition of done
 
 This step is complete when:
 
-* `data-diff` accepts no `--format` flag and writes only the human format;
-* `src/json.rs`, `write_json`, and `OutputFormat` no longer exist;
-* no `Serialize` derive, `#[serde(...)]` attribute, or `Serialize` implementation remains in the crate;
-* `serde`, `indoc`, and `insta`'s `json` feature are gone from `Cargo.toml`, `serde_json` remains for `human::quote`, and `Cargo.lock` is refreshed;
-* the result model exposes the same types, fields, and constructors as before, with the complete cell-level evidence intact;
-* `tests/diff.rs` asserts against `Diff` values directly, carries no test whose claims are already made stage by stage, and both determinism tests assert structural equality of the diff and byte equality of its human output;
-* CLI coverage exercises the single output format, including a clean run, a guessed key, a declared key, a type-only change, and both failure paths;
-* human output for every existing fixture is byte-identical to what it produced before this step;
-* `design.md` records that the complete cell-level diff is retained in the library and that re-exposing it is future work;
-* the README describes the human format as the only output and lists re-exposing the complete result as deferred; and
-* the full test suite, strict Clippy, formatting, and diff checks pass.
+* one `test-support` workspace member provides `table!`, `column!`, and `rows_without_columns`, with its own unit tests;
+* no `fn table(columns: Vec<(&str, ArrayRef)>)` helper remains anywhere in the repository, and `common::batch` and `common::empty_batch` are gone;
+* every fixture in `src/` and `tests/` is built through the shared helper, except where an Arrow type is the subject of the assertion;
+* the only surviving Arrow imports are the `RecordBatch` or `ArrayRef` named by a module's own helper signature, the `DataType` enumerated by `src/input.rs` and `src/compare.rs`, and the array types `src/compare.rs` needs to build its one hand-encoded dictionary; the suite's one remaining `std::sync::Arc` import is `src/input.rs`'s, which wraps the `Field` inside the `List` and `Struct` types that test enumerates;
+* every assertion, test name, and inline snapshot is unchanged, and every fixture still produces the Arrow types it produced before this step; and
+* the full test suite, strict Clippy, formatting, and diff checks pass across the workspace, and repeated runs still produce byte-identical output.
