@@ -18,8 +18,8 @@ struct Cli {
     old: PathBuf,
     /// Modified Parquet file.
     new: PathBuf,
-    /// Comma-separated, same-name key columns.
-    #[arg(long, value_delimiter = ',', required = true)]
+    /// Comma-separated, same-name key columns; when omitted, a single-column key is guessed.
+    #[arg(long, value_delimiter = ',')]
     key: Vec<String>,
     /// Output representation.
     #[arg(long, value_enum, default_value_t)]

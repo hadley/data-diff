@@ -32,7 +32,7 @@ pub enum DiffError {
         source_type: String,
         row: usize,
     },
-    /// The CLI/library call omitted its required declared key.
+    /// No key was supplied and no eligible key could be guessed.
     MissingKey,
     /// A comma-separated key contained an empty component.
     EmptyKeyComponent,
@@ -99,7 +99,9 @@ impl std::fmt::Display for DiffError {
                 f,
                 "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
             ),
-            DiffError::MissingKey => f.write_str("a declared key is required"),
+            DiffError::MissingKey => f.write_str(
+                "no key was supplied and no eligible key could be guessed; supply --key",
+            ),
             DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
             DiffError::PairedKeyUnsupported { component } => {
                 write!(f, "paired key component {component:?} is not supported yet")
@@ -296,6 +298,33 @@ pub struct ColumnsDiff {
 #[serde(rename_all = "snake_case")]
 pub enum KeyBasis {
     Declared,
+    Guessed,
+}
+
+/// Exact shared-value evidence behind a guessed key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyOverlap {
+    pub shared: usize,
+    pub possible: usize,
+}
+
+impl KeyOverlap {
+    /// The normalized `shared / possible` ratio.
+    ///
+    /// Exact counts are what the model stores; the ratio is derived only where
+    /// it is reported, so the model itself stays comparable with `Eq`.
+    pub fn ratio(&self) -> f64 {
+        self.shared as f64 / self.possible as f64
+    }
+}
+
+impl Serialize for KeyOverlap {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f64(self.ratio())
+    }
 }
 
 /// The resolved row key.
@@ -303,6 +332,8 @@ pub enum KeyBasis {
 pub struct KeyDiff {
     pub basis: KeyBasis,
     pub columns: Vec<Coordinate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<KeyOverlap>,
 }
 
 /// Row matching events.
@@ -356,7 +387,7 @@ mod tests {
 
     use super::{
         CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, EditSummary,
-        KeyBasis, KeyDiff, NormalizedType, OrderDiff, RowsDiff, Schemas,
+        KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas,
     };
 
     #[test]
@@ -410,6 +441,7 @@ mod tests {
             key: KeyDiff {
                 basis: KeyBasis::Declared,
                 columns: vec![Coordinate::from_zero_based(0, 0)],
+                overlap: None,
             },
             rows: RowsDiff {
                 matched: vec![Coordinate::from_zero_based(0, 1)],
@@ -510,6 +542,39 @@ mod tests {
           }
         }
         "#);
+    }
+
+    #[test]
+    fn overlap_serializes_as_a_normalized_ratio() {
+        let key = KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![Coordinate::from_zero_based(2, 2)],
+            overlap: Some(KeyOverlap {
+                shared: 2,
+                possible: 3,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&key).unwrap(),
+            json!({
+                "basis": "guessed",
+                "columns": [3],
+                "overlap": 0.666_666_666_666_666_6,
+            })
+        );
+    }
+
+    #[test]
+    fn declared_keys_omit_overlap() {
+        let key = KeyDiff {
+            basis: KeyBasis::Declared,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            r#"{"basis":"declared","columns":[1]}"#
+        );
     }
 
     #[test]

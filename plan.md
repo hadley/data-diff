@@ -1,267 +1,197 @@
 ---
-title: data-diff implementation plan
+title: Guess eligible single-column keys
 ---
 
 # Todo
 
-Development now proceeds at a slower, review-first pace. Before implementing a
-new plan, create a dedicated branch from `main`; never develop a next step
-directly on `main`. Treat each plan as a separate PR-sized change, present the
-finished branch for careful review, and leave its changes uncommitted. The
-project owner alone decides when to commit after review. Do not begin the next
-plan until that review is complete.
-
-- [x] **Establish compact summary test infrastructure.** Scaffold an internal
-  summary module with small graph and cover types. Add test-only edge-list
-  construction, cover-validity assertions, and a brute-force optimum oracle.
-  Test those helpers directly so this commit remains green before the production
-  algorithm exists.
-- [x] **Compute an exact minimum bipartite vertex cover.** Find a maximum
-  matching with stable Hopcroft–Karp traversal and recover a cover with the
-  standard alternating-path construction. Use the compact fixtures for focused
-  shapes, then exhaustively compare every graph up to 3 × 3 with the brute-force
-  oracle. Do not add budgets, a new dependency, or an approximate fallback.
-- [x] **Define the edit-summary result model.** Add a separate `summary` to
-  `Diff`, containing `optimal`, selected column edits, and selected row edits.
-  Reuse the existing collapsed coordinates and column-edit aspects. Preserve
-  `columns.edited` and `cells` as complete evidence rather than changing their
-  current meaning.
-- [x] **Prepare forced column edits and the residual graph.** Force every
-  source-type edit into the summary, mark it as value-edited when it has an
-  incident changed cell, and remove its incident cells from optimization.
-  Convert the remaining cells into deterministic dense row and column vertices
-  without losing their original old/new coordinates.
-- [x] **Integrate summarization into reconciliation.** Run it after complete
-  cell comparison, emit selected edits in original old-side order, and verify
-  that every changed cell is covered by a forced or selected event. Empty cell
-  sets, type-only changes, moved identities, and added or dropped rows and
-  columns must retain their existing behavior.
-- [x] **Expose the summary at output boundaries.** Serialize the new summary in
-  deterministic JSON. Update human output to use summary `col_edit` and
-  `row_edit` operations instead of the redundant evidence-level value edits and
-  individual `cell_edit` operations; JSON continues to retain all underlying
-  cells and evidence-level column edits.
-- [x] **Complete the acceptance pass.** Add focused library and CLI coverage,
-  confirm byte-identical repeated output, update the README and demo, run tests,
-  strict Clippy, formatting, and diff checks, and manually inspect one
-  row-dominant and one column-dominant summary.
+- [x] **Separate declared and guessed key resolution.** Preserve the current syntax and strict validation path whenever `DiffOptions.key` is non-empty. When it is empty, try key guessing instead of immediately returning `MissingKey`. Keep declared compound keys supported; guessed keys are single-column only.
+- [x] **Reject impossible guesses before candidate work.** After choosing automatic resolution, check the two row counts before enumerating or canonicalizing columns. If either input has zero rows, return `MissingKey` immediately because no shared value can support a guess.
+- [x] **Build exact candidate evidence.** Examine same-name column identities in stable old-column order. For each compatible pair, canonicalize both sides with one `ComparisonPlan`, then retain it only if neither side contains null or `NaN`, values are unique independently on both sides, and the sides share at least one canonical value. Count shared values with hash buckets plus equality checks so collisions cannot manufacture overlap.
+- [x] **Select one deterministic guessed key.** Choose the eligible candidate with the greatest number of shared values and break ties by old-column position. Return the already-canonicalized values with the selected column so row matching does not repeat work. If no candidate is eligible, return `MissingKey`.
+- [x] **Record exact overlap evidence.** Add `Guessed` to `KeyBasis`, retain the selected collapsed column coordinate, and store exact `shared` and `possible` counts. Serialize those counts as the normalized ratio `shared / min(old_rows, new_rows)` while preserving `Eq` on the result model. Declared keys have no overlap.
+- [x] **Expose every resolved key in human output.** Lead output with `col_key(declared: [...])` for an explicit key or `col_key(guessed: ..., overlap: ...)` for a guessed key. Use the existing quoting rules for column names and serialize the same normalized overlap value used by JSON.
+- [x] **Make declaration an optional override.** Remove the CLI requirement that `--key` be present. An omitted flag attempts guessing; a supplied simple or compound key always takes precedence and is reported as `declared`, even when another column would be the strongest guess. Keep errors in an explicitly supplied key fatal rather than silently substituting a guess.
+- [x] **Integrate guessing through reconciliation.** Propagate the resolved basis, columns, and overlap from key resolution into `Diff.key`, while leaving schema identity, row matching, ordering, cell evidence, and edit summarization driven by the selected key exactly as they are for a declared key.
+- [x] **Complete the acceptance pass.** Add focused inline unit tests, library-level integration coverage, CLI coverage for omission and override, human and JSON snapshots, byte-identical repeated-output checks, and documentation examples. Run the full tests, strict Clippy, formatting, and diff checks.
 
 # Goal
 
-Turn the complete changed-cell evidence into the smallest exact set of semantic
-`row_edit()` and `col_edit()` events. A user should see one column edit when many
-rows changed in one column, one row edit when many columns changed in one row,
-and a minimum combination for irregular patterns.
+Make the common invocation work without requiring the user to know the row key when the inputs contain an eligible same-name single column:
 
-The summary is an additional interpretation of the diff:
-
-```text
-complete changed cells
-    → forced type-edited columns
-    → residual bipartite graph
-    → exact minimum vertex cover
-    → row/column edit summary
+```console
+data-diff old.parquet new.parquet
 ```
 
-It must not discard or rewrite evidence. The complete schemas, identities,
-evidence-level column edits, row matches, and changed cells remain available in
-the structured result.
+`data-diff` should select the column with the strongest exact cross-table evidence, use it for reconciliation, and expose the selected basis and normalized overlap. A user who knows the correct identity can override the guess explicitly:
+
+```console
+data-diff old.parquet new.parquet --key account_id,revision
+```
+
+The guess is an evidence-backed input to the existing pipeline, not a schema or row event. Downstream reconciliation must receive the same canonical key values it receives today, so complete cell evidence and deterministic output retain their current meanings.
 
 # Scope
 
-This step implements exact summarization only:
+This step adds automatic selection among provisional same-name identities. Rename inference and paired key names do not exist yet, so an identified candidate in this step is exactly one column name present once on each side. Added, dropped, and differently named columns are not candidates.
 
-* One graph vertex represents one affected matched-row identity.
-* One graph vertex represents one affected identified-column identity.
-* One edge represents one changed cell.
-* Selecting a vertex emits one row or column edit.
-* Every edge must be incident to at least one selected vertex.
-* The number of non-forced selected vertices must be minimal.
+The resolution rule is:
 
-Columns with source-type changes are forced into the edit set before
-optimization, as required by `design.md`. A changed cell incident to a forced
-column sets that summary event's `values_changed` aspect and is removed from the
-residual graph. The resulting cover is minimum subject to those forced choices;
-it need not be a global minimum of the original graph.
+1. If `DiffOptions.key` is non-empty, validate and use it exactly as today.
+2. Otherwise, if either input has zero rows, return `MissingKey` without enumerating columns.
+3. Evaluate every same-name single-column pair.
+4. Discard a pair unless its types are compatible under `ComparisonPlan`.
+5. Discard a pair if either side contains null or `NaN`.
+6. Discard a pair unless its canonical values are unique on both sides.
+7. Compute the exact intersection size of its canonical old and new values and discard it when that size is zero.
+8. Select the greatest intersection size, breaking ties by old-column order.
+9. If no candidate remains, return `MissingKey`.
 
-There are no edit hints yet, so source-type changes are the only forced events.
-Added and dropped rows or columns do not produce changed cells and therefore do
-not enter the graph. Key columns can contribute forced type-only edits, but key
-cells remain excluded.
+Uniqueness and overlap use values canonicalized for that specific old/new type pair. Thus cross-type representations such as string and integer may form a guessed key when the existing comparison rules make their values equal. Unparseable strings remain tagged string values and participate normally; missing values and `NaN` make the whole candidate ineligible.
 
-Do not add computation budgets, timeouts, partial results, or approximate
-covers. The summary always reports `optimal: true`. Bounded fallback is a later
-step that may report `optimal: false`.
+The normalized overlap is descriptive evidence:
 
-# Result model
+```text
+overlap = shared_values / min(old_rows, new_rows)
+```
 
-Add a summary alongside the existing evidence:
+It does not alter ranking because the denominator is the same for every candidate. An eligible guessed key always has a non-zero denominator and a ratio in `(0, 1]`.
+
+An explicit declaration is the override mechanism for this non-interactive step. A supplied key is never compared with guesses and never silently replaced when it is invalid. Existing missing-column, incompatible-type, missing-value, non-unique-old, and unsupported-fanout errors therefore retain their current behavior for declared keys.
+
+Explicitly deferred:
+
+* row-number fallback and the audit of which reconciliation stages are valid without a semantic key;
+* paired old/new key components and rename-aware identities;
+* recovery from an invalid declared key via an issue plus a guessed fallback;
+* guessed compound keys;
+* accepting duplicate new-side values as bounded fanout;
+* candidate lists, interactive confirmation, and an in-process rerun UI;
+* sampling, budgets, approximate overlap, and partial key searches.
+
+Row-number fallback is the first item in `plan-next.md`. That step will decide how schema reconciliation, row and column ordering, changed-cell interpretation, edit summarization, rename inference, and incomplete-stage reporting behave when row position is the only basis. Reserve `col_key(row_number)` as its human representation, but do not emit it in this step.
+
+Reuse the existing public `MissingKey` variant when automatic guessing is impossible or exhausts its candidates, and update its message so it explains that no key was supplied and no eligible key could be guessed. Errors in a non-empty declared key remain specific and fatal.
+
+# Key-resolution design
+
+## Declared path
+
+Keep syntax validation and compound-key assembly separate from guessing. `validate_components()` continues to reject empty, paired, or repeated declared components. Each declared component continues to require a column on both sides, a compatible comparison plan, present values, and independent uniqueness.
+
+The resolved internal key should carry:
 
 ```rust
-pub struct EditSummary {
-    pub optimal: bool,
-    pub columns: Vec<ColumnEdit>,
-    pub rows: Vec<Coordinate>,
+struct ResolvedKey {
+    basis: KeyBasis,
+    columns: Vec<KeyColumn>,
+    old: Vec<Vec<CanonicalValue>>,
+    new: Vec<Vec<CanonicalValue>>,
+    overlap: Option<KeyOverlap>,
 }
 ```
 
-`Diff.summary.columns` contains forced type edits and value-edited columns
-selected by the cover. `Diff.summary.rows` contains rows selected by the cover.
-A forced type-edited column coalesces its independent aspects:
+Declared keys set `basis: Declared` and `overlap: None`. The public result continues to contain every component coordinate in declaration order.
 
-* `type_changed: true, values_changed: false` for a type-only edit;
-* `type_changed: true, values_changed: true` when it also covers changed cells;
-* `type_changed: false, values_changed: true` for a value-only column selected
-  by the minimum cover.
+## Guessed candidates
 
-`Diff.columns.edited` keeps its current evidence-level meaning: it includes
-every identified column with a type change or at least one changed cell.
-`Diff.cells` remains the complete changed-cell set. Consumers can therefore
-inspect or render the evidence even when the summary chooses `row_edit()`.
+Keep candidate evaluation in `key.rs`, next to canonicalization and validation, rather than coupling it to `schema.rs` or row matching. Once both row counts are known to be non-zero, enumerate old schema fields in position order, find the unique same-name field in the already name-validated new schema, and skip incompatible pairs.
 
-Row and column edits use the same collapsed one-based coordinates as their
-underlying identities. Emit summary columns in old-column order and rows in
-old-row order, regardless of graph traversal order.
+Candidate rejection is ordinary control flow, not a `DiffError`: a nullable, duplicated, incompatible, or disjoint column simply is not a guess. Reuse small validation and intersection helpers where their semantics match declared-key validation, but retain declared errors with their current row and side context.
 
-The JSON shape is:
+Use stable hashes only as bucket indexes. Confirm canonical equality inside a bucket both when checking uniqueness and when counting cross-side matches. Because eligible candidates are unique on each side, every matched canonical value contributes exactly one to the intersection. Put this logic behind a small helper that accepts a value-hash function: production passes `stable_hash`, while tests pass a constant function to force every distinct value into one bucket and prove that collisions do not create duplicates or overlap.
+
+Store canonical columns in each candidate and move the winning vectors into `ResolvedKey`; do not canonicalize the winner a second time. Candidate comparison should use a tuple equivalent to:
+
+```text
+(Reverse(shared_values), old_column_position)
+```
+
+No `HashMap` or filesystem iteration order may influence enumeration, selection, or output.
+
+# Result and interface
+
+Extend `KeyBasis` with `Guessed`. Model overlap exactly:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyOverlap {
+    pub shared: usize,
+    pub possible: usize,
+}
+```
+
+`KeyDiff` stores `Option<KeyOverlap>`. `KeyOverlap` implements `Serialize` as the numeric quotient `shared / possible`, so guessed JSON remains compact:
 
 ```json
 {
-  "summary": {
-    "optimal": true,
-    "columns": [
-      {
-        "column": 2,
-        "type_changed": false,
-        "values_changed": true
-      }
-    ],
-    "rows": [[3, 1]]
+  "key": {
+    "basis": "guessed",
+    "columns": [3],
+    "overlap": 0.6666666666666666
   }
 }
 ```
 
-This is a fragment; the existing evidence fields remain present.
+The selected column uses the existing collapsed, one-based coordinate, so a same-name column moved from old position 1 to new position 3 is `[1, 3]`. Keeping overlap absent for declared keys avoids attaching guess-specific evidence to an explicit choice. Storing exact counts preserves `Eq` on `KeyOverlap`, `KeyDiff`, and `Diff`; the quotient can never be `NaN` or infinite because a guessed key has `possible > 0`.
 
-# Exact-cover algorithm
+At the CLI boundary, `--key` keeps its comma-delimited syntax but is no longer required. Help and README text should explain that omission attempts one same-name guessed key, failure asks for `--key`, and an explicit declaration overrides guessing.
 
-## Graph construction
-
-Build the residual graph from changed cells not already covered by forced
-columns. Rows are the left partition and columns are the right partition.
-Assign dense internal vertex IDs in old-side coordinate order, and keep
-adjacency lists in old-column order. Deduplicate defensively even though the
-cell comparer should produce at most one edge for each row/column identity.
-
-Keep output coordinates outside the graph algorithm. The graph should operate
-on small integer IDs so its unit tests do not need Arrow tables, schemas, or
-`Diff` construction.
-
-## Maximum matching
-
-Use Hopcroft–Karp to compute an exact maximum-cardinality matching:
-
-1. Breadth-first search layers all augmenting paths from unmatched row vertices.
-2. Depth-first search augments along those layers.
-3. Repeat until no augmenting path remains.
-
-Visit row vertices and each adjacency list in ascending stable order. This does
-not establish a semantic preference among tied minimum covers, but it makes the
-chosen result repeatable.
-
-## Cover recovery
-
-Recover a minimum cover using König's theorem. Starting from unmatched left
-vertices, traverse alternating paths:
-
-* left to right only across unmatched edges;
-* right to left only across matched edges.
-
-If the reachable sets are `Z_left` and `Z_right`, the minimum cover is:
+Human output always announces the resolved key before change operations. Column names use the existing JSON-string quoting so unusual names remain unambiguous:
 
 ```text
-(left - Z_left) ∪ (right ∩ Z_right)
+col_key(declared: ["account_id", "revision"])
+col_key(guessed: "customer_id", overlap: 0.6666666666666666)
 ```
 
-Return both the cover and maximum-matching cardinality internally. Assert in
-debug builds and tests that the cover has the same size as the matching and
-that every residual edge is covered.
+Only one line appears. `col_key` is informational context rather than a change operation, so `no_changes()` still follows it when no change operations exist. Declared keys use component declaration order; guessed keys use the selected old-side name and the same normalized overlap serialization as JSON. The future row-number step reserves `col_key(row_number)`.
 
-# Test strategy
+# Verification
 
-Keep algorithm tests independent of Arrow and express graphs as short edge
-lists. Cover these shapes directly:
+Keep unit tests inline in `key.rs`. Use compact in-memory tables to cover:
 
-* no vertices and no edges;
-* one changed cell;
-* many rows incident to one column, selecting the column;
-* many columns incident to one row, selecting the row;
-* disconnected components requiring a mixture of rows and columns;
-* a complete rectangle with tied minimum covers;
-* isolated vertices, which must never be selected; and
-* repeated runs of a tied graph, which must return the same cover.
+* an empty old side and an empty new side returning `MissingKey` before any candidate canonicalization;
+* one eligible same-type column;
+* compatible cross-type values;
+* rejection for null, `NaN`, duplicates on either side, incompatible types, and zero shared values;
+* preference for the largest exact intersection;
+* an equal-intersection tie resolved by old-column order;
+* forced hash collisions, using an injected constant hash function, that cannot create false duplicates or false overlap;
+* reuse of selected canonical values in the returned key;
+* declared compound keys bypassing the automatic zero-row check and guessing;
+* invalid declared keys retaining their existing errors;
+* no eligible automatic candidate returning `MissingKey`; and
+* repeated resolution returning the same candidate and exact overlap.
 
-For every graph with at most three rows and three columns, enumerate all edge
-subsets. Compute the true optimum by enumerating all possible vertex subsets,
-then assert that the production result:
+Add library integration coverage showing that:
 
-1. covers every edge;
-2. has the optimum cardinality; and
-3. is byte-for-byte stable across repeated calls.
+* default options guess a key and correctly align reordered rows;
+* `Diff.key` reports `guessed`, the collapsed column coordinate, and exact overlap;
+* an explicit key overrides a stronger eligible guess and reports `declared`;
+* moved key columns retain paired coordinates through schema reconciliation;
+* a guessed key remains excluded from top-level changed cells;
+* empty automatic inputs and non-empty inputs without a candidate return `MissingKey`;
+* empty inputs still reconcile when a valid key is declared;
+* repeated complete comparisons serialize to byte-identical JSON.
 
-Use small in-memory Arrow tables for summarization integration tests:
+Add human-output snapshots for a declared compound key, a guessed key with normalized overlap followed by change operations, and each basis followed by `no_changes()` for identical tables. Verify quoting with at least one unusual declared or guessed column name.
 
-* a column-dominant edit selects one `col_edit`;
-* a row-dominant edit selects one `row_edit`;
-* an irregular edit selects a mixed minimum cover;
-* a type-only column is forced without manufacturing a cell;
-* a type-and-value column is one coalesced forced edit;
-* a forced column removes its incident edges before optimization;
-* moved rows and columns retain paired coordinates;
-* unchanged and empty inputs produce an empty optimal summary; and
-* additions and drops do not enter the summary.
+At the CLI boundary, update the help snapshot, add one successful invocation without `--key`, add one omitted-key failure that reports `MissingKey`, and keep one explicit-key invocation proving the override syntax. One compact JSON assertion is enough to cover the guessed basis and overlap; do not duplicate the full eligibility matrix outside `key.rs`.
 
-At the output boundary, use one compact JSON assertion and one human-output
-snapshot. Avoid duplicating the graph truth table in CLI tests.
-
-# Human output
-
-The human format should present the semantic summary rather than both the
-summary and its redundant cell evidence. For example, three changed cells in
-one column become:
-
-```text
-col_edit("price", values)
-```
-
-and three changed cells in one row become:
-
-```text
-row_edit(2)
-```
-
-A moved selected row uses its collapsed identity:
-
-```text
-row_edit(3 -> 1)
-```
-
-Schema, addition, drop, and ordering operations retain their current forms.
-Individual `cell_edit` lines are omitted from human output once the summary is
-available; the JSON `cells` field remains the complete drill-down evidence.
-`no_changes()` still represents a diff with no structural, ordering, type, or
-value operations.
+Update the README and demo guidance so the primary example exercises guessing and an adjacent example demonstrates `--key` as an override. Explain that no eligible guess currently fails and that row-number fallback is planned separately. Retain an explicit key in fixtures whose purpose depends on a particular compound key or on an error from a declared key.
 
 # Definition of done
 
 This step is complete when:
 
-* every checklist item is checked and ready for owner review;
-* every complete small graph passes brute-force optimality comparison;
-* every changed cell is covered by at least one summary event;
-* forced type edits are coalesced and excluded from residual optimization;
-* summary events use original one-based old/new coordinates;
-* JSON retains the complete evidence and adds an optimal summary;
-* human output uses the minimum semantic edit summary;
-* repeated comparisons produce byte-identical output; and
-* the full test, Clippy, formatting, and diff checks pass.
+* automatic resolution rejects an empty side before enumerating or canonicalizing candidates;
+* omitting a key deterministically selects the eligible same-name single column with the greatest exact shared-value count;
+* every guessed key is compatible, present, unique on both sides, and supported by at least one shared canonical value;
+* ties resolve by old-column order and repeated runs are byte-identical;
+* guessed results expose their basis, selected coordinate, exact overlap evidence, and normalized JSON and human ratios;
+* human output reports declared and guessed keys with the unified `col_key(...)` syntax;
+* an explicit simple or compound key takes precedence and retains strict validation;
+* absence of an eligible guess returns the existing `MissingKey` error;
+* row-number fallback is explicitly queued as a separate design and implementation step;
+* existing schema, row, cell, summary, and declared-key behavior remains covered;
+* documentation describes automatic guessing, explicit override, and the current no-guess limitation; and
+* the full test suite, strict Clippy, formatting, and diff checks pass.

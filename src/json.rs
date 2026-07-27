@@ -121,6 +121,7 @@ mod tests {
             key: KeyDiff {
                 basis: KeyBasis::Declared,
                 columns: vec![],
+                overlap: None,
             },
             rows: RowsDiff::default(),
             order: OrderDiff::default(),
