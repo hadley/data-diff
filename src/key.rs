@@ -286,26 +286,11 @@ pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow_array::{
-        ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, RecordBatchOptions,
-        StringArray,
-    };
-    use arrow_schema::{Field, Schema};
+    use test_support::{rows_without_columns, table};
 
     use super::{candidate_overlap, resolve_key};
     use crate::compare::{CanonicalValue, stable_hash};
     use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
-
-    fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        let arrays = columns.into_iter().map(|(_, values)| values).collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-    }
 
     fn options(key: &[&str]) -> DiffOptions {
         DiffOptions {
@@ -315,7 +300,7 @@ mod tests {
 
     #[test]
     fn validates_key_syntax() {
-        let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        let empty = table! {};
         assert!(matches!(
             resolve_key(&empty, &empty, &options(&[])),
             Err(DiffError::MissingKey)
@@ -336,8 +321,8 @@ mod tests {
 
     #[test]
     fn identifies_the_side_of_a_missing_component() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![1])))]);
-        let new = table(vec![("other", Arc::new(Int64Array::from(vec![1])))]);
+        let old = table! { "id" => [1] };
+        let new = table! { "other" => [1] };
         assert_eq!(
             resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
             DiffError::MissingKeyColumn {
@@ -349,8 +334,8 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_key_types() {
-        let old = table(vec![("id", Arc::new(BooleanArray::from(vec![true])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![1])))]);
+        let old = table! { "id" => [true] };
+        let new = table! { "id" => [1] };
         assert!(matches!(
             resolve_key(&old, &new, &options(&["id"])),
             Err(DiffError::IncompatibleKeyTypes { .. })
@@ -359,11 +344,8 @@ mod tests {
 
     #[test]
     fn rejects_null_and_nan_with_row_context() {
-        let old = table(vec![(
-            "id",
-            Arc::new(Float64Array::from(vec![Some(1.0), None])),
-        )]);
-        let new = table(vec![("id", Arc::new(Float64Array::from(vec![1.0, 2.0])))]);
+        let old = table! { "id" => [Some(1.0), None] };
+        let new = table! { "id" => [1.0, 2.0] };
         assert_eq!(
             resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
             DiffError::InvalidKeyValue {
@@ -373,8 +355,8 @@ mod tests {
             }
         );
 
-        let old = table(vec![("id", Arc::new(Float64Array::from(vec![f64::NAN])))]);
-        let new = table(vec![("id", Arc::new(Float64Array::from(vec![1.0])))]);
+        let old = table! { "id" => [f64::NAN] };
+        let new = table! { "id" => [1.0] };
         assert!(matches!(
             resolve_key(&old, &new, &options(&["id"])),
             Err(DiffError::InvalidKeyValue { .. })
@@ -383,8 +365,8 @@ mod tests {
 
     #[test]
     fn uniqueness_uses_cross_type_canonicalization() {
-        let old = table(vec![("id", Arc::new(StringArray::from(vec!["1", "1.0"])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+        let old = table! { "id" => ["1", "1.0"] };
+        let new = table! { "id" => [1, 2] };
         assert_eq!(
             resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
             DiffError::NonUniqueOldKey {
@@ -396,8 +378,8 @@ mod tests {
 
     #[test]
     fn distinguishes_new_side_fanout_from_a_broken_old_key() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![1, 1])))]);
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [1, 1] };
         assert_eq!(
             resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
             DiffError::UnsupportedFanout {
@@ -409,8 +391,8 @@ mod tests {
 
     #[test]
     fn guessing_rejects_an_empty_side_before_examining_candidates() {
-        let empty = table(vec![("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
-        let rows = table(vec![("id", Arc::new(Int64Array::from(vec![1])))]);
+        let empty = table! { "id" => i64[] };
+        let rows = table! { "id" => [1] };
         for (old, new) in [(&empty, &rows), (&rows, &empty), (&empty, &empty)] {
             assert!(matches!(
                 resolve_key(old, new, &options(&[])),
@@ -421,14 +403,14 @@ mod tests {
 
     #[test]
     fn guesses_the_single_eligible_column() {
-        let old = table(vec![
-            ("label", Arc::new(StringArray::from(vec!["x", "x"]))),
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ]);
-        let new = table(vec![
-            ("label", Arc::new(StringArray::from(vec!["x", "y"]))),
-            ("id", Arc::new(Int64Array::from(vec![2, 3]))),
-        ]);
+        let old = table! {
+            "label" => ["x", "x"],
+            "id" => [1, 2],
+        };
+        let new = table! {
+            "label" => ["x", "y"],
+            "id" => [2, 3],
+        };
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
@@ -447,8 +429,8 @@ mod tests {
 
     #[test]
     fn guessing_canonicalizes_across_compatible_types() {
-        let old = table(vec![("id", Arc::new(StringArray::from(vec!["1", "2"])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![2, 3])))]);
+        let old = table! { "id" => ["1", "2"] };
+        let new = table! { "id" => [2, 3] };
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
@@ -472,23 +454,23 @@ mod tests {
 
     #[test]
     fn guessing_skips_every_ineligible_candidate() {
-        let old = table(vec![
-            ("null", Arc::new(Int64Array::from(vec![Some(1), None]))),
-            ("nan", Arc::new(Float64Array::from(vec![1.0, f64::NAN]))),
-            ("dup_old", Arc::new(Int64Array::from(vec![1, 1]))),
-            ("dup_new", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("mismatch", Arc::new(BooleanArray::from(vec![true, false]))),
-            ("disjoint", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("missing", Arc::new(Int64Array::from(vec![1, 2]))),
-        ]);
-        let new = table(vec![
-            ("null", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("nan", Arc::new(Float64Array::from(vec![1.0, 2.0]))),
-            ("dup_old", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("dup_new", Arc::new(Int64Array::from(vec![1, 1]))),
-            ("mismatch", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("disjoint", Arc::new(Int64Array::from(vec![3, 4]))),
-        ]);
+        let old = table! {
+            "null" => [Some(1), None],
+            "nan" => [1.0, f64::NAN],
+            "dup_old" => [1, 1],
+            "dup_new" => [1, 2],
+            "mismatch" => [true, false],
+            "disjoint" => [1, 2],
+            "missing" => [1, 2],
+        };
+        let new = table! {
+            "null" => [1, 2],
+            "nan" => [1.0, 2.0],
+            "dup_old" => [1, 2],
+            "dup_new" => [1, 1],
+            "mismatch" => [1, 2],
+            "disjoint" => [3, 4],
+        };
 
         assert!(matches!(
             resolve_key(&old, &new, &options(&[])),
@@ -498,14 +480,14 @@ mod tests {
 
     #[test]
     fn guessing_prefers_the_largest_exact_intersection() {
-        let old = table(vec![
-            ("partial", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("full", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-        ]);
-        let new = table(vec![
-            ("partial", Arc::new(Int64Array::from(vec![3, 4, 5]))),
-            ("full", Arc::new(Int64Array::from(vec![30, 20, 10]))),
-        ]);
+        let old = table! {
+            "partial" => [1, 2, 3],
+            "full" => [10, 20, 30],
+        };
+        let new = table! {
+            "partial" => [3, 4, 5],
+            "full" => [30, 20, 10],
+        };
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
@@ -521,9 +503,8 @@ mod tests {
 
     #[test]
     fn guessing_breaks_ties_by_old_column_order() {
-        let shared = || Arc::new(Int64Array::from(vec![1, 2]));
-        let old = table(vec![("b", shared() as _), ("a", shared() as _)]);
-        let new = table(vec![("a", shared() as _), ("b", shared() as _)]);
+        let old = table! { "b" => [1, 2], "a" => [1, 2] };
+        let new = table! { "a" => [1, 2], "b" => [1, 2] };
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
@@ -533,8 +514,8 @@ mod tests {
 
     #[test]
     fn overlap_is_normalized_by_the_smaller_side() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2, 3])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![3, 2])))]);
+        let old = table! { "id" => [1, 2, 3] };
+        let new = table! { "id" => [3, 2] };
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
@@ -549,12 +530,7 @@ mod tests {
 
     #[test]
     fn rows_without_columns_leave_nothing_to_guess() {
-        let old = RecordBatch::try_new_with_options(
-            Arc::new(Schema::empty()),
-            vec![],
-            &RecordBatchOptions::new().with_row_count(Some(2)),
-        )
-        .unwrap();
+        let old = rows_without_columns(2);
 
         assert!(matches!(
             resolve_key(&old, &old, &options(&[])),
@@ -564,7 +540,7 @@ mod tests {
 
     #[test]
     fn declared_keys_bypass_the_zero_row_guard() {
-        let empty = table(vec![("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
+        let empty = table! { "id" => i64[] };
 
         let key = resolve_key(&empty, &empty, &options(&["id"])).unwrap();
 
@@ -575,14 +551,14 @@ mod tests {
 
     #[test]
     fn a_declared_key_overrides_a_stronger_candidate() {
-        let old = table(vec![
-            ("weak", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-        ]);
-        let new = table(vec![
-            ("weak", Arc::new(Int64Array::from(vec![1, 4, 5]))),
-            ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-        ]);
+        let old = table! {
+            "weak" => [1, 2, 3],
+            "strong" => [10, 20, 30],
+        };
+        let new = table! {
+            "weak" => [1, 4, 5],
+            "strong" => [10, 20, 30],
+        };
 
         let key = resolve_key(&old, &new, &options(&["weak"])).unwrap();
 
@@ -595,14 +571,14 @@ mod tests {
 
     #[test]
     fn repeated_guessing_is_deterministic() {
-        let old = table(vec![
-            ("a", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("b", Arc::new(Int64Array::from(vec![7, 8, 9]))),
-        ]);
-        let new = table(vec![
-            ("a", Arc::new(Int64Array::from(vec![2, 3, 4]))),
-            ("b", Arc::new(Int64Array::from(vec![9, 8, 7]))),
-        ]);
+        let old = table! {
+            "a" => [1, 2, 3],
+            "b" => [7, 8, 9],
+        };
+        let new = table! {
+            "a" => [2, 3, 4],
+            "b" => [9, 8, 7],
+        };
 
         let first = resolve_key(&old, &new, &options(&[])).unwrap();
         let second = resolve_key(&old, &new, &options(&[])).unwrap();
@@ -633,14 +609,14 @@ mod tests {
 
     #[test]
     fn compound_key_can_be_unique_when_components_are_not() {
-        let old = table(vec![
-            ("group", Arc::new(StringArray::from(vec!["a", "a"]))),
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ]);
-        let new = table(vec![
-            ("group", Arc::new(StringArray::from(vec!["a", "a"]))),
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ]);
+        let old = table! {
+            "group" => ["a", "a"],
+            "id" => [1, 2],
+        };
+        let new = table! {
+            "group" => ["a", "a"],
+            "id" => [1, 2],
+        };
 
         let key = resolve_key(&old, &new, &options(&["group", "id"])).unwrap();
 

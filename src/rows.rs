@@ -45,26 +45,12 @@ pub(crate) fn match_rows(key: &ResolvedKey) -> RowMatches {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
-    use arrow_schema::{Field, Schema};
+    use arrow_array::RecordBatch;
+    use test_support::table;
 
     use super::{RowMatches, match_rows};
     use crate::DiffOptions;
     use crate::key::resolve_key;
-
-    fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-        if columns.is_empty() {
-            return RecordBatch::new_empty(Arc::new(Schema::empty()));
-        }
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        let arrays = columns.into_iter().map(|(_, values)| values).collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-    }
 
     fn rows(old: RecordBatch, new: RecordBatch, key: &[&str]) -> RowMatches {
         let options = DiffOptions {
@@ -75,8 +61,8 @@ mod tests {
 
     #[test]
     fn classifies_add_drop_and_match_in_input_order() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![10, 20, 30])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![30, 10, 40])))]);
+        let old = table! { "id" => [10, 20, 30] };
+        let new = table! { "id" => [30, 10, 40] };
 
         assert_eq!(
             rows(old, new, &["id"]),
@@ -90,8 +76,8 @@ mod tests {
 
     #[test]
     fn disjoint_keys_make_every_row_atomic() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [3, 4] };
 
         assert_eq!(
             rows(old, new, &["id"]),
@@ -105,22 +91,22 @@ mod tests {
 
     #[test]
     fn cross_type_compound_keys_match_canonically() {
-        let old = table(vec![
-            ("group", Arc::new(StringArray::from(vec!["a", "b"]))),
-            ("id", Arc::new(StringArray::from(vec!["1.0", "2e0"]))),
-        ]);
-        let new = table(vec![
-            ("group", Arc::new(StringArray::from(vec!["b", "a"]))),
-            ("id", Arc::new(Int64Array::from(vec![2, 1]))),
-        ]);
+        let old = table! {
+            "group" => ["a", "b"],
+            "id" => ["1.0", "2e0"],
+        };
+        let new = table! {
+            "group" => ["b", "a"],
+            "id" => [2, 1],
+        };
 
         assert_eq!(rows(old, new, &["group", "id"]).matched, [(0, 1), (1, 0)]);
     }
 
     #[test]
     fn handles_an_empty_side_without_special_cases() {
-        let old = table(vec![("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
-        let new = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2])))]);
+        let old = table! { "id" => i64[] };
+        let new = table! { "id" => [1, 2] };
 
         assert_eq!(
             rows(old, new, &["id"]),

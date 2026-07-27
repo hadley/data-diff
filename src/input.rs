@@ -160,55 +160,32 @@ fn source_type(data_type: &DataType) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::types::Int8Type;
-    use arrow_array::{
-        ArrayRef, BinaryArray, BooleanArray, DictionaryArray, Float32Array, Float64Array,
-        Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt8Array,
-        UInt16Array, UInt32Array, UInt64Array,
-    };
-    use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
+    use arrow_schema::{DataType, Field, Fields, TimeUnit};
+    use test_support::table;
 
     use super::{concatenate, normalized_type, validate_tables};
     use crate::{DiffError, DuplicateColumnName, NormalizedType, Side};
 
-    fn table(columns: Vec<(&str, ArrayRef)>) -> arrow_array::RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-            .collect::<Vec<_>>();
-        let arrays = columns.into_iter().map(|(_, values)| values).collect();
-        arrow_array::RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-    }
-
-    fn empty() -> arrow_array::RecordBatch {
-        arrow_array::RecordBatch::new_empty(Arc::new(Schema::empty()))
-    }
-
     #[test]
     fn normalizes_every_supported_arrow_representation() {
-        let dictionary = DictionaryArray::<Int8Type>::try_new(
-            Int8Array::from(vec![0]),
-            Arc::new(StringArray::from(vec!["a", "b"])),
-        )
-        .unwrap();
-        let old = table(vec![
-            ("bool", Arc::new(BooleanArray::from(vec![true]))),
-            ("i8", Arc::new(Int8Array::from(vec![1]))),
-            ("i16", Arc::new(Int16Array::from(vec![1]))),
-            ("i32", Arc::new(Int32Array::from(vec![1]))),
-            ("i64", Arc::new(Int64Array::from(vec![1]))),
-            ("u8", Arc::new(UInt8Array::from(vec![1]))),
-            ("u16", Arc::new(UInt16Array::from(vec![1]))),
-            ("u32", Arc::new(UInt32Array::from(vec![1]))),
-            ("u64", Arc::new(UInt64Array::from(vec![1]))),
-            ("f32", Arc::new(Float32Array::from(vec![1.0]))),
-            ("f64", Arc::new(Float64Array::from(vec![1.0]))),
-            ("utf8", Arc::new(StringArray::from(vec!["a"]))),
-            ("large_utf8", Arc::new(LargeStringArray::from(vec!["a"]))),
-            ("dictionary", Arc::new(dictionary)),
-        ]);
+        let old = table! {
+            "bool" => bool[true],
+            "i8" => i8[1],
+            "i16" => i16[1],
+            "i32" => i32[1],
+            "i64" => i64[1],
+            "u8" => u8[1],
+            "u16" => u16[1],
+            "u32" => u32[1],
+            "u64" => u64[1],
+            "f32" => f32[1.0],
+            "f64" => f64[1.0],
+            "utf8" => str["a"],
+            "large_utf8" => large_str["a"],
+            "dictionary" => dict["a"],
+        };
 
-        let schemas = validate_tables(&old, &empty()).unwrap();
+        let schemas = validate_tables(&old, &table! {}).unwrap();
         let normalized = schemas
             .old
             .iter()
@@ -237,30 +214,25 @@ mod tests {
 
     #[test]
     fn concatenates_batches_in_input_order() {
-        let first = table(vec![("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-        let second = table(vec![("id", Arc::new(Int64Array::from(vec![3])))]);
+        let first = table! { "id" => [1, 2] };
+        let second = table! { "id" => [3] };
 
         let combined = concatenate(first.schema(), &[first, second]).unwrap();
-        let ids = combined
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
 
-        assert_eq!(ids.values(), &[1, 2, 3]);
+        assert_eq!(combined.column(0), table! { "id" => [1, 2, 3] }.column(0));
     }
 
     #[test]
     fn reports_all_duplicate_names_and_positions() {
-        let old = table(vec![
-            ("a", Arc::new(Int64Array::from(vec![1]))),
-            ("b", Arc::new(Int64Array::from(vec![1]))),
-            ("a", Arc::new(Int64Array::from(vec![1]))),
-            ("b", Arc::new(Int64Array::from(vec![1]))),
-        ]);
+        let old = table! {
+            "a" => [1],
+            "b" => [1],
+            "a" => [1],
+            "b" => [1],
+        };
 
         assert_eq!(
-            validate_tables(&old, &empty()),
+            validate_tables(&old, &table! {}),
             Err(DiffError::DuplicateColumnNames {
                 side: Side::Old,
                 duplicates: vec![
@@ -279,13 +251,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_types() {
-        let old = table(vec![(
-            "bytes",
-            Arc::new(BinaryArray::from(vec![b"a".as_slice()])),
-        )]);
+        let old = table! { "bytes" => binary["a"] };
 
         assert_eq!(
-            validate_tables(&old, &empty()),
+            validate_tables(&old, &table! {}),
             Err(DiffError::UnsupportedColumn {
                 side: Side::Old,
                 column: "bytes".into(),
@@ -320,18 +289,12 @@ mod tests {
 
     #[test]
     fn rejects_first_out_of_range_unsigned_integer() {
-        let old = table(vec![(
-            "id",
-            Arc::new(UInt64Array::from(vec![
-                Some(1),
-                None,
-                Some(i64::MAX as u64 + 1),
-                Some(u64::MAX),
-            ])),
-        )]);
+        let old = table! {
+            "id" => u64[Some(1), None, Some(i64::MAX as u64 + 1), Some(u64::MAX)]
+        };
 
         assert_eq!(
-            validate_tables(&old, &empty()),
+            validate_tables(&old, &table! {}),
             Err(DiffError::IntegerOutOfRange {
                 side: Side::Old,
                 column: "id".into(),

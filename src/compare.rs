@@ -413,9 +413,8 @@ pub(crate) fn equal_after_hash(
 #[cfg(test)]
 mod tests {
     use arrow_array::types::Int8Type;
-    use arrow_array::{
-        ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, StringArray,
-    };
+    use arrow_array::{ArrayRef, DictionaryArray, Int8Array, StringArray};
+    use test_support::column;
 
     use super::{
         CanonicalValue, ComparisonPlan, StableHasher, equal_after_hash, parse_exact_i64,
@@ -454,18 +453,8 @@ mod tests {
     #[test]
     fn exact_numeric_rules_canonicalize_equally() {
         let (old, new) = values(
-            std::sync::Arc::new(Int64Array::from(vec![
-                i64::MIN,
-                0,
-                1,
-                9_007_199_254_740_993,
-            ])),
-            std::sync::Arc::new(Float64Array::from(vec![
-                i64::MIN as f64,
-                -0.0,
-                1.0,
-                9_007_199_254_740_992.0,
-            ])),
+            column!([i64::MIN, 0, 1, 9_007_199_254_740_993]),
+            column!([i64::MIN as f64, -0.0, 1.0, 9_007_199_254_740_992.0]),
         );
         assert_eq!(old[0], new[0]);
         assert_eq!(old[1], new[1]);
@@ -476,11 +465,8 @@ mod tests {
     #[test]
     fn doubles_canonicalize_nan_and_signed_zero() {
         let (old, new) = values(
-            std::sync::Arc::new(Float64Array::from(vec![f64::NAN, -0.0])),
-            std::sync::Arc::new(Float64Array::from(vec![
-                f64::from_bits(0x7ff8_0000_0000_0001),
-                0.0,
-            ])),
+            column!([f64::NAN, -0.0]),
+            column!([f64::from_bits(0x7ff8_0000_0000_0001), 0.0]),
         );
         assert_eq!(old, new);
     }
@@ -488,15 +474,8 @@ mod tests {
     #[test]
     fn string_parsing_is_exact_and_does_not_trim() {
         let (old, new) = values(
-            std::sync::Arc::new(StringArray::from(vec![
-                "1",
-                "1.0",
-                "1e0",
-                "1.5",
-                " 1",
-                "9223372036854775808",
-            ])),
-            std::sync::Arc::new(Int64Array::from(vec![1, 1, 1, 1, 1, i64::MAX])),
+            column!(["1", "1.0", "1e0", "1.5", " 1", "9223372036854775808"]),
+            column!([1, 1, 1, 1, 1, i64::MAX]),
         );
         assert_eq!(old[0], new[0]);
         assert_eq!(old[1], new[1]);
@@ -509,40 +488,34 @@ mod tests {
     #[test]
     fn strings_parse_to_boolean_and_double_domains() {
         let (old, new) = values(
-            std::sync::Arc::new(StringArray::from(vec!["true", "True", "NaN", "inf"])),
-            std::sync::Arc::new(BooleanArray::from(vec![true, true, true, true])),
+            column!(["true", "True", "NaN", "inf"]),
+            column!([true, true, true, true]),
         );
         assert_eq!(old[0], new[0]);
         assert_ne!(old[1], new[1]);
 
-        let (old, new) = values(
-            std::sync::Arc::new(StringArray::from(vec!["NaN", "inf"])),
-            std::sync::Arc::new(Float64Array::from(vec![f64::NAN, f64::INFINITY])),
-        );
+        let (old, new) = values(column!(["NaN", "inf"]), column!([f64::NAN, f64::INFINITY]));
         assert_eq!(old, new);
     }
 
     #[test]
     fn nulls_agree_across_compatible_types() {
-        let (old, new) = values(
-            std::sync::Arc::new(StringArray::from(vec![None::<&str>])),
-            std::sync::Arc::new(Int64Array::from(vec![None::<i64>])),
-        );
+        let (old, new) = values(column!([None::<&str>]), column!([None::<i64>]));
         assert_eq!(old, new);
         assert_eq!(old, [CanonicalValue::Null]);
     }
 
     #[test]
     fn dictionary_strings_use_logical_values() {
+        // Written out rather than built by the fixture helper: the keys run
+        // against the dictionary's own order, so canonicalization has to follow
+        // them rather than read the values positionally.
         let dictionary = DictionaryArray::<Int8Type>::try_new(
-            arrow_array::Int8Array::from(vec![1, 0]),
+            Int8Array::from(vec![1, 0]),
             std::sync::Arc::new(StringArray::from(vec!["a", "b"])),
         )
         .unwrap();
-        let (old, new) = values(
-            std::sync::Arc::new(dictionary),
-            std::sync::Arc::new(StringArray::from(vec!["b", "a"])),
-        );
+        let (old, new) = values(std::sync::Arc::new(dictionary), column!(["b", "a"]));
         assert_eq!(old, new);
     }
 
@@ -567,10 +540,7 @@ mod tests {
 
     #[test]
     fn equal_values_have_equal_stable_hashes() {
-        let (old, new) = values(
-            std::sync::Arc::new(StringArray::from(vec!["1.0"])),
-            std::sync::Arc::new(Int64Array::from(vec![1])),
-        );
+        let (old, new) = values(column!(["1.0"]), column!([1]));
         assert_eq!(old, new);
         assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
     }

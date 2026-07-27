@@ -399,6 +399,7 @@ dependencies = [
  "insta",
  "parquet",
  "serde_json",
+ "test-support",
  "xxhash-rust",
 ]
 
@@ -1050,6 +1051,14 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "test-support"
+version = "0.0.1"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
 ]
 
 [[package]]

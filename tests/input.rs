@@ -1,34 +1,27 @@
 mod common;
 
-use std::sync::Arc;
-
-use arrow_array::{Int64Array, StringArray};
 use data_diff::{DiffError, read_parquet};
+use test_support::table;
 
 #[test]
 fn parquet_batches_become_one_table_in_file_order() {
     let dir = common::TempDir::new();
     let path = dir.path().join("rows.parquet");
-    let first = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("label", Arc::new(StringArray::from(vec!["a", "b"]))),
-    ]);
-    let second = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![3]))),
-        ("label", Arc::new(StringArray::from(vec!["c"]))),
-    ]);
+    let first = table! {
+        "id" => [1, 2],
+        "label" => ["a", "b"],
+    };
+    let second = table! {
+        "id" => [3],
+        "label" => ["c"],
+    };
     common::write_parquet_batches(&path, &[first, second]);
 
     let table = read_parquet(&path).unwrap();
 
     assert_eq!(table.num_rows(), 3);
     assert_eq!(table.num_columns(), 2);
-    let ids = table
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    assert_eq!(ids.values(), &[1, 2, 3]);
+    assert_eq!(table.column(0), table! { "id" => [1, 2, 3] }.column(0));
 }
 
 #[test]
@@ -58,7 +51,7 @@ fn invalid_parquet_has_path_context() {
 fn zero_row_parquet_preserves_its_schema() {
     let dir = common::TempDir::new();
     let path = dir.path().join("empty.parquet");
-    let empty = common::batch([("id", Arc::new(Int64Array::from(Vec::<Option<i64>>::new())))]);
+    let empty = table! { "id" => i64[] };
     common::write_parquet(&path, &empty);
 
     let table = read_parquet(&path).unwrap();
