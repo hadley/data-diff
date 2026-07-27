@@ -1,10 +1,9 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
-use arrow_schema::{Field, Schema};
+use arrow_array::RecordBatch;
 use parquet::arrow::ArrowWriter;
+use test_support::table;
 
 fn main() {
     let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("demo");
@@ -13,95 +12,77 @@ fn main() {
     write(
         &output,
         "basic-old.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            (
-                "name",
-                Arc::new(StringArray::from(vec!["Ada", "Ben", "Cy"])),
-            ),
-            ("score", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-        ]),
+        table! {
+            "id" => [1, 2, 3],
+            "name" => ["Ada", "Ben", "Cy"],
+            "score" => [10, 20, 30],
+        },
     );
     write(
         &output,
         "basic-new.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            (
-                "name",
-                Arc::new(StringArray::from(vec!["Ada", "Bea", "Cy"])),
-            ),
-            ("score", Arc::new(Int64Array::from(vec![10, 25, 30]))),
-        ]),
+        table! {
+            "id" => [1, 2, 3],
+            "name" => ["Ada", "Bea", "Cy"],
+            "score" => [10, 25, 30],
+        },
     );
 
     write(
         &output,
         "scatter-old.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("a", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-            ("b", Arc::new(Int64Array::from(vec![40, 50, 60]))),
-            ("c", Arc::new(Int64Array::from(vec![70, 80, 90]))),
-        ]),
+        table! {
+            "id" => [1, 2, 3],
+            "a" => [10, 20, 30],
+            "b" => [40, 50, 60],
+            "c" => [70, 80, 90],
+        },
     );
     write(
         &output,
         "scatter-new.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            ("a", Arc::new(Int64Array::from(vec![11, 20, 30]))),
-            ("b", Arc::new(Int64Array::from(vec![41, 50, 60]))),
-            ("c", Arc::new(Int64Array::from(vec![70, 81, 91]))),
-        ]),
+        table! {
+            "id" => [1, 2, 3],
+            "a" => [11, 20, 30],
+            "b" => [41, 50, 60],
+            "c" => [70, 81, 91],
+        },
     );
 
     write(
         &output,
         "mixed-old.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![101, 102, 103]))),
-            (
-                "product",
-                Arc::new(StringArray::from(vec!["apple", "bread", "coffee"])),
-            ),
-            (
-                "price",
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
-            ),
-        ]),
+        table! {
+            "id" => [101, 102, 103],
+            "product" => ["apple", "bread", "coffee"],
+            "price" => [10.0, 20.0, 30.0],
+        },
     );
     write(
         &output,
         "mixed-new.parquet",
-        table(vec![
-            (
-                "price",
-                Arc::new(Float64Array::from(vec![31.0, 11.0, 40.0])),
-            ),
-            ("id", Arc::new(Int64Array::from(vec![103, 101, 104]))),
-            ("stock", Arc::new(Int64Array::from(vec![8, 5, 12]))),
-        ]),
+        table! {
+            "price" => [31.0, 11.0, 40.0],
+            "id" => [103, 101, 104],
+            "stock" => [8, 5, 12],
+        },
     );
 
     write(
         &output,
         "types-old.parquet",
-        table(vec![
-            ("id", Arc::new(Int32Array::from(vec![1, 2, 3]))),
-            ("amount", Arc::new(Int32Array::from(vec![10, 20, 30]))),
-        ]),
+        table! {
+            "id" => i32[1, 2, 3],
+            "amount" => i32[10, 20, 30],
+        },
     );
     write(
         &output,
         "types-new.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-            (
-                "amount",
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
-            ),
-        ]),
+        table! {
+            "id" => [1, 2, 3],
+            "amount" => [10.0, 20.0, 30.0],
+        },
     );
 
     // One of ten shared keys is exactly the 10% limit, so this pair is
@@ -109,34 +90,18 @@ fn main() {
     write(
         &output,
         "fanout-old.parquet",
-        table(vec![
-            (
-                "id",
-                Arc::new(Int64Array::from((1..=10).collect::<Vec<i64>>())),
-            ),
-            (
-                "value",
-                Arc::new(Int64Array::from(
-                    (1..=10).map(|id| id * 10).collect::<Vec<i64>>(),
-                )),
-            ),
-        ]),
+        table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        },
     );
     write(
         &output,
         "fanout-new.parquet",
-        table(vec![
-            (
-                "id",
-                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10])),
-            ),
-            (
-                "value",
-                Arc::new(Int64Array::from(vec![
-                    10, 20, 30, 40, 41, 50, 60, 70, 80, 90, 100,
-                ])),
-            ),
-        ]),
+        table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [10, 20, 30, 40, 41, 50, 60, 70, 80, 90, 100],
+        },
     );
 
     // The only candidate that can identify rows is the one that fans out:
@@ -144,36 +109,24 @@ fn main() {
     write(
         &output,
         "guessed-fanout-old.parquet",
-        table(vec![
-            (
-                "id",
-                Arc::new(Int64Array::from((1..=10).collect::<Vec<i64>>())),
-            ),
-            (
-                "region",
-                Arc::new(StringArray::from(vec![
-                    "north", "south", "north", "south", "north", "south", "north", "south",
-                    "north", "south",
-                ])),
-            ),
-        ]),
+        table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "region" => [
+                "north", "south", "north", "south", "north",
+                "south", "north", "south", "north", "south",
+            ],
+        },
     );
     write(
         &output,
         "guessed-fanout-new.parquet",
-        table(vec![
-            (
-                "id",
-                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10])),
-            ),
-            (
-                "region",
-                Arc::new(StringArray::from(vec![
-                    "north", "south", "north", "south", "east", "north", "south", "north", "south",
-                    "north", "south",
-                ])),
-            ),
-        ]),
+        table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "region" => [
+                "north", "south", "north", "south", "east", "north",
+                "south", "north", "south", "north", "south",
+            ],
+        },
     );
 
     // One of two shared keys is 50%, which reads as a broken key rather than
@@ -181,30 +134,21 @@ fn main() {
     write(
         &output,
         "fanout-broad-old.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 20]))),
-        ]),
+        table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        },
     );
     write(
         &output,
         "fanout-broad-new.parquet",
-        table(vec![
-            ("id", Arc::new(Int64Array::from(vec![1, 1, 2]))),
-            ("value", Arc::new(Int64Array::from(vec![10, 11, 20]))),
-        ]),
+        table! {
+            "id" => [1, 1, 2],
+            "value" => [10, 11, 20],
+        },
     );
 
     println!("wrote demo datasets to {}", output.display());
-}
-
-fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
-    let fields = columns
-        .iter()
-        .map(|(name, values)| Field::new(*name, values.data_type().clone(), true))
-        .collect::<Vec<_>>();
-    let arrays = columns.into_iter().map(|(_, values)| values).collect();
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
 }
 
 fn write(directory: &Path, name: &str, batch: RecordBatch) {
