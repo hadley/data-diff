@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use arrow_array::RecordBatch;
 
@@ -30,17 +30,29 @@ pub(crate) fn reconcile_schema(
         .columns
         .iter()
         .map(|column| (column.old, column.new))
-        .collect::<HashSet<_>>();
+        .collect::<HashMap<_, _>>();
     let mut matched_new = vec![false; new.num_columns()];
+    // Key components reserve their identities before names are considered, so
+    // a declared pair holds both its endpoints whatever they are called.
+    for &new_index in key_columns.values() {
+        matched_new[new_index] = true;
+    }
     let mut result = SchemaMatches::default();
     let old_schema = old.schema();
     let new_schema = new.schema();
 
     for (old_index, old_field) in old_schema.fields().iter().enumerate() {
-        let new_index = new_schema
-            .fields()
-            .iter()
-            .position(|field| field.name() == old_field.name());
+        let new_index = match key_columns.get(&old_index) {
+            Some(&reserved) => Some(reserved),
+            // A same-named column that a pair already claimed is unavailable,
+            // which leaves this column unmatched rather than sharing an
+            // endpoint.
+            None => new_schema
+                .fields()
+                .iter()
+                .position(|field| field.name() == old_field.name())
+                .filter(|&index| !matched_new[index]),
+        };
         let Some(new_index) = new_index else {
             result.dropped.push(old_index);
             continue;
@@ -58,7 +70,7 @@ pub(crate) fn reconcile_schema(
             old: old_index,
             new: new_index,
             type_changed: old_field.data_type() != new_field.data_type(),
-            is_key: key_columns.contains(&(old_index, new_index)),
+            is_key: key_columns.get(&old_index) == Some(&new_index),
         });
     }
     result.added = matched_new
@@ -120,6 +132,78 @@ mod tests {
                 dropped: vec![1],
             }
         );
+    }
+
+    #[test]
+    fn a_key_pair_reserves_its_identity_before_names_are_matched() {
+        let old = table! {
+            "a" => [1, 2],
+            "b" => [10, 20],
+        };
+        let new = table! {
+            "a" => [10, 20],
+            "b" => [1, 2],
+        };
+
+        let options = DiffOptions {
+            key: vec!["a/b".into()],
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+
+        // The pair claims old "a" and new "b". Both names still exist on the
+        // other side, but their endpoints are taken, so old "b" has nothing
+        // left to match and new "a" is unclaimed.
+        assert_eq!(
+            reconcile_schema(&old, &new, &key).unwrap(),
+            SchemaMatches {
+                identities: vec![ColumnIdentity {
+                    old: 0,
+                    new: 1,
+                    type_changed: false,
+                    is_key: true,
+                }],
+                added: vec![0],
+                dropped: vec![1],
+            }
+        );
+    }
+
+    #[test]
+    fn a_renamed_key_keeps_the_other_columns_matching_by_name() {
+        let old = table! {
+            "customer_id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [10, 21],
+        };
+
+        let options = DiffOptions {
+            key: vec!["customer_id/id".into()],
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let schema = reconcile_schema(&old, &new, &key).unwrap();
+
+        assert_eq!(
+            schema.identities,
+            [
+                ColumnIdentity {
+                    old: 0,
+                    new: 0,
+                    type_changed: false,
+                    is_key: true,
+                },
+                ColumnIdentity {
+                    old: 1,
+                    new: 1,
+                    type_changed: false,
+                    is_key: false,
+                },
+            ]
+        );
+        assert!(schema.added.is_empty());
+        assert!(schema.dropped.is_empty());
     }
 
     #[test]

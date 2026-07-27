@@ -1,109 +1,135 @@
 ---
-title: Bounded fanout for guessed keys
+title: Paired key components
 ---
 
 # Todo
 
-- [x] **Amend `design.md`.** Rewrite the "Guessed key" section so a candidate must be unique in `old` and within the fanout bound in `new` rather than unique on both sides, state that selection is by shared key values with freedom from fanout as a tie-break, and redefine the reported overlap denominator over distinct key values. Remove "guessed keys never infer fanout" and the corresponding sentence in "Row matching".
-- [x] **Score candidates by distinct shared keys.** In `src/key.rs`, change `candidate_overlap` to return the shared and affected key counts rather than a count of matching new rows, and to reject a candidate only for an invalid value or old-side duplication. Counting rows would give a fanned-out candidate one point per duplicate and bias selection towards the columns the bound is meant to tolerate.
-- [x] **Rank by shared keys.** Admit a candidate when it shares at least one key and satisfies the same bound as a declared key, and select by shared keys descending, breaking ties in favour of a candidate that does not fan out and then by old column order.
-- [x] **Report overlap over distinct keys.** Compute `KeyOverlap::possible` from the distinct key values on each side rather than the row counts, which is the same number whenever neither side duplicates and is the meaningful one when `new` does.
-- [x] **Cover the new selection.** Unit tests in `src/key.rs` for the ranking, the counts themselves, the row-count bias the new metric removes, the overlap denominator, the bound applying to guesses, and old-side duplication still disqualifying a candidate; integration coverage in `tests/diff.rs` for a guessed key that fans out; and a CLI snapshot.
-- [x] **Refresh the demo datasets and documentation.** Add a `demo/guessed-fanout-*.parquet` pair whose only eligible candidate fans out, and update `demo/README.md` and `README.md` to describe guessing as fanout-tolerant.
+- [x] **Parse paired components.** In `src/key.rs`, split each `--key` component on `/` into an old and a new name, resolve the two endpoints independently, and validate that no old or new column is claimed by more than one component. Replace `DiffError::PairedKeyUnsupported` with `MalformedKeyComponent`, and replace `DuplicateKeyComponent` with an endpoint-based `DuplicateKeyColumn { side, column }`.
+- [x] **Carry both names on a key column.** Change `KeyColumn::name` to `component`, holding the user's spelling of the component, so error messages name what was declared rather than one half of it.
+- [x] **Reserve key identities before same-name matching.** In `src/schema.rs`, claim each key column pair as an identity at its old-column position, mark its new endpoint as taken before the same-name pass, and let the remaining columns match by name as they do today. Reserved endpoints are unavailable to name matching, so the old column whose name a key pair consumed becomes a drop and the new one an addition.
+- [x] **Derive and render renames.** In `src/human.rs`, emit `col_rename(old, new)` for every identity whose two schema names differ, ahead of the other column operations, and render a paired key component as `"old" -> "new"` so it cannot be confused with two components of a compound key.
+- [x] **Name identities by their new name.** Change `col_edit()` and `col_order()` to resolve their column name against `schemas.new` rather than `schemas.old`, so no operation refers to a column by a name the new file does not have. Add the convention to `design.md`, whose vocabulary table writes `col_edit([old1, ...])` and would otherwise contradict it.
+- [x] **Describe the flag accurately.** Update the `--key` help text in `src/main.rs` and the `DiffOptions::key` doc comment in `src/model.rs`, which both say the columns must share a name, and accept the resulting change to the `--help` snapshot in `tests/cli.rs`. That snapshot is the only one this step may change, and it must change: leaving it green would mean the documented interface still contradicts the implemented one.
+- [x] **Cover the new form.** Unit tests in `src/key.rs` for parsing, endpoint validation, and each error; in `src/schema.rs` for reservation beating name matching; and in `src/human.rs` for both rendered forms. Integration coverage in `tests/diff.rs` for a renamed key with reordered rows and changed cells, and a CLI snapshot.
+- [x] **Refresh the demo datasets and documentation.** Add a `demo/key-rename-*.parquet` pair whose key column is named differently in each file, and document the paired syntax in `demo/README.md` and `README.md`.
 - [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-A declared key may now identify one old row and several new rows. A guessed key still may not, because `candidate_overlap` rejects any column that repeats a value on either side. The consequence is backwards: fanout usually arrives from a join that duplicated rows in the identity column, so the column that fanned out is exactly the one guessing discards, and the tool is least able to guess precisely when it has the most to explain. Once row-number fallback exists, that case will silently degrade to positional matching rather than failing, which is worse still.
+Renaming the key column is one of the most ordinary things a script does, and it is the change `data-diff` handles worst. Column identity is name equality, so a renamed key is a drop plus an addition, no column pairs up, no key can be resolved, and the two files look entirely unrelated. `--key` cannot rescue it either: a component is one name used on both sides, and the paired form the design defines is rejected outright by `PairedKeyUnsupported`.
 
-This step lets a guess fan out under the same bound as a declaration, and ranks candidates by the evidence they carry — the number of key values the two files share — rather than by freedom from fanout. A true key that duplicated one row is then chosen over a coincidentally unique column that identifies far fewer rows.
+This step implements that paired form:
 
-That changes what some comparisons guess today. The alternative, ranking every unique candidate ahead of every fanned-out one, would preserve current behavior exactly but would keep choosing the weaker key in precisely the case this step exists to fix, so the churn is the point rather than a side effect. It should be rare on real inputs, where a true key usually shares many more values than a column that is unique by coincidence.
+```console
+$ data-diff old.parquet new.parquet --key customer_id/id
+col_key(declared: ["customer_id" -> "id"])
+col_rename("customer_id", "id")
+row_edit(2)
+```
+
+It is also where column identity stops being a synonym for name equality. The design defines identity as a partial bijection in which paired key components and rename hints reserve identities first and same-named columns fill in the rest; this step builds the first half of that and leaves the shape ready for hints and rename inference. `col_rename()` enters the output vocabulary for the first time, derived from an identity whose ends carry different names rather than stored as its own event.
 
 # Scope
 
+## Splitting the queued item
+
+The queue entry read "add paired key components and validated rename/add/drop/edit hints". That is two changes, and this plan is the first; the hints return to `plan-next.md` as two items, sequenced after exact rename inference and after swap detection rather than before them.
+
+They are worth separating. Paired key components need no new machinery: `reconcile_schema` already receives the resolved key and already collects its column pairs to mark `is_key`, so reserving those pairs as identities is a small change to an existing pass. Hints need hint parsing, normalization, deduplication, conflict detection over connected groups of contradictory claims, and an issue channel in `Diff` that does not exist yet, with four issue kinds and a rendering for them.
+
+They are also worth postponing. Three of the four kinds exist only to constrain inference — `col_add` and `col_drop` reserve endpoints to keep them out of rename candidates, and `col_edit` protects a column from being read as half of a swap — so landing them before inference exists would mean writing reservations that nothing reads and no test can exercise. `col_rename` is the exception, and the paired form in this step covers its most pressing use, the renamed key column. This changes only the order in which the work is built: `design.md` continues to process hints before key resolution at run time.
+
+What the two halves genuinely share is the identity bijection, and this step is where it starts. Doing it first gives the hints step something to attach to instead of introducing both at once.
+
 ## What changes
 
-* `design.md`: the "Guessed key" section, the overlap denominator, and the two sentences that say a guess never fans out.
-* `src/key.rs`: candidate scoring, eligibility, ranking, and the reported overlap.
-* `tests/diff.rs` and `tests/cli.rs`: coverage for a guessed key that fans out.
+* `src/key.rs`: component parsing, endpoint resolution, and endpoint uniqueness.
+* `src/model.rs`: the two replaced error variants and their messages.
+* `src/schema.rs`: reserved identities ahead of the same-name pass.
+* `src/human.rs`: `col_rename()`, the paired rendering of a key component, and the switch to naming identities by their new name.
+* `design.md`: one sentence recording that display convention.
+* `src/main.rs` and `src/model.rs`: the `--key` help text and the `DiffOptions::key` doc comment, both of which currently promise same-name columns.
+* `tests/diff.rs` and `tests/cli.rs`, including the `--help` snapshot that carries the flag's description.
 * `examples/generate_demo.rs`, `demo/README.md`, and `README.md`.
 
 ## What stays and why
 
-Everything downstream of key resolution is untouched. `match_rows`, `compare_cells`, the summary, ordering, and the human format all work from a `ResolvedKey` and never ask how it was chosen, so a guessed key that fans out produces the same events a declared one does. That is worth an integration test rather than an edit: the test asserts a `KeyBasis::Guessed` key with a populated `rows.fanout`.
+`design.md` needs only the display convention added. It already defines the paired form, the reservation order, and the rule that a rename is derived wherever an identity's two names differ, so the reconciliation behavior here is what is already written — with one timing difference recorded under deferrals below. What it gains is the sentence saying an identity is displayed under its new name, which its `col_edit([old1, ...])` notation would otherwise appear to deny.
 
-The bound itself is unchanged and shared. `MAX_FANOUT_PERCENT` and the rule `affected * 100 <= shared * MAX_FANOUT_PERCENT` are lifted into one predicate used by both the declared and the guessed path, so the two can never drift. What differs between them is only the consequence: a declared key that exceeds the bound is an error, because the user asserted it; a candidate that exceeds it is silently ineligible, like every other candidate that fails a test.
+Guessing is untouched and stays same-name. A guess has no user assertion behind it, and inferring identity between differently-named columns is rename inference, which is a later step with its own evidence rules.
 
-Old-side duplication still disqualifies a candidate outright. Fanout is one-directional, and a column that repeats a value in `old` cannot identify rows.
+The model gains no rename field. A rename is derived from `columns.identities`, whose ends already carry names through `schemas.old` and `schemas.new`, so storing it again would be a second copy of a fact the bijection already holds — and the design is explicit that identity is what the diff stores.
 
-A guess still requires no nulls or `NaN`, and still requires at least one shared value.
+Duplicate column names remain a fatal input error, which is what lets a component name resolve to exactly one column per side without further checks.
 
 ## Explicitly deferred
 
-* **Compound guessed keys.** Guessing remains single-column.
-* **Reporting the fanout rate.** The `Diff` records the resolved key and its overlap, not the evidence behind admitting it; that belongs with the issue channel.
-* **Changing what a declared key does.** The declared path keeps its counts and its error.
+* **All four hint kinds and the issue channel**, now two queue items placed after inference.
+* **Renames from anything but a declared pair.** Inference over matched rows is the next step, and swaps the one after.
+* **The list form of `col_rename()`.** The vocabulary's `col_rename([a, b], [b, a])` exists for swaps; a declared pair is always one-to-one, so this step emits the two-argument form and the list form arrives with swap detection.
+* **Guessing a compound key**, unchanged.
+* **Surviving key validation failure.** The design says a paired component establishes identity *before* key validation, like a rename hint, so that a key rejected as invalid still leaves the user's asserted identity in place. This step reserves identity inside `reconcile_schema`, which `diff_tables` runs only after `resolve_key` returns successfully, so a pair that fails validation establishes nothing. That is unobservable today, because every declared-key failure is fatal and no diff is produced at all. It stops being unobservable as soon as a rejected declared key falls back to a guessed or row-numbered one, which is exactly what the row-number fallback step introduces; that step must then split component parsing and endpoint resolution from validation, so the identities survive into a diff the fallback produced. The queue entry for it now says so.
 
 # Design
 
-## Why the score has to change first
+## Syntax and validation
 
-`candidate_overlap` currently counts *new rows* whose value occurs in `old`. That equals the number of shared key values only because duplicates are impossible today. Relax uniqueness without touching it and a column that fans out scores one extra point per duplicated row — so the metric would actively prefer the columns the bound exists to tolerate, and a badly duplicated column could outscore a clean one. The count must therefore become distinct shared keys before any candidate is allowed to fan out. This is a change with no observable effect today and is what makes the rest safe.
+A component is `name` or `old/new`. Splitting on `/` yields exactly one or two parts; three or more is `MalformedKeyComponent`, and an empty part on either side is the existing `EmptyKeyComponent`, since an empty half is an empty name. `a/a` is legal and means what `a` means, which needs no special case: the names match, so no rename is derived.
 
-The function's contract becomes:
+Uniqueness becomes a property of endpoints rather than of the component string. `--key a/b,a/c` claims `a` twice on the old side and `--key a/b,c/b` claims `b` twice on the new side; both are `DuplicateKeyColumn { side, column }`, as is `--key id,id/other`, which the current string-equality check would miss entirely. Each endpoint is resolved with the existing `column_index`, so a name absent from its side is still `MissingKeyColumn` with the side that lacks it.
 
-```rust
-struct Overlap {
-    /// Distinct old keys that also occur in `new`.
-    shared: usize,
-    /// Those that occur more than once there.
-    affected: usize,
-}
+`KeyColumn::name` becomes `component` and holds the user's spelling — `"id"` or `"customer_id/id"` — because it exists to name the component in `IncompatibleKeyTypes` and `InvalidKeyValue`, and naming half of a pair there would misdescribe what the user wrote.
 
-fn candidate_overlap(old, new, hash) -> Option<Overlap>;
+## Reserving identities
+
+`reconcile_schema` walks the old columns and matches each by name. It gains one step in front: the key's column pairs are claimed first, and their new endpoints are marked as taken before the name pass begins. An old column that a pair already claims takes that identity; every other old column matches a same-named new column that is still free.
+
+The consequence to be deliberate about is that reservation consumes names. With `old = [a, b]`, `new = [a, b]` and `--key a/b`, the identity is `old.a → new.b`; `new.b` is taken, so `old.b` has nothing to match and is a drop, and `new.a` is unclaimed and is an addition. That is the bijection behaving correctly rather than an edge case, and it is the shape a rename hint will produce too, so it gets its own test.
+
+Type compatibility is checked for every identity uniformly, reserved or not. A reserved pair has already been checked by key resolution, so the check cannot fire there, but keeping it unconditional preserves the local guarantee that `compare_cells` relies on when it expects every identity to have a comparison plan.
+
+## Rendering
+
+A rename is derived at render time: for each identity, compare the name at its old end with the name at its new end. Where they differ, emit
+
+```text
+col_rename("customer_id", "id")
 ```
 
-`None` still means the column cannot identify rows at all: an invalid value on either side, or a duplicate in `old`. New-side duplication is no longer disqualifying but is now measured, which is the whole change.
+These come first among the column operations, before drops and additions. Every later operation names its column by its old name, so stating the identity first is what makes `col_edit("customer_id", values)` legible when the new file has no such column.
 
-## Ranking
+Everything below that line then uses the new name. `col_rename("customer_id", "id")` reads as "customer_id became id", so a later `col_edit("customer_id", values)` would be naming a column the new file does not contain, and sending a reader to look for it there. Naming by the new name gives:
 
-A candidate is eligible when `shared > 0` and it satisfies the bound. Candidates are then ordered by:
+```text
+col_rename("customer_id", "id")
+col_order("id", 3 -> 1)
+col_edit("id", values)
+```
 
-1. shared keys, descending;
-2. whether they fan out — `affected == 0` before `affected > 0`;
-3. old column order.
+The rule is that an operation about an identity names it by its new name, while an operation about an unmatched column uses the only name it has: `col_drop()` keeps the old name because there is no other, and `col_add()` already uses the new one. Positions keep their `old -> new` form, which is explicitly a transition and reads correctly either way.
 
-Evidence comes first: the candidate that identifies the most rows across the two files wins, and freedom from fanout only settles a tie. A true key that duplicated one row therefore beats a coincidentally unique column that shares far less, which is the case this step exists to fix.
+This is unobservable in the current output — every identity today has the same name at both ends — so no existing snapshot changes, and this step is where the choice first has consequences. `design.md`'s vocabulary table writes `col_edit([old1, old2, ...])`, which describes the operation's subject rather than its display, but it is close enough to read as a contradiction, so a sentence recording the display convention goes with it.
 
-This changes guesses on inputs that resolve today, deliberately. Two kinds of comparison move: one where a fanned-out candidate now outscores the clean candidate that currently wins, and one where a candidate is eligible at all because its only duplicates are of keys absent from `old`. The demo fixtures are small enough to show the effect readily; real inputs, where the true key usually shares far more values than an accidentally unique column, should see it rarely. Ranking uniqueness first would avoid the churn but would keep choosing the weaker key, which is the behavior being fixed.
-
-The tie-break has two states rather than three. A candidate whose duplicates are all of keys absent from `old` has `affected == 0`, because those rows are additions: they cannot make a matched row ambiguous and so do not degrade the key, even though today's uniqueness test rejects them. Only fanout — a duplicate of a key that `old` also has — costs anything, so only fanout is discriminated against. Separating "globally unique" from "duplicates only new-only keys" would rank one above the other on a difference that does not affect the diff.
-
-Note that `affected == 0` is therefore not the same as today's eligible set, and no ordering built on it could preserve today's behavior anyway.
-
-## Overlap over distinct keys
-
-`KeyOverlap::possible` is `min(old.num_rows(), new.num_rows())` today, and `shared` is about to become a count of distinct keys. Mixing the two would make the ratio incoherent as soon as `new` duplicates, so `possible` becomes the smaller of the two sides' distinct key counts. `old` is unique by eligibility, so its distinct count is its row count, and neither number moves unless `new` duplicates — the reported overlap changes only where a duplicating candidate is chosen, which is new behavior anyway.
+A paired key component renders as `"customer_id" -> "id"` inside the bracketed key list. The obvious alternative, listing both names, would make `--key a/b` and `--key a,b` produce identical output for entirely different keys. The arrow reuses `row_order()`'s idiom for an old-to-new pair, and each name keeps its own quoting.
 
 # Verification
 
-* `src/key.rs` unit tests cover: a fanned-out candidate chosen when it is the only eligible one; a fanned-out candidate that shares more keys chosen over a clean candidate that shares fewer, which is the ranking change stated as its purpose; a clean candidate winning a tie on shared keys against a fanned-out one; a candidate rejected for exceeding the bound while a weaker clean candidate is still chosen; a candidate whose duplicates are all of new-only keys being eligible with `affected == 0`; and old-side duplication still disqualifying.
-* Two tests pin the scoring change, because a ranking test alone can be passed by the wrong metric. The first asserts `Overlap { shared, affected }` directly for a fanned-out column, which is the counts themselves rather than their consequence. The second makes the two metrics disagree on the winner: candidate `a` shares ten keys with one of them appearing three times in `new`, for twelve matching new rows, and candidate `b` shares eleven keys with no duplicates, for eleven. Distinct-key scoring ranks `b` above `a`; the row count this step removes ranks `a` above `b`, whatever the column order.
-* `tests/diff.rs` asserts a guessed key with `basis: Guessed`, a populated `rows.fanout`, and fanout cells absent from `cells` and `summary`, plus a repeated run that is structurally and byte-identical.
-* `tests/cli.rs` snapshots a guessed fanout, whose first line is `col_key(guessed: [...], overlap: ...)` followed by a `row_fanout()` line.
-* One test pins the overlap denominator, which the other overlap cases cannot distinguish because their row and distinct-key counts coincide. Twenty old keys against eleven new rows holding ten distinct keys, all shared, must report `KeyOverlap { shared: 10, possible: 10 }` for a ratio of 1.00; the row-count denominator would give `possible: 11` and 0.91.
-* The existing guessing tests still pass unchanged, which is a result to verify rather than a property of the design: `guesses_the_single_eligible_column`, `guessing_prefers_the_largest_exact_intersection`, `guessing_breaks_ties_by_old_column_order`, `overlap_is_normalized_by_the_smaller_side`, and `guessing_skips_every_ineligible_candidate` all keep their winners under the new ranking. The `dup_new` column in the last of them stays ineligible, but now because one of its one shared key is duplicated and 100% exceeds the bound, rather than because `new` repeats a value. `guessing_never_admits_fanout` keeps passing for that same reason and so becomes misleading; it is rewritten to say that the candidate exceeded the bound rather than that guessing forbids fanout.
-* The demo pair `demo/guessed-fanout-*.parquet` has one non-unique second column, so the fanned-out key is the only eligible candidate and the demo shows a guess that fans out.
+* `src/key.rs` unit tests cover: a paired component resolving to two indices; `a/b/c` rejected as malformed; `a/` and `/b` rejected as empty; an old endpoint claimed twice, a new endpoint claimed twice, and a plain component colliding with a paired one, each naming the side and column; a missing endpoint naming the side that lacks it; incompatible types across a pair naming the component as written; `a/a` accepted; and a compound key mixing plain and paired components.
+* `src/schema.rs` unit tests cover a reserved identity beating name matching, including the `--key a/b` case above where the reservation turns `old.b` into a drop and `new.a` into an addition, and confirm the reserved identity is still marked `is_key` and keeps its old-column position in the identity list.
+* `src/human.rs` tests pin both new renderings, the position of `col_rename()` among the column operations, and a renamed column that is also edited and reordered, whose `col_edit()` and `col_order()` lines must carry the new name while its `col_drop()`-side neighbours keep theirs. Every existing snapshot passes unchanged, because an identity's two names agree everywhere except behind a declared pair.
+* `tests/diff.rs` asserts a complete `Diff` for a renamed key whose rows are also reordered and edited, showing that identity, row matching, ordering, and cells all follow the pair rather than the names, plus a repeated run that is structurally and byte-identical.
+* `tests/cli.rs` snapshots `--key customer_id/id` end to end.
+* The demo pair `demo/key-rename-*.parquet` renames its key column and edits one row, so the demo shows a rename and an edit together rather than the drop-and-add pair the same files produce without `--key`.
 
 # Definition of done
 
 This step is complete when:
 
-* `design.md` describes guessing as admitting bounded fanout, selecting by shared key values, and using freedom from fanout only as a tie-break;
-* a guessed key may identify one old row and several new rows under the same bound and the same shared predicate as a declared key, while old-side duplication, nulls, and `NaN` still disqualify a candidate;
-* candidates are scored by distinct shared key values, so duplication cannot inflate a candidate's rank;
-* candidates are ranked by shared keys, with fanout breaking ties and old column order breaking those, and every existing guessing test still passes unchanged;
-* the reported overlap is normalized by distinct key values on each side, which changes the ratio only where a duplicating candidate is chosen;
-* the demo datasets and both READMEs describe guessing as fanout-tolerant; and
+* `--key` accepts `old/new` components alongside plain ones, in any combination within a compound key;
+* a component naming a column absent from its side, a malformed or empty component, and an old or new column claimed by more than one component are each rejected with an error naming what is wrong;
+* a declared pair establishes column identity, so the two columns are neither a drop nor an addition, and the columns whose names the pair consumed become one drop and one addition;
+* an identity whose ends carry different names renders as `col_rename()`, ahead of the other column operations, and a paired key component renders distinguishably from two plain ones;
+* no operation names a column by a name its side of the comparison does not have: identities are displayed under their new name, drops under their old one, and `design.md` records that convention;
+* `DiffError::PairedKeyUnsupported` no longer exists, and duplicate key columns are detected by endpoint rather than by component string;
+* the demo datasets and both READMEs document the paired syntax; and
 * the full test suite, strict Clippy, formatting, and diff checks pass across the workspace, and repeated runs still produce byte-identical output.

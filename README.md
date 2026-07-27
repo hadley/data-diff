@@ -17,7 +17,13 @@ A user who knows the correct identity can declare it instead:
 data-diff old.parquet new.parquet --key customer_id,date,region
 ```
 
-`--key` accepts a comma-separated simple or compound key whose columns have the same names in both files. An explicit key always overrides guessing, even when another column would be the strongest guess, and errors in a declared key stay fatal rather than being silently replaced by a guess. The human format is the only output and is written to stdout. Input, schema, and key errors are written to stderr and return a non-zero exit status.
+`--key` accepts a comma-separated simple or compound key. A component is one column name used in both files, or an `old/new` pair naming a column that was renamed between them:
+
+```console
+data-diff old.parquet new.parquet --key customer_id/id,date
+```
+
+A paired component identifies the two columns as one, so they are neither a drop nor an addition, the rows line up through them, and the change is reported as `col_rename("customer_id", "id")`. No column may be claimed by more than one component. An explicit key always overrides guessing, even when another column would be the strongest guess, and errors in a declared key stay fatal rather than being silently replaced by a guess. The human format is the only output and is written to stdout. Input, schema, and key errors are written to stderr and return a non-zero exit status.
 
 Output leads with the resolved key and then emits one operation per line:
 
@@ -43,6 +49,7 @@ Column names are quoted, and row and column coordinates are one-based. The summa
   `float64`, UTF-8 strings, dictionary-encoded strings, and typed nulls;
 * compares compatible numeric and parsed string representations exactly;
 * guesses a single-column row key from exact cross-file evidence when `--key` is omitted, allowing it to fan out under the same limit as a declared key, and reports the selected basis and overlap;
+* identifies a declared old/new key column pair across the two files, reporting it as a rename;
 * reports schema additions, drops, and source-type edits;
 * reports added, dropped, matched, and relatively reordered rows;
 * keeps a declared key that identifies one old row and several new rows, when at most 10% of the key values shared by the two files are duplicated in the new one, and reports each affected key as a `row_fanout()` event holding the old row, its new rows, and the values that differ between them;
@@ -51,9 +58,9 @@ Column names are quoted, and row and column coordinates are one-based. The summa
   and
 * emits deterministic one-based coordinates referring to the original files.
 
-It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, declared keys whose new-side duplication exceeds the fanout limit, and comparisons where no key was supplied and no eligible key could be guessed. A guessed key is held to the same fanout limit as a declared one, but a candidate that exceeds it is simply passed over rather than reported.
+It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, malformed key components and columns claimed by more than one of them, null or `NaN` declared-key values, non-unique old keys, declared keys whose new-side duplication exceeds the fanout limit, and comparisons where no key was supplied and no eligible key could be guessed. A guessed key is held to the same fanout limit as a declared one, but a candidate that exceeds it is simply passed over rather than reported.
 
-It does not yet expose the complete cell-level result to users, fall back to row numbers when no key can be guessed, guess compound keys, accept paired old/new key names, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
+It does not yet expose the complete cell-level result to users, fall back to row numbers when no key can be guessed, guess compound keys, accept column hints, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
 
 ## Development
 

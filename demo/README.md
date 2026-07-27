@@ -60,6 +60,25 @@ data-diff demo/types-old.parquet demo/types-new.parquet --key id
 `double`, while all canonical values remain equal. The result contains two
 type-only column edits and no changed cells.
 
+## A key column that was renamed
+
+```console
+data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet --key customer_id/id
+```
+
+The key column is `customer_id` in the old file and `id` in the new one. A paired `--key` component names both, which identifies them as one column and lets the rows line up: the output is one `col_rename()` and the single row that changed.
+
+Without the pair the same files read as unrelated. Column identity is name equality, so `customer_id` is dropped, `id` is added, and the only guessable key left is `amount` — which reports the changed row as a drop and an add rather than an edit:
+
+```console
+$ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
+col_key(guessed: ["amount"], overlap: 0.67)
+col_drop("customer_id")
+col_add("id")
+row_drop(2)
+row_add(2)
+```
+
 ## Bounded fanout
 
 ```console

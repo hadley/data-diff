@@ -39,6 +39,8 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 
 Note that rows and columns are not exactly symmetrical. You can add, remove, and edit both rows and columns, but you can't rename a row or fan out a column.
 
+The `old` and `new` subscripts above say which side an operation's arguments come from, not which name is displayed. An operation about an identity is displayed under the column's new name, because that is the name the reader will find in the new data; an operation about an unmatched column uses the only name it has, so `col_drop()` shows the old name and `col_add()` the new one. `col_rename()` shows both, in that order.
+
 This vocabulary allows a single physical change to be described by multiple possible semantic changes. Here are a few examples of such ambiguities:
 
 * `row_edit()` vs `col_edit()`: You can represent a rectangular edit with either `row_edit()` or `col_edit()`. By default, we pick the most parsimonious description: does the change affect fewer rows or fewer columns?

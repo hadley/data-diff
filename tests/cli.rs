@@ -25,7 +25,7 @@ fn help_describes_the_initial_interface() {
       <NEW>  Modified Parquet file
 
     Options:
-          --key <KEY>  Comma-separated, same-name key columns; when omitted, a single-column key is guessed
+          --key <KEY>  Comma-separated key columns, each a shared name or an old/new pair; when omitted, a single-column key is guessed
       -h, --help       Print help
       -V, --version    Print version
     ");
@@ -195,6 +195,37 @@ fn reports_a_bounded_fanout() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
     col_key(declared: ["id"])
     row_fanout(4 -> [4, 5], values)
+    "#);
+}
+
+#[test]
+fn accepts_a_paired_key_component() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "value" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "value" => [10, 21, 30],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "customer_id/id"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["customer_id" -> "id"])
+    col_rename("customer_id", "id")
+    row_edit(2)
     "#);
 }
 

@@ -85,6 +85,25 @@ fn main() {
         },
     );
 
+    // The key column is called something different in each file, so only a
+    // paired --key component can line these rows up.
+    write(
+        &output,
+        "key-rename-old.parquet",
+        table! {
+            "customer_id" => [1, 2, 3],
+            "amount" => [10, 20, 30],
+        },
+    );
+    write(
+        &output,
+        "key-rename-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "amount" => [10, 25, 30],
+        },
+    );
+
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(

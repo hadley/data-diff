@@ -11,7 +11,7 @@ struct Cli {
     old: PathBuf,
     /// Modified Parquet file.
     new: PathBuf,
-    /// Comma-separated, same-name key columns; when omitted, a single-column key is guessed.
+    /// Comma-separated key columns, each a shared name or an old/new pair; when omitted, a single-column key is guessed.
     #[arg(long, value_delimiter = ',')]
     key: Vec<String>,
 }
