@@ -169,6 +169,59 @@ fn reports_mixed_changes_in_human_format() {
 }
 
 #[test]
+fn reports_a_bounded_fanout() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["id"])
+    row_fanout(4 -> [4, 5], values)
+    "#);
+}
+
+#[test]
+fn rejects_a_declared_key_that_fans_out_too_broadly() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    common::write_parquet(&old_path, &table! { "id" => [1, 2] });
+    common::write_parquet(&new_path, &table! { "id" => [1, 1, 2] });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "declared key fans out for 1 of 2 shared key values, above the 10% limit; \
+         supply a different --key\n"
+    );
+}
+
+#[test]
 fn empty_files_still_report_type_only_schema_changes() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");

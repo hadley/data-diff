@@ -60,11 +60,18 @@ data-diff demo/types-old.parquet demo/types-new.parquet --key id
 `double`, while all canonical values remain equal. The result contains two
 type-only column edits and no changed cells.
 
-## Unsupported fanout
+## Bounded fanout
 
 ```console
 data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
 ```
 
-This intentionally fails: key `1` occurs twice in the new file. Fanout is
-planned after the MVP, so the command exits non-zero with an explanatory error.
+Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], values)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
+
+## Fanout too broad to be a fanout
+
+```console
+data-diff demo/fanout-broad-old.parquet demo/fanout-broad-new.parquet --key id
+```
+
+This intentionally fails. Key `1` is duplicated again, but here it is one of only two shared keys, so half the identity is ambiguous and the key reads as broken rather than as a fanout. The command exits non-zero and names both counts.

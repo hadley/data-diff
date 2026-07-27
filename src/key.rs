@@ -22,6 +22,59 @@ pub(crate) struct KeyColumn {
     pub new: usize,
 }
 
+/// The share of common key values a declared key may duplicate in `new` and
+/// still be read as fanout rather than as a broken key.
+///
+/// `DiffError::ExcessiveFanout` states this limit in its message.
+pub(crate) const MAX_FANOUT_PERCENT: usize = 10;
+
+/// Rows grouped by key hash, with equality confirmed on lookup.
+///
+/// A bucket can hold rows with different keys, so a collision must never decide
+/// membership; confirming equality inside the bucket is what key validation and
+/// row matching both need, and sharing it keeps that reasoning in one place.
+pub(crate) struct KeyIndex<'a> {
+    keys: &'a [Vec<CanonicalValue>],
+    buckets: HashMap<u128, Vec<usize>>,
+    hash: fn(&[CanonicalValue]) -> u128,
+}
+
+impl<'a> KeyIndex<'a> {
+    pub(crate) fn new(keys: &'a [Vec<CanonicalValue>]) -> Self {
+        Self::with_hash(keys, compound_hash)
+    }
+
+    /// The bucketing is parameterized by its hash so a test can force every key
+    /// into one bucket, which is the only way to reach the confirmation step.
+    fn with_hash(keys: &'a [Vec<CanonicalValue>], hash: fn(&[CanonicalValue]) -> u128) -> Self {
+        let mut buckets = HashMap::<u128, Vec<usize>>::new();
+        for (row, key) in keys.iter().enumerate() {
+            buckets.entry(hash(key)).or_default().push(row);
+        }
+        Self {
+            keys,
+            buckets,
+            hash,
+        }
+    }
+
+    /// The rows whose key equals `key`, in ascending row order.
+    ///
+    /// Buckets are filled in row order and filtered rather than sorted, so the
+    /// result never depends on hash iteration order.
+    pub(crate) fn rows<'b>(
+        &'b self,
+        key: &'b [CanonicalValue],
+    ) -> impl Iterator<Item = usize> + 'b {
+        self.buckets
+            .get(&(self.hash)(key))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&row| self.keys[row] == key)
+    }
+}
+
 pub(crate) fn resolve_key(
     old: &RecordBatch,
     new: &RecordBatch,
@@ -60,8 +113,8 @@ pub(crate) fn resolve_key(
     let new_keys = transpose(new.num_rows(), &new_components);
     validate_present(&old_keys, &columns, Side::Old)?;
     validate_present(&new_keys, &columns, Side::New)?;
-    validate_unique(&old_keys, Side::Old)?;
-    validate_unique(&new_keys, Side::New)?;
+    validate_unique_old(&old_keys)?;
+    validate_fanout(&old_keys, &KeyIndex::new(&new_keys))?;
 
     Ok(ResolvedKey {
         basis: KeyBasis::Declared,
@@ -246,29 +299,51 @@ fn validate_present(
     Ok(())
 }
 
-fn validate_unique(keys: &[Vec<CanonicalValue>], side: Side) -> Result<(), DiffError> {
-    let mut buckets = HashMap::<u128, Vec<usize>>::new();
+/// Reject a key that identifies more than one old row.
+///
+/// Fanout is one-directional: many old rows mapping to one new row could be an
+/// aggregation, a deduplication, or an arbitrary pairing, so old-side
+/// duplication stays fatal. It is also what makes the fanout rate well defined,
+/// and is therefore checked first.
+fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), DiffError> {
+    let index = KeyIndex::new(keys);
     for (row, key) in keys.iter().enumerate() {
-        let hash = compound_hash(key);
-        if let Some(first) = buckets
-            .entry(hash)
-            .or_default()
-            .iter()
-            .copied()
-            .find(|previous| keys[*previous] == *key)
-        {
-            return match side {
-                Side::Old => Err(DiffError::NonUniqueOldKey {
-                    first_row: first + 1,
-                    row: row + 1,
-                }),
-                Side::New => Err(DiffError::UnsupportedFanout {
-                    first_row: first + 1,
-                    row: row + 1,
-                }),
-            };
+        let first = index.rows(key).next().expect("a row matches its own key");
+        if first != row {
+            return Err(DiffError::NonUniqueOldKey {
+                first_row: first + 1,
+                row: row + 1,
+            });
         }
-        buckets.get_mut(&hash).unwrap().push(row);
+    }
+    Ok(())
+}
+
+/// Reject a key whose new-side duplication is too broad to read as fanout.
+///
+/// `old` is unique by this point, so each old row contributes one distinct key:
+/// `shared` counts old keys that also occur in `new`, and `affected` counts
+/// those that occur more than once there, each once however many new rows it
+/// produces. A new key absent from `old` is a set of additions rather than a
+/// fanout, so it contributes to neither count and cannot invalidate the key;
+/// with no shared keys at all both counts are zero, which is the design's
+/// convention that the rate is then zero.
+fn validate_fanout(old_keys: &[Vec<CanonicalValue>], new: &KeyIndex) -> Result<(), DiffError> {
+    let mut shared = 0;
+    let mut affected = 0;
+    for key in old_keys {
+        match new.rows(key).count() {
+            0 => {}
+            1 => shared += 1,
+            _ => {
+                shared += 1;
+                affected += 1;
+            }
+        }
+    }
+    // Exact integer arithmetic, inclusive at the limit.
+    if affected * 100 > shared * MAX_FANOUT_PERCENT {
+        return Err(DiffError::ExcessiveFanout { affected, shared });
     }
     Ok(())
 }
@@ -288,7 +363,7 @@ pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
 mod tests {
     use test_support::{rows_without_columns, table};
 
-    use super::{candidate_overlap, resolve_key};
+    use super::{KeyIndex, candidate_overlap, resolve_key};
     use crate::compare::{CanonicalValue, stable_hash};
     use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
 
@@ -377,16 +452,124 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_new_side_fanout_from_a_broken_old_key() {
+    fn retains_a_key_that_fans_out_within_the_limit() {
+        let old = table! { "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] };
+        let new = table! { "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10] };
+
+        let key = resolve_key(&old, &new, &options(&["id"])).unwrap();
+
+        // One of ten shared keys is exactly the 10% limit, which is inclusive.
+        assert_eq!(key.basis, KeyBasis::Declared);
+        assert_eq!(key.new.len(), 11);
+    }
+
+    #[test]
+    fn rejects_a_key_that_fans_out_above_the_limit() {
         let old = table! { "id" => [1, 2] };
-        let new = table! { "id" => [1, 1] };
+        let new = table! { "id" => [1, 1, 2] };
+
         assert_eq!(
             resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::UnsupportedFanout {
+            DiffError::ExcessiveFanout {
+                affected: 1,
+                shared: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn counts_each_fanned_out_key_once() {
+        let old = table! { "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] };
+        let new = table! { "id" => [1, 2, 3, 4, 4, 4, 5, 6, 7, 8, 9, 10] };
+
+        // Three new rows for one key is still one affected key; counting rows
+        // would make this 20% and reject it.
+        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+    }
+
+    #[test]
+    fn measures_fanout_against_shared_keys_rather_than_all_old_keys() {
+        let old = table! { "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] };
+        let new = table! { "id" => [1, 2, 3, 4, 4, 5] };
+
+        // One of five shared keys is 20% and rejects; one of twenty old keys
+        // would be 5% and would wrongly retain.
+        assert_eq!(
+            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
+            DiffError::ExcessiveFanout {
+                affected: 1,
+                shared: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn new_only_duplicates_are_additions_rather_than_fanout() {
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [1, 2, 3, 3] };
+
+        // A key absent from `old` has no row to fan out from, so however often
+        // it repeats it cannot invalidate the declared key.
+        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+    }
+
+    #[test]
+    fn duplicates_without_any_shared_key_leave_the_key_valid() {
+        let old = table! { "id" => [1] };
+        let new = table! { "id" => [2, 2] };
+
+        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+    }
+
+    #[test]
+    fn old_side_duplication_is_fatal_even_when_new_fans_out() {
+        let old = table! { "id" => [1, 1] };
+        let new = table! { "id" => [1, 1] };
+
+        assert_eq!(
+            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
+            DiffError::NonUniqueOldKey {
                 first_row: 1,
                 row: 2,
             }
         );
+    }
+
+    #[test]
+    fn guessing_never_admits_fanout() {
+        let old = table! {
+            "id" => [1, 2],
+            "other" => [5, 6],
+        };
+        let new = table! {
+            "id" => [1, 1],
+            "other" => [5, 6],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "id" is the obvious identity and comes first, but repeating a value
+        // in `new` makes it ineligible; fanout is only ever declared.
+        assert_eq!(key.columns[0].name, "other");
+    }
+
+    #[test]
+    fn a_compound_key_fans_out_on_the_whole_tuple() {
+        let old = table! {
+            "group" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+            "id" => [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+        };
+        let new = table! {
+            "group" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "b", "b"],
+            "id" => ["1", "2", "3", "4", "5", "1", "2", "3", "3", "4", "5"],
+        };
+
+        let key = resolve_key(&old, &new, &options(&["group", "id"])).unwrap();
+
+        // ("b", 3) is duplicated while ("a", 3) is not, so a rule that read one
+        // component would count two affected keys and reject at 20%.
+        assert_eq!(key.basis, KeyBasis::Declared);
+        assert_eq!(key.columns.len(), 2);
     }
 
     #[test]
@@ -587,6 +770,22 @@ mod tests {
         assert_eq!(first.overlap, second.overlap);
         assert_eq!(first.old, second.old);
         assert_eq!(first.new, second.new);
+    }
+
+    #[test]
+    fn a_key_index_confirms_equality_within_a_bucket() {
+        let keys = vec![
+            vec![CanonicalValue::Int(1)],
+            vec![CanonicalValue::Int(2)],
+            vec![CanonicalValue::Int(1)],
+        ];
+        let index = KeyIndex::with_hash(&keys, |_| 0);
+
+        // Every key shares one bucket, so only the confirmation step can
+        // separate them, and the rows stay in ascending order.
+        assert_eq!(index.rows(&keys[0]).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(index.rows(&keys[1]).collect::<Vec<_>>(), [1]);
+        assert!(index.rows(&[CanonicalValue::Int(3)]).next().is_none());
     }
 
     #[test]
