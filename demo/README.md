@@ -68,6 +68,14 @@ data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
 
 Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], values)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
 
+## A guessed key that fans out
+
+```console
+data-diff demo/guessed-fanout-old.parquet demo/guessed-fanout-new.parquet
+```
+
+With no `--key`, the only column that can identify rows is `id`, because `region` repeats in the old file. `id` duplicates one of its ten shared keys, which is within the limit, so it is guessed anyway and the duplication is reported as a fanout. A guessed key is held to the same limit as a declared one; above it the candidate is passed over rather than reported, and the comparison falls back to any other eligible column.
+
 ## Fanout too broad to be a fanout
 
 ```console

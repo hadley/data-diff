@@ -125,7 +125,12 @@ pub(crate) fn resolve_key(
     })
 }
 
-/// Select the eligible same-name single column with the most shared values.
+/// Select the eligible same-name single column that shares the most key values.
+///
+/// Ranking follows the evidence: the candidate identifying the most rows across
+/// the two files wins, and freedom from fanout only settles a tie. A true key
+/// that duplicated one row is a better guess than a column that happens to be
+/// unique but identifies far fewer rows.
 fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffError> {
     if old.num_rows() == 0 || new.num_rows() == 0 {
         return Err(DiffError::MissingKey);
@@ -137,7 +142,12 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffEr
         name: String,
         old_values: Vec<CanonicalValue>,
         new_values: Vec<CanonicalValue>,
-        shared: usize,
+        overlap: Overlap,
+    }
+
+    /// Larger is better: shared keys first, then freedom from fanout.
+    fn rank(overlap: &Overlap) -> (usize, bool) {
+        (overlap.shared, overlap.affected == 0)
     }
 
     let new_schema = new.schema();
@@ -157,20 +167,24 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffEr
         };
         let old_values = plan.canonicalize_old(old_column.as_ref());
         let new_values = plan.canonicalize_new(new_column.as_ref());
-        let Some(shared) = candidate_overlap(&old_values, &new_values, stable_hash) else {
+        let Some(overlap) = candidate_overlap(&old_values, &new_values, stable_hash) else {
             continue;
         };
-        if shared == 0 {
+        if overlap.shared == 0 || !within_fanout_limit(overlap.affected, overlap.shared) {
             continue;
         }
-        if best.as_ref().is_none_or(|best| shared > best.shared) {
+        // Strictly greater, so an earlier column keeps a complete tie.
+        if best
+            .as_ref()
+            .is_none_or(|best| rank(&overlap) > rank(&best.overlap))
+        {
             best = Some(Candidate {
                 old_index,
                 new_index,
                 name: old_field.name().clone(),
                 old_values,
                 new_values,
-                shared,
+                overlap,
             });
         }
     }
@@ -188,8 +202,11 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffEr
         old: single_component_rows(candidate.old_values),
         new: single_component_rows(candidate.new_values),
         overlap: Some(KeyOverlap {
-            shared: candidate.shared,
-            possible: old.num_rows().min(new.num_rows()),
+            shared: candidate.overlap.shared,
+            // Distinct keys on each side. `old` is unique, so its distinct
+            // count is its row count; `new`'s is smaller than its row count
+            // exactly when it duplicates a value.
+            possible: old.num_rows().min(candidate.overlap.distinct_new),
         }),
     })
 }
@@ -198,46 +215,95 @@ fn single_component_rows(values: Vec<CanonicalValue>) -> Vec<Vec<CanonicalValue>
     values.into_iter().map(|value| vec![value]).collect()
 }
 
-/// Count the values a candidate column shares across sides.
+/// What a candidate column offers as a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Overlap {
+    /// Distinct old keys that also occur in `new`.
+    shared: usize,
+    /// Those that occur more than once in `new`.
+    affected: usize,
+    /// Distinct key values in `new`, however often each repeats.
+    distinct_new: usize,
+}
+
+/// Measure what a candidate column shares across sides.
 ///
-/// Returns `None` when the column is ineligible: a null or `NaN` on either
-/// side, or a duplicated value within either side. Hashes are bucket indexes
-/// only; equality is confirmed inside each bucket so a collision can neither
-/// manufacture a duplicate nor inflate the overlap.
+/// Returns `None` when the column cannot identify rows at all: a null or `NaN`
+/// on either side, or a duplicated value in `old`. New-side duplication is
+/// measured rather than disqualifying, and the caller applies the fanout bound.
+///
+/// `shared` counts distinct keys rather than matching new rows. The two agree
+/// unless a candidate fans out, where counting rows would award a point per
+/// duplicate and so rank a duplicated column above a cleaner one that genuinely
+/// identifies more rows.
+///
+/// Hashes are bucket indexes only; equality is confirmed inside each bucket, so
+/// a collision can neither manufacture a duplicate nor inflate a count.
 fn candidate_overlap(
     old: &[CanonicalValue],
     new: &[CanonicalValue],
     hash: impl Fn(&CanonicalValue) -> u128,
-) -> Option<usize> {
+) -> Option<Overlap> {
     if old.iter().chain(new).any(CanonicalValue::invalid_key) {
         return None;
     }
-    let old_buckets = unique_buckets(old, &hash)?;
-    unique_buckets(new, &hash)?;
-    let shared = new
-        .iter()
-        .filter(|value| {
-            old_buckets
-                .get(&hash(value))
-                .is_some_and(|rows| rows.iter().any(|&row| old[row] == **value))
-        })
-        .count();
-    Some(shared)
+    let old_buckets = buckets(old, &hash);
+    if first_occurrences(old, &old_buckets, &hash).count() != old.len() {
+        return None;
+    }
+
+    let new_buckets = buckets(new, &hash);
+    let mut shared = 0;
+    let mut affected = 0;
+    for value in old {
+        match new_buckets.get(&hash(value)).map_or(0, |rows| {
+            rows.iter().filter(|&&row| new[row] == *value).count()
+        }) {
+            0 => {}
+            1 => shared += 1,
+            _ => {
+                shared += 1;
+                affected += 1;
+            }
+        }
+    }
+
+    Some(Overlap {
+        shared,
+        affected,
+        distinct_new: first_occurrences(new, &new_buckets, &hash).count(),
+    })
 }
 
-fn unique_buckets(
+fn buckets(
     values: &[CanonicalValue],
     hash: impl Fn(&CanonicalValue) -> u128,
-) -> Option<HashMap<u128, Vec<usize>>> {
+) -> HashMap<u128, Vec<usize>> {
     let mut buckets = HashMap::<u128, Vec<usize>>::new();
     for (row, value) in values.iter().enumerate() {
-        let bucket = buckets.entry(hash(value)).or_default();
-        if bucket.iter().any(|&previous| values[previous] == *value) {
-            return None;
-        }
-        bucket.push(row);
+        buckets.entry(hash(value)).or_default().push(row);
     }
-    Some(buckets)
+    buckets
+}
+
+/// The rows holding the first occurrence of each distinct value.
+///
+/// Counting these counts distinct values, and comparing that count with the
+/// row count tests uniqueness, both without trusting the hash: a bucket is
+/// filled in row order, so a row is the first occurrence of its value when no
+/// earlier row in its bucket holds an equal value.
+fn first_occurrences<'a>(
+    values: &'a [CanonicalValue],
+    buckets: &'a HashMap<u128, Vec<usize>>,
+    hash: &'a impl Fn(&CanonicalValue) -> u128,
+) -> impl Iterator<Item = usize> + 'a {
+    values.iter().enumerate().filter_map(move |(row, value)| {
+        buckets[&hash(value)]
+            .iter()
+            .take_while(|&&earlier| earlier < row)
+            .all(|&earlier| values[earlier] != *value)
+            .then_some(row)
+    })
 }
 
 fn validate_components(keys: &[String]) -> Result<Vec<&str>, DiffError> {
@@ -341,11 +407,20 @@ fn validate_fanout(old_keys: &[Vec<CanonicalValue>], new: &KeyIndex) -> Result<(
             }
         }
     }
-    // Exact integer arithmetic, inclusive at the limit.
-    if affected * 100 > shared * MAX_FANOUT_PERCENT {
+    if !within_fanout_limit(affected, shared) {
         return Err(DiffError::ExcessiveFanout { affected, shared });
     }
     Ok(())
+}
+
+/// Whether new-side duplication is small enough to read as fanout.
+///
+/// Declared and guessed keys share the rule so the two cannot drift; only the
+/// consequence differs, since a declaration the user asserted becomes an error
+/// while a candidate simply becomes ineligible. Exact integer arithmetic,
+/// inclusive at the limit.
+fn within_fanout_limit(affected: usize, shared: usize) -> bool {
+    affected * 100 <= shared * MAX_FANOUT_PERCENT
 }
 
 pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
@@ -363,7 +438,7 @@ pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
 mod tests {
     use test_support::{rows_without_columns, table};
 
-    use super::{KeyIndex, candidate_overlap, resolve_key};
+    use super::{KeyIndex, Overlap, candidate_overlap, resolve_key};
     use crate::compare::{CanonicalValue, stable_hash};
     use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
 
@@ -536,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn guessing_never_admits_fanout() {
+    fn guessing_rejects_a_candidate_that_fans_out_too_broadly() {
         let old = table! {
             "id" => [1, 2],
             "other" => [5, 6],
@@ -548,9 +623,149 @@ mod tests {
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        // "id" is the obvious identity and comes first, but repeating a value
-        // in `new` makes it ineligible; fanout is only ever declared.
+        // "id" is the obvious identity and comes first, but its one shared key
+        // is duplicated, and 100% is far above the bound.
         assert_eq!(key.columns[0].name, "other");
+    }
+
+    #[test]
+    fn guesses_a_candidate_that_fans_out_when_it_is_the_only_one() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "status" => ["x", "x", "x", "x", "x", "x", "x", "x", "x", "x"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "status" => ["x", "x", "x", "x", "x", "x", "x", "x", "x", "x", "x"],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "status" repeats in `old` and can never identify rows, so the only
+        // candidate left is one that fans out.
+        assert_eq!(key.basis, KeyBasis::Guessed);
+        assert_eq!(key.columns[0].name, "id");
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 10,
+                possible: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn guessing_prefers_more_shared_keys_over_freedom_from_fanout() {
+        let old = table! {
+            "a" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "b" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+        };
+        let new = table! {
+            "a" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "b" => [101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 207, 208],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "a" identifies twelve rows and duplicated one; "b" is spotless but
+        // identifies five. The evidence wins.
+        assert_eq!(key.columns[0].name, "a");
+    }
+
+    #[test]
+    fn guessing_prefers_a_clean_candidate_only_to_break_a_tie() {
+        let old = table! {
+            "a" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "b" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+        };
+        let new = table! {
+            "a" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "b" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 999],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Both share ten keys and "a" comes first, so the tie-break is what
+        // chooses the candidate that does not fan out.
+        assert_eq!(key.columns[0].name, "b");
+    }
+
+    #[test]
+    fn ranking_counts_distinct_keys_rather_than_matching_rows() {
+        let old = table! {
+            "a" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "b" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+        };
+        let new = table! {
+            "a" => [1, 2, 3, 4, 4, 4, 5, 6, 7, 8, 9, 10],
+            "b" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 999],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "a" shares ten keys over twelve matching rows because one key repeats
+        // three times; "b" shares eleven over eleven. Counting rows would pick
+        // "a" whatever the column order, and counting keys picks "b".
+        assert_eq!(key.columns[0].name, "b");
+    }
+
+    #[test]
+    fn new_only_duplicates_do_not_disqualify_a_candidate() {
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [1, 2, 3, 3] };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Key 3 is absent from `old`, so its rows are additions rather than a
+        // fanout and the candidate is unaffected by them.
+        assert_eq!(key.columns[0].name, "id");
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 2,
+                possible: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn the_fanout_bound_applies_to_guesses() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "other" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+        };
+        let new = table! {
+            "id" => [1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "other" => [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 998, 999],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Two of ten shared keys is 20%, so "id" is ineligible rather than
+        // merely outranked; "other" shares the same ten keys cleanly.
+        assert_eq!(key.columns[0].name, "other");
+    }
+
+    #[test]
+    fn overlap_is_normalized_by_distinct_keys_not_row_counts() {
+        let old = table! {
+            "id" => [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ],
+        };
+        let new = table! { "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10] };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Eleven new rows hold ten distinct keys, all shared. Dividing by the
+        // row counts would give 10/11; dividing by distinct keys gives 10/10.
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 10,
+                possible: 10,
+            })
+        );
     }
 
     #[test]
@@ -794,8 +1009,13 @@ mod tests {
         let old = vec![CanonicalValue::Int(1), CanonicalValue::Int(2)];
         let new = vec![CanonicalValue::Int(2), CanonicalValue::Int(3)];
 
-        assert_eq!(candidate_overlap(&old, &new, constant), Some(1));
-        assert_eq!(candidate_overlap(&old, &new, stable_hash), Some(1));
+        let expected = Overlap {
+            shared: 1,
+            affected: 0,
+            distinct_new: 2,
+        };
+        assert_eq!(candidate_overlap(&old, &new, constant), Some(expected));
+        assert_eq!(candidate_overlap(&old, &new, stable_hash), Some(expected));
         assert_eq!(
             candidate_overlap(
                 &[CanonicalValue::Int(1), CanonicalValue::Int(1)],
@@ -803,6 +1023,31 @@ mod tests {
                 constant
             ),
             None
+        );
+    }
+
+    #[test]
+    fn overlap_counts_distinct_keys_rather_than_matching_rows() {
+        let old = vec![CanonicalValue::Int(1), CanonicalValue::Int(2)];
+        let new = vec![
+            CanonicalValue::Int(1),
+            CanonicalValue::Int(1),
+            CanonicalValue::Int(1),
+            CanonicalValue::Int(2),
+            CanonicalValue::Int(9),
+            CanonicalValue::Int(9),
+        ];
+
+        // Key 1 matches three new rows and key 9 is a new-only duplicate, so a
+        // row count would report five shared and one affected key would be
+        // invisible.
+        assert_eq!(
+            candidate_overlap(&old, &new, stable_hash),
+            Some(Overlap {
+                shared: 2,
+                affected: 1,
+                distinct_new: 3,
+            })
         );
     }
 

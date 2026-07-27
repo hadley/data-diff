@@ -1,191 +1,109 @@
 ---
-title: Bounded declared-key fanout
+title: Bounded fanout for guessed keys
 ---
 
 # Todo
 
-- [x] **Admit bounded fanout during key resolution.** In `src/key.rs`, extract the collision-safe key lookup shared by validation and row matching into a `KeyIndex`, keep old-side duplication fatal, and replace new-side rejection with the affected-key rate rule: retain the declared key when at most 10% of shared key values are duplicated in `new`, and otherwise fail with a new `DiffError::ExcessiveFanout { affected, shared }`. Delete `DiffError::UnsupportedFanout`.
-- [x] **Classify fanout groups when matching rows.** In `src/rows.rs`, rebuild `match_rows` on `KeyIndex` and apply the design's classification order, so a shared key with two or more new rows becomes one `FanoutGroup { old, new }` whose new rows are neither matched nor added, and a duplicated key absent from `old` still produces additions.
-- [x] **Nest fanout cells inside their event.** In `src/cells.rs`, compare each fanout group's old row against every new row over identified non-key columns during the existing per-identity pass, and return the result as `CellChanges::fanout` — one entry per group, ordered by old row, with cells sorted by `(new_row, old_column, new_column)`. Fanout cells never enter `ColumnChanges::rows`, so they cannot reach `changed_cells()`, `columns.edited`, or summarization. Growing the struct breaks the three exhaustive `CellChanges` literals in `src/summary.rs`'s test module, which gain `..CellChanges::default()` so they stay about the columns they construct and survive the next field too.
-- [x] **Surface fanout at the library boundary.** In `src/model.rs`, add `FanoutEvent { old, new, cells }` with one-based coordinates and `RowsDiff::fanout`; export `FanoutEvent` from `src/lib.rs` and populate the field from `CellChanges::fanout`.
-- [x] **Render `row_fanout()`.** In `src/human.rs`, emit one `row_fanout(old -> [new, ...])` line per event between the `row_add()` and `row_order()` blocks, with a `, values` suffix when the event has changed cells.
-- [x] **Add integration coverage and determinism checks.** Extend `tests/diff.rs` with a bounded-fanout comparison asserting the complete `Diff`, that fanout cells stay out of `cells` and `summary`, and that repeated runs are structurally and byte-identical; extend `tests/cli.rs` with a retained-fanout snapshot and the excessive-fanout error.
-- [x] **Refresh the demo datasets and documentation.** Regenerate `demo/fanout-*.parquet` as a retained fanout, add `demo/fanout-broad-*.parquet` for the rejected case in `examples/generate_demo.rs`, and update `demo/README.md` and `README.md` to describe fanout as supported within the bound.
+- [x] **Amend `design.md`.** Rewrite the "Guessed key" section so a candidate must be unique in `old` and within the fanout bound in `new` rather than unique on both sides, state that selection is by shared key values with freedom from fanout as a tie-break, and redefine the reported overlap denominator over distinct key values. Remove "guessed keys never infer fanout" and the corresponding sentence in "Row matching".
+- [x] **Score candidates by distinct shared keys.** In `src/key.rs`, change `candidate_overlap` to return the shared and affected key counts rather than a count of matching new rows, and to reject a candidate only for an invalid value or old-side duplication. Counting rows would give a fanned-out candidate one point per duplicate and bias selection towards the columns the bound is meant to tolerate.
+- [x] **Rank by shared keys.** Admit a candidate when it shares at least one key and satisfies the same bound as a declared key, and select by shared keys descending, breaking ties in favour of a candidate that does not fan out and then by old column order.
+- [x] **Report overlap over distinct keys.** Compute `KeyOverlap::possible` from the distinct key values on each side rather than the row counts, which is the same number whenever neither side duplicates and is the meaningful one when `new` does.
+- [x] **Cover the new selection.** Unit tests in `src/key.rs` for the ranking, the counts themselves, the row-count bias the new metric removes, the overlap denominator, the bound applying to guesses, and old-side duplication still disqualifying a candidate; integration coverage in `tests/diff.rs` for a guessed key that fans out; and a CLI snapshot.
+- [x] **Refresh the demo datasets and documentation.** Add a `demo/guessed-fanout-*.parquet` pair whose only eligible candidate fans out, and update `demo/README.md` and `README.md` to describe guessing as fanout-tolerant.
 - [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-A declared key that is unique in `old` but repeats in `new` is currently fatal: `validate_unique` reports `UnsupportedFanout` for the first repeat and no comparison happens. That is the wrong answer for the case the design cares about — a join that accidentally duplicated a handful of rows — where the key still identifies almost every row and the useful report is "these two new rows both came from this old row", not "your key is broken".
+A declared key may now identify one old row and several new rows. A guessed key still may not, because `candidate_overlap` rejects any column that repeats a value on either side. The consequence is backwards: fanout usually arrives from a join that duplicated rows in the identity column, so the column that fanned out is exactly the one guessing discards, and the tool is least able to guess precisely when it has the most to explain. Once row-number fallback exists, that case will silently degrade to positional matching rather than failing, which is worse still.
 
-This step implements the design's declared-key fanout rule. A key survives when at most 10% of the key values shared between the two inputs are duplicated in `new`; each affected key becomes one `row_fanout()` event holding the old row, all of its new rows, and the cells that differ between them. Everything else about the comparison is unchanged, because a fanout event is self-contained: its cells stay inside it, so the top-level cell set, the minimum edit summary, and row ordering all continue to describe one-to-one matched rows only.
+This step lets a guess fan out under the same bound as a declaration, and ranks candidates by the evidence they carry — the number of key values the two files share — rather than by freedom from fanout. A true key that duplicated one row is then chosen over a coincidentally unique column that identifies far fewer rows.
 
-After this step:
-
-```console
-$ data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
-col_key(declared: ["id"])
-row_fanout(4 -> [4, 5], values)
-```
+That changes what some comparisons guess today. The alternative, ranking every unique candidate ahead of every fanned-out one, would preserve current behavior exactly but would keep choosing the weaker key in precisely the case this step exists to fix, so the churn is the point rather than a side effect. It should be rare on real inputs, where a true key usually shares many more values than a column that is unique by coincidence.
 
 # Scope
 
 ## What changes
 
-* `src/key.rs`: a shared `KeyIndex`, the affected-key rate, and the admission decision.
-* `src/rows.rs`: fanout groups in `RowMatches`, and the classification order that produces them.
-* `src/cells.rs`: per-group cell comparison, kept out of the one-to-one cell set.
-* `src/summary.rs`: three test-module `CellChanges` literals only; the solver and its inputs are unchanged.
-* `src/model.rs` and `src/lib.rs`: `FanoutEvent`, `RowsDiff::fanout`, the replaced error variant, and the assembled result.
-* `src/human.rs`: the `row_fanout()` operation.
-* `tests/diff.rs` and `tests/cli.rs`: integration and CLI coverage.
-* `examples/generate_demo.rs`, `demo/README.md`, and `README.md`: the demo pair that now succeeds, a new pair that still fails, and the prose describing both.
+* `design.md`: the "Guessed key" section, the overlap denominator, and the two sentences that say a guess never fans out.
+* `src/key.rs`: candidate scoring, eligibility, ranking, and the reported overlap.
+* `tests/diff.rs` and `tests/cli.rs`: coverage for a guessed key that fans out.
+* `examples/generate_demo.rs`, `demo/README.md`, and `README.md`.
 
 ## What stays and why
 
-`src/order.rs` and `src/summary.rs` keep their logic. Both already consume only `RowMatches::matched` and `CellChanges::columns`, which is exactly the exclusion the design requires of fanout rows and fanout cells, so keeping fanout out of those two inputs is the whole of the work; `summary.rs` changes only where its tests build `CellChanges` exhaustively. That the solvers need no edit is a property worth asserting: the integration test checks that a fanout with changed values produces no `row_edit()`, no `col_edit()`, and no `row_order()` entry for the fanned-out row.
+Everything downstream of key resolution is untouched. `match_rows`, `compare_cells`, the summary, ordering, and the human format all work from a `ResolvedKey` and never ask how it was chosen, so a guessed key that fans out produces the same events a declared one does. That is worth an integration test rather than an edit: the test asserts a `KeyBasis::Guessed` key with a populated `rows.fanout`.
 
-Old-side duplication stays fatal with `NonUniqueOldKey`. The design defines fanout as one-directional and says the MVP terminates on old-side duplication, and nothing in this step changes that. Old uniqueness is also what makes the rate well defined, so it is still validated first: with a unique `old`, each old row contributes one distinct key and the shared-key count is a row count.
+The bound itself is unchanged and shared. `MAX_FANOUT_PERCENT` and the rule `affected * 100 <= shared * MAX_FANOUT_PERCENT` are lifted into one predicate used by both the declared and the guessed path, so the two can never drift. What differs between them is only the consequence: a declared key that exceeds the bound is an error, because the user asserted it; a candidate that exceeds it is silently ineligible, like every other candidate that fails a test.
 
-Guessed keys still cannot fan out. `candidate_overlap` rejects any candidate column that repeats a value on either side, so a guessed key is unique on both sides by construction. This step adds a test pinning that, but no code. Whether guessing should admit bounded fanout is a real question rather than a settled one, and it is the first item in `plan-next.md`; it changes key selection rather than key validation, so it needs its own `design.md` amendment.
+Old-side duplication still disqualifies a candidate outright. Fanout is one-directional, and a column that repeats a value in `old` cannot identify rows.
 
-`KeyOverlap` stays `None` for declared keys. The affected-key rate is an admission decision, not evidence about the key that a consumer needs; reporting it belongs with the issue channel described below.
+A guess still requires no nulls or `NaN`, and still requires at least one shared value.
 
 ## Explicitly deferred
 
-* **Falling back to a guessed key when a declared key is rejected.** The design says an invalid declared key records an `invalid_key` issue and continues to guessing and then to row numbers, with the fallback basis visible. There is no issue channel in `Diff` today, and inventing one here would mean silently swapping the user's declared key for a guessed one with nowhere to say so. Excessive fanout therefore stays a fatal error with counts in the message, and the fallback arrives with the row-number fallback step, which is where the design's "which stages remain valid" question is decided.
-* **Reverse fanout.** Many old rows mapping to one new row is undefined by the design.
-* **Tuning the 10% threshold, or exposing it as an option.** It is a named constant with the design's value.
-* **Rendering fanout cells.** The human format never enumerates cells; `row_fanout()` reports the coordinates and whether anything differs, and the cells themselves are reachable only through `Diff`, like the one-to-one cell set.
+* **Compound guessed keys.** Guessing remains single-column.
+* **Reporting the fanout rate.** The `Diff` records the resolved key and its overlap, not the evidence behind admitting it; that belongs with the issue channel.
+* **Changing what a declared key does.** The declared path keeps its counts and its error.
 
 # Design
 
-## The admission rule
+## Why the score has to change first
 
-Key resolution validates a declared key in the existing order: components exist, types are compatible, no null or `NaN`, `old` is unique. Only then does new-side duplication become a question, and it is answered by the design's affected-key rate. With `old` unique, every old row is a distinct key value, so both counts are obtained in one pass over the old rows:
+`candidate_overlap` currently counts *new rows* whose value occurs in `old`. That equals the number of shared key values only because duplicates are impossible today. Relax uniqueness without touching it and a column that fans out scores one extra point per duplicated row — so the metric would actively prefer the columns the bound exists to tolerate, and a badly duplicated column could outscore a clean one. The count must therefore become distinct shared keys before any candidate is allowed to fan out. This is a change with no observable effect today and is what makes the rest safe.
 
-* `shared` counts old rows whose key occurs at least once in `new`, which is $|K_o \cap K_n|$;
-* `affected` counts old rows whose key occurs two or more times in `new`, which counts each affected key once however many new rows it produces.
-
-The key is retained when `affected * 10 <= shared`, which is $f \le 0.10$ evaluated in exact integer arithmetic, inclusive at the boundary as the design specifies. `shared == 0` forces `affected == 0`, so the design's $f = 0$ convention for no shared keys needs no special case: a new-side key that has no counterpart in `old` is a set of additions, never a fanout, and cannot invalidate the key.
-
-Otherwise resolution fails with `ExcessiveFanout { affected, shared }`, displayed as `declared key fans out for 3 of 5 shared key values, above the 10% limit; supply a different --key`. The counts are the reason for the decision, which is why they replace `UnsupportedFanout`'s first-repeat row pair: with a rate rule, one example repeat no longer explains the outcome.
-
-## Sharing the collision-safe lookup
-
-Both `key.rs` and `rows.rs` need "the new rows whose key equals this key", and both need it to survive a hash collision — a bucket may hold rows with different keys, so membership must be confirmed by comparing canonical values, exactly as `match_rows` and `candidate_overlap` do today. This step gives that one home in `key.rs`:
+The function's contract becomes:
 
 ```rust
-pub(crate) struct KeyIndex<'a> {
-    keys: &'a [Vec<CanonicalValue>],
-    buckets: HashMap<u128, Vec<usize>>,
-    hash: fn(&[CanonicalValue]) -> u128,
+struct Overlap {
+    /// Distinct old keys that also occur in `new`.
+    shared: usize,
+    /// Those that occur more than once there.
+    affected: usize,
 }
 
-impl<'a> KeyIndex<'a> {
-    pub(crate) fn new(keys: &'a [Vec<CanonicalValue>]) -> Self;
-    fn with_hash(keys: &'a [Vec<CanonicalValue>], hash: fn(&[CanonicalValue]) -> u128) -> Self;
-    /// Rows whose key equals `key`, in ascending row order.
-    pub(crate) fn rows(&self, key: &[CanonicalValue]) -> impl Iterator<Item = usize> + '_;
-}
+fn candidate_overlap(old, new, hash) -> Option<Overlap>;
 ```
 
-Buckets are built in row order and `rows` filters within a bucket, so results are ascending and independent of hash iteration order. `match_rows` is then driven by the old rows in order and a `used_new` mask, which keeps every output list deterministic without sorting.
+`None` still means the column cannot identify rows at all: an invalid value on either side, or a duplicate in `old`. New-side duplication is no longer disqualifying but is now measured, which is the whole change.
 
-The confirmation step is unreachable unless two keys collide, so the hash is a field rather than a hard-wired call and `with_hash` lets a test force every key into one bucket. A plain `fn` pointer carries it, which costs one word and no generic parameter, and it mirrors `candidate_overlap`, which already takes its hash for the same reason.
+## Ranking
 
-## Row classification
+A candidate is eligible when `shared > 0` and it satisfies the bound. Candidates are then ordered by:
 
-`match_rows` applies the design's table in its stated order, checking old-side presence before new-side multiplicity:
+1. shared keys, descending;
+2. whether they fan out — `affected == 0` before `affected > 0`;
+3. old column order.
 
-| Present in `old` | Rows in `new` | Result |
-| --- | ---: | --- |
-| yes | 0 | `dropped` |
-| no | 1 or more | each row in `added` |
-| yes | 1 | `matched` |
-| yes | 2 or more | one `FanoutGroup` |
+Evidence comes first: the candidate that identifies the most rows across the two files wins, and freedom from fanout only settles a tie. A true key that duplicated one row therefore beats a coincidentally unique column that shares far less, which is the case this step exists to fix.
 
-```rust
-pub(crate) struct RowMatches {
-    pub added: Vec<usize>,
-    pub dropped: Vec<usize>,
-    pub matched: Vec<(usize, usize)>,
-    pub fanout: Vec<FanoutGroup>,
-}
+This changes guesses on inputs that resolve today, deliberately. Two kinds of comparison move: one where a fanned-out candidate now outscores the clean candidate that currently wins, and one where a candidate is eligible at all because its only duplicates are of keys absent from `old`. The demo fixtures are small enough to show the effect readily; real inputs, where the true key usually shares far more values than an accidentally unique column, should see it rarely. Ranking uniqueness first would avoid the churn but would keep choosing the weaker key, which is the behavior being fixed.
 
-pub(crate) struct FanoutGroup {
-    pub old: usize,
-    pub new: Vec<usize>,
-}
-```
+The tie-break has two states rather than three. A candidate whose duplicates are all of keys absent from `old` has `affected == 0`, because those rows are additions: they cannot make a matched row ambiguous and so do not degrade the key, even though today's uniqueness test rejects them. Only fanout — a duplicate of a key that `old` also has — costs anything, so only fanout is discriminated against. Separating "globally unique" from "duplicates only new-only keys" would rank one above the other on a difference that does not affect the diff.
 
-Groups are ordered by old row and their new rows ascending. A fanned-out old row appears in no other list, and its new rows are not additions, so `added`, `dropped`, and `matched` continue to partition the remaining rows.
+Note that `affected == 0` is therefore not the same as today's eligible set, and no ordering built on it could preserve today's behavior anyway.
 
-## Fanout events and cell separation
+## Overlap over distinct keys
 
-`compare_cells` already canonicalizes each identified column pair once and then walks the matched rows; the fanout comparison joins that pass rather than adding a second one. For each identity that is not a key column, and for each group, the old row's value is compared against each new row's value and any difference is recorded against that group. Added and dropped columns still produce no cells, and key columns are excluded inside events exactly as they are at the top level.
-
-```rust
-pub(crate) struct CellChanges {
-    pub columns: Vec<ColumnChanges>,
-    pub fanout: Vec<FanoutChanges>,
-}
-
-pub(crate) struct FanoutChanges {
-    pub old: usize,
-    pub new: Vec<usize>,
-    pub cells: Vec<ChangedCell>,
-}
-```
-
-There is one `FanoutChanges` per group even when nothing differs, because the design keeps the event whether or not values changed. Cells are sorted by `(new_row, old_column, new_column)`; the old row is constant within an event, and grouping by new row is what makes the event readable as "how each new row differs from the old one". Nothing is pushed into `ColumnChanges::rows`, so a column whose only differences are inside fanout events is not an edited column, does not appear in `columns.edited`, and contributes no edge to the vertex cover.
-
-At the boundary, `RowsDiff` gains
-
-```rust
-pub struct FanoutEvent {
-    pub old: usize,
-    pub new: Vec<usize>,
-    pub cells: Vec<CellCoordinate>,
-}
-```
-
-with one-based positions. `old` and `new` are plain positions rather than `Coordinate`s: a `Coordinate` pairs one old with one new position and collapses when they agree, and a fanout has one old row against many new rows, so there is no pair to collapse. This matches `rows.added` and `rows.dropped`, which are also plain one-based positions. The cells keep `CellCoordinate` because each of them does pair one old and one new coordinate.
-
-## Human format
-
-A fanout is a row-population event like an addition or a drop, so it is emitted with them, after the `row_add()` block and before `row_order()`:
-
-```text
-col_key(declared: ["id"])
-row_add(7)
-row_fanout(4 -> [4, 5], values)
-row_order(6 -> 5)
-row_edit(2)
-```
-
-The arrow and bracketed list mirror `col_key`'s bracketed component list and `row_order`'s `old -> new`, and the `, values` suffix mirrors `col_edit`'s detail suffix. The suffix is present exactly when the event has at least one changed cell, which is the one thing a reader cannot infer from the coordinates and which the design explicitly calls out as varying. No cells are enumerated.
+`KeyOverlap::possible` is `min(old.num_rows(), new.num_rows())` today, and `shared` is about to become a count of distinct keys. Mixing the two would make the ratio incoherent as soon as `new` duplicates, so `possible` becomes the smaller of the two sides' distinct key counts. `old` is unique by eligibility, so its distinct count is its row count, and neither number moves unless `new` duplicates — the reported overlap changes only where a duplicating candidate is chosen, which is new behavior anyway.
 
 # Verification
 
-* Unit tests in `key.rs` cover: a retained key at exactly the 10% boundary; a rejected key with the counts in the error; each affected key counted once when one key produces three new rows; new-side duplicates whose key is absent from `old` leaving the key valid with `affected == 0`; a duplicated new key with no shared keys at all; old-side duplication still reported as `NonUniqueOldKey` when both sides duplicate; and a guessed key never fanning out.
-* One of those cases exists to pin the denominator, which the other cases cannot distinguish because their old row count and shared-key count coincide. Twenty old keys of which five occur in `new`, with one of those five duplicated, must be rejected as `ExcessiveFanout { affected: 1, shared: 5 }`: dividing by the shared keys gives $f = 0.2$ and rejects, while dividing by all old keys would give $f = 0.05$ and wrongly retain. The error's counts are asserted, so the test also fails if the right decision is reached for the wrong reason.
-* Unit tests in `rows.rs` cover the classification table, including ascending new rows within a group, the disjointness of the four lists, and stability under a forced hash collision.
-* Unit tests in `cells.rs` cover: fanout cells appearing in their event and not in `changed_cells()` or `columns`; an event with no changed cells; and key and added/dropped columns excluded within events.
-* Compound keys are tested rather than assumed. Keys are already tuples of canonical values, so fanout should need no extra code for them, but "should need none" is a claim about the tuple path and is checked directly: one `key.rs` test admits a fanned-out compound key and one `cells.rs` test asserts the resulting event and its cells. The shared fixture makes the duplicated rows agree on the first component and differ only in the second, so a grouping that read one component instead of the tuple would classify the wrong rows, and it gives the second component different types across the sides, so fanout has to be using the same per-component comparison plans as matching. It also needs ten distinct compound keys to put one duplicate inside the 10% bound, which is worth knowing before writing it: the small two-row and three-row compound fixtures already in the suite would be rejected as excessive rather than retained.
-* One `cells.rs` test makes a single identified column carry both kinds of change at once — one matched row differs and one fanned-out key also differs in that column — because separation must partition the column's cells rather than suppress the column. The matched cell stays in `ColumnChanges::rows` and `changed_cells()` while only the fanout cell is nested, and `tests/diff.rs` carries the same fixture to the boundary, asserting that the matched cell still reaches `Diff::cells`, `columns.edited`, and the minimum summary, which covers it with one `row_edit()`. The summary is asserted whole, so a fanout cell leaking into the cover would show up as an extra event. This is the direct check that the complete cell-level diff invariant survives: every changed cell is still reachable, each from exactly one place.
-* A `human.rs` snapshot pins the rendered line, its position among the row operations, and both the plain and `, values` forms.
-* `tests/diff.rs` asserts a complete `Diff` for a bounded fanout — including that `summary` and `order.rows` ignore it — and repeats the comparison to assert structural and byte-identical equality.
-* `tests/cli.rs` snapshots the retained fanout through the binary and asserts the excessive-fanout message on stderr with a non-zero status.
-* The demo pair `demo/fanout-*.parquet` becomes ten keys with one duplicated in `new`, which is exactly the 10% boundary and therefore retained; `demo/fanout-broad-*.parquet` keeps the current two-key shape, whose single duplicate is 50% and is rejected. `demo/README.md` gains a section for each, and `README.md` moves fanout from the rejection list to the current-behavior list.
+* `src/key.rs` unit tests cover: a fanned-out candidate chosen when it is the only eligible one; a fanned-out candidate that shares more keys chosen over a clean candidate that shares fewer, which is the ranking change stated as its purpose; a clean candidate winning a tie on shared keys against a fanned-out one; a candidate rejected for exceeding the bound while a weaker clean candidate is still chosen; a candidate whose duplicates are all of new-only keys being eligible with `affected == 0`; and old-side duplication still disqualifying.
+* Two tests pin the scoring change, because a ranking test alone can be passed by the wrong metric. The first asserts `Overlap { shared, affected }` directly for a fanned-out column, which is the counts themselves rather than their consequence. The second makes the two metrics disagree on the winner: candidate `a` shares ten keys with one of them appearing three times in `new`, for twelve matching new rows, and candidate `b` shares eleven keys with no duplicates, for eleven. Distinct-key scoring ranks `b` above `a`; the row count this step removes ranks `a` above `b`, whatever the column order.
+* `tests/diff.rs` asserts a guessed key with `basis: Guessed`, a populated `rows.fanout`, and fanout cells absent from `cells` and `summary`, plus a repeated run that is structurally and byte-identical.
+* `tests/cli.rs` snapshots a guessed fanout, whose first line is `col_key(guessed: [...], overlap: ...)` followed by a `row_fanout()` line.
+* One test pins the overlap denominator, which the other overlap cases cannot distinguish because their row and distinct-key counts coincide. Twenty old keys against eleven new rows holding ten distinct keys, all shared, must report `KeyOverlap { shared: 10, possible: 10 }` for a ratio of 1.00; the row-count denominator would give `possible: 11` and 0.91.
+* The existing guessing tests still pass unchanged, which is a result to verify rather than a property of the design: `guesses_the_single_eligible_column`, `guessing_prefers_the_largest_exact_intersection`, `guessing_breaks_ties_by_old_column_order`, `overlap_is_normalized_by_the_smaller_side`, and `guessing_skips_every_ineligible_candidate` all keep their winners under the new ranking. The `dup_new` column in the last of them stays ineligible, but now because one of its one shared key is duplicated and 100% exceeds the bound, rather than because `new` repeats a value. `guessing_never_admits_fanout` keeps passing for that same reason and so becomes misleading; it is rewritten to say that the candidate exceeded the bound rather than that guessing forbids fanout.
+* The demo pair `demo/guessed-fanout-*.parquet` has one non-unique second column, so the fanned-out key is the only eligible candidate and the demo shows a guess that fans out.
 
 # Definition of done
 
 This step is complete when:
 
-* a declared key that is unique in `old` and duplicates at most 10% of the shared key values in `new` is retained, and one is rejected above that bound with `ExcessiveFanout { affected, shared }`;
-* every shared key duplicated in `new` produces exactly one fanout event carrying the old row, all its new rows in ascending order, and the cells that differ, and no other row event or cell mentions those rows;
-* fanout cells are absent from `Diff::cells`, `columns.edited`, `summary`, and `order.rows`, and reachable only through `rows.fanout`, while a column carrying both a matched-row change and a fanout change keeps the matched one in the ordinary cell and edit-summary path;
-* the human format renders one `row_fanout()` line per event between the row additions and the row ordering, with `, values` exactly when the event has changed cells;
-* `DiffError::UnsupportedFanout` no longer exists, and old-side duplication is still `NonUniqueOldKey`;
-* the demo datasets and both READMEs describe fanout as supported within the bound and rejected above it; and
+* `design.md` describes guessing as admitting bounded fanout, selecting by shared key values, and using freedom from fanout only as a tie-break;
+* a guessed key may identify one old row and several new rows under the same bound and the same shared predicate as a declared key, while old-side duplication, nulls, and `NaN` still disqualify a candidate;
+* candidates are scored by distinct shared key values, so duplication cannot inflate a candidate's rank;
+* candidates are ranked by shared keys, with fanout breaking ties and old column order breaking those, and every existing guessing test still passes unchanged;
+* the reported overlap is normalized by distinct key values on each side, which changes the ratio only where a duplicating candidate is chosen;
+* the demo datasets and both READMEs describe guessing as fanout-tolerant; and
 * the full test suite, strict Clippy, formatting, and diff checks pass across the workspace, and repeated runs still produce byte-identical output.
