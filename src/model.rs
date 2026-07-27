@@ -5,7 +5,10 @@ use crate::key::MAX_FANOUT_PERCENT;
 /// Options that influence reconciliation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
-    /// Same-name columns that form the declared compound key.
+    /// Components of the declared compound key.
+    ///
+    /// A component is one column name used on both sides, or an `old/new` pair
+    /// naming a column that differs between them.
     pub key: Vec<String>,
 }
 
@@ -36,10 +39,10 @@ pub enum DiffError {
     MissingKey,
     /// A comma-separated key contained an empty component.
     EmptyKeyComponent,
-    /// Paired old/new key names are deferred until hint support.
-    PairedKeyUnsupported { component: String },
-    /// A compound key repeated a component.
-    DuplicateKeyComponent { component: String },
+    /// A key component named more than one column per side.
+    MalformedKeyComponent { component: String },
+    /// More than one key component claimed the same column.
+    DuplicateKeyColumn { side: Side, column: String },
     /// A key component was absent on one side.
     MissingKeyColumn { side: Side, component: String },
     /// A corresponding key-column pair cannot be compared.
@@ -103,12 +106,14 @@ impl std::fmt::Display for DiffError {
                 "no key was supplied and no eligible key could be guessed; supply --key",
             ),
             DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
-            DiffError::PairedKeyUnsupported { component } => {
-                write!(f, "paired key component {component:?} is not supported yet")
-            }
-            DiffError::DuplicateKeyComponent { component } => {
-                write!(f, "key component {component:?} is repeated")
-            }
+            DiffError::MalformedKeyComponent { component } => write!(
+                f,
+                "key component {component:?} must be one name or an old/new pair"
+            ),
+            DiffError::DuplicateKeyColumn { side, column } => write!(
+                f,
+                "{side} column {column:?} is claimed by more than one key component"
+            ),
             DiffError::MissingKeyColumn { side, component } => {
                 write!(f, "{side} is missing key column {component:?}")
             }

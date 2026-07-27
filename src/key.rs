@@ -17,7 +17,8 @@ pub(crate) struct ResolvedKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct KeyColumn {
-    pub name: String,
+    /// The component as declared, which for a pair names both columns.
+    pub component: String,
     pub old: usize,
     pub new: usize,
 }
@@ -88,14 +89,16 @@ pub(crate) fn resolve_key(
     let mut old_components = Vec::with_capacity(components.len());
     let mut new_components = Vec::with_capacity(components.len());
 
-    for name in components {
-        let old_index = column_index(old, name, Side::Old)?;
-        let new_index = column_index(new, name, Side::New)?;
+    for component in components {
+        // Each endpoint is resolved on its own side, so a missing column is
+        // reported as the half that is missing rather than as the whole pair.
+        let old_index = column_index(old, component.old, Side::Old)?;
+        let new_index = column_index(new, component.new, Side::New)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
         let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
             || DiffError::IncompatibleKeyTypes {
-                component: name.to_owned(),
+                component: component.spelling.to_owned(),
                 old_type: format!("{:?}", old_values.data_type()),
                 new_type: format!("{:?}", new_values.data_type()),
             },
@@ -103,7 +106,7 @@ pub(crate) fn resolve_key(
         old_components.push(plan.canonicalize_old(old_values.as_ref()));
         new_components.push(plan.canonicalize_new(new_values.as_ref()));
         columns.push(KeyColumn {
-            name: name.to_owned(),
+            component: component.spelling.to_owned(),
             old: old_index,
             new: new_index,
         });
@@ -195,7 +198,7 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffEr
     Ok(ResolvedKey {
         basis: KeyBasis::Guessed,
         columns: vec![KeyColumn {
-            name: candidate.name,
+            component: candidate.name,
             old: candidate.old_index,
             new: candidate.new_index,
         }],
@@ -306,24 +309,49 @@ fn first_occurrences<'a>(
     })
 }
 
-fn validate_components(keys: &[String]) -> Result<Vec<&str>, DiffError> {
-    let mut seen = HashSet::new();
+/// One declared key component and the column it names on each side.
+struct Component<'a> {
+    /// The component as the user wrote it, for messages about the pair.
+    spelling: &'a str,
+    old: &'a str,
+    new: &'a str,
+}
+
+/// Parse each component and check that no column is claimed twice.
+///
+/// Uniqueness is a property of the endpoints rather than of the component
+/// string: `id,id/other` claims `id` on the old side twice while spelling its
+/// components differently, and `a/b,c/b` claims `b` on the new side twice.
+fn validate_components(keys: &[String]) -> Result<Vec<Component<'_>>, DiffError> {
+    let mut old_seen = HashSet::new();
+    let mut new_seen = HashSet::new();
     let mut components = Vec::with_capacity(keys.len());
-    for component in keys {
-        if component.is_empty() {
+    for spelling in keys {
+        let mut names = spelling.split('/');
+        let old = names.next().expect("splitting yields at least one name");
+        // An unpaired component names the same column on both sides.
+        let new = names.next().unwrap_or(old);
+        if names.next().is_some() {
+            return Err(DiffError::MalformedKeyComponent {
+                component: spelling.clone(),
+            });
+        }
+        if old.is_empty() || new.is_empty() {
             return Err(DiffError::EmptyKeyComponent);
         }
-        if component.contains('/') {
-            return Err(DiffError::PairedKeyUnsupported {
-                component: component.clone(),
+        if !old_seen.insert(old) {
+            return Err(DiffError::DuplicateKeyColumn {
+                side: Side::Old,
+                column: old.to_owned(),
             });
         }
-        if !seen.insert(component.as_str()) {
-            return Err(DiffError::DuplicateKeyComponent {
-                component: component.clone(),
+        if !new_seen.insert(new) {
+            return Err(DiffError::DuplicateKeyColumn {
+                side: Side::New,
+                column: new.to_owned(),
             });
         }
-        components.push(component.as_str());
+        components.push(Component { spelling, old, new });
     }
     Ok(components)
 }
@@ -356,7 +384,7 @@ fn validate_present(
             if value.invalid_key() {
                 return Err(DiffError::InvalidKeyValue {
                     side,
-                    component: columns[component].name.clone(),
+                    component: columns[component].component.clone(),
                     row: row + 1,
                 });
             }
@@ -460,13 +488,125 @@ mod tests {
             Err(DiffError::EmptyKeyComponent)
         ));
         assert!(matches!(
-            resolve_key(&empty, &empty, &options(&["old/new"])),
-            Err(DiffError::PairedKeyUnsupported { .. })
+            resolve_key(&empty, &empty, &options(&["a/b/c"])),
+            Err(DiffError::MalformedKeyComponent { .. })
         ));
         assert!(matches!(
-            resolve_key(&empty, &empty, &options(&["id", "id"])),
-            Err(DiffError::DuplicateKeyComponent { .. })
+            resolve_key(&empty, &empty, &options(&["a/"])),
+            Err(DiffError::EmptyKeyComponent)
         ));
+        assert!(matches!(
+            resolve_key(&empty, &empty, &options(&["/b"])),
+            Err(DiffError::EmptyKeyComponent)
+        ));
+        assert_eq!(
+            resolve_key(&empty, &empty, &options(&["id", "id"])).unwrap_err(),
+            DiffError::DuplicateKeyColumn {
+                side: Side::Old,
+                column: "id".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolves_a_paired_component_to_a_column_on_each_side() {
+        let old = table! { "customer_id" => [1, 2] };
+        let new = table! { "id" => [1, 2] };
+
+        let key = resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap();
+
+        assert_eq!(key.basis, KeyBasis::Declared);
+        assert_eq!(key.columns[0].component, "customer_id/id");
+        assert_eq!((key.columns[0].old, key.columns[0].new), (0, 0));
+    }
+
+    #[test]
+    fn a_pair_of_equal_names_needs_no_special_case() {
+        let old = table! { "id" => [1] };
+
+        let key = resolve_key(&old, &old, &options(&["id/id"])).unwrap();
+
+        assert_eq!((key.columns[0].old, key.columns[0].new), (0, 0));
+    }
+
+    #[test]
+    fn components_may_not_claim_a_column_twice() {
+        let old = table! { "a" => [1], "b" => [1], "c" => [1] };
+
+        // The old endpoint repeats, the new endpoint repeats, and a plain
+        // component collides with the old half of a pair.
+        for (key, side, column) in [
+            (vec!["a/b", "a/c"], Side::Old, "a"),
+            (vec!["a/b", "c/b"], Side::New, "b"),
+            (vec!["a", "a/b"], Side::Old, "a"),
+        ] {
+            assert_eq!(
+                resolve_key(&old, &old, &options(&key)).unwrap_err(),
+                DiffError::DuplicateKeyColumn {
+                    side,
+                    column: column.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn components_may_exchange_two_columns() {
+        let old = table! { "a" => [1, 2], "b" => [3, 4] };
+        let new = table! { "a" => [3, 4], "b" => [1, 2] };
+
+        // Neither endpoint repeats, so the key is a legal pair of pairs.
+        let key = resolve_key(&old, &new, &options(&["a/b", "b/a"])).unwrap();
+
+        assert_eq!((key.columns[0].old, key.columns[0].new), (0, 1));
+        assert_eq!((key.columns[1].old, key.columns[1].new), (1, 0));
+        assert_eq!(key.old, key.new);
+    }
+
+    #[test]
+    fn a_pair_reports_the_endpoint_that_is_missing() {
+        let old = table! { "customer_id" => [1] };
+        let new = table! { "other" => [1] };
+
+        assert_eq!(
+            resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap_err(),
+            DiffError::MissingKeyColumn {
+                side: Side::New,
+                component: "id".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_incompatible_pair_names_the_component_as_written() {
+        let old = table! { "customer_id" => [true] };
+        let new = table! { "id" => [1] };
+
+        assert_eq!(
+            resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap_err(),
+            DiffError::IncompatibleKeyTypes {
+                component: "customer_id/id".into(),
+                old_type: "Boolean".into(),
+                new_type: "Int64".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_compound_key_may_mix_plain_and_paired_components() {
+        let old = table! {
+            "group" => ["a", "a"],
+            "customer_id" => [1, 2],
+        };
+        let new = table! {
+            "group" => ["a", "a"],
+            "id" => [1, 2],
+        };
+
+        let key = resolve_key(&old, &new, &options(&["group", "customer_id/id"])).unwrap();
+
+        assert_eq!(key.columns.len(), 2);
+        assert_eq!(key.old, key.new);
     }
 
     #[test]
@@ -625,7 +765,7 @@ mod tests {
 
         // "id" is the obvious identity and comes first, but its one shared key
         // is duplicated, and 100% is far above the bound.
-        assert_eq!(key.columns[0].name, "other");
+        assert_eq!(key.columns[0].component, "other");
     }
 
     #[test]
@@ -644,7 +784,7 @@ mod tests {
         // "status" repeats in `old` and can never identify rows, so the only
         // candidate left is one that fans out.
         assert_eq!(key.basis, KeyBasis::Guessed);
-        assert_eq!(key.columns[0].name, "id");
+        assert_eq!(key.columns[0].component, "id");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -669,7 +809,7 @@ mod tests {
 
         // "a" identifies twelve rows and duplicated one; "b" is spotless but
         // identifies five. The evidence wins.
-        assert_eq!(key.columns[0].name, "a");
+        assert_eq!(key.columns[0].component, "a");
     }
 
     #[test]
@@ -687,7 +827,7 @@ mod tests {
 
         // Both share ten keys and "a" comes first, so the tie-break is what
         // chooses the candidate that does not fan out.
-        assert_eq!(key.columns[0].name, "b");
+        assert_eq!(key.columns[0].component, "b");
     }
 
     #[test]
@@ -706,7 +846,7 @@ mod tests {
         // "a" shares ten keys over twelve matching rows because one key repeats
         // three times; "b" shares eleven over eleven. Counting rows would pick
         // "a" whatever the column order, and counting keys picks "b".
-        assert_eq!(key.columns[0].name, "b");
+        assert_eq!(key.columns[0].component, "b");
     }
 
     #[test]
@@ -718,7 +858,7 @@ mod tests {
 
         // Key 3 is absent from `old`, so its rows are additions rather than a
         // fanout and the candidate is unaffected by them.
-        assert_eq!(key.columns[0].name, "id");
+        assert_eq!(key.columns[0].component, "id");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -743,7 +883,7 @@ mod tests {
 
         // Two of ten shared keys is 20%, so "id" is ineligible rather than
         // merely outranked; "other" shares the same ten keys cleanly.
-        assert_eq!(key.columns[0].name, "other");
+        assert_eq!(key.columns[0].component, "other");
     }
 
     #[test]
@@ -814,7 +954,7 @@ mod tests {
 
         assert_eq!(key.basis, KeyBasis::Guessed);
         assert_eq!(key.columns.len(), 1);
-        assert_eq!(key.columns[0].name, "id");
+        assert_eq!(key.columns[0].component, "id");
         assert_eq!((key.columns[0].old, key.columns[0].new), (1, 1));
         assert_eq!(
             key.overlap,
@@ -889,7 +1029,7 @@ mod tests {
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(key.columns[0].name, "full");
+        assert_eq!(key.columns[0].component, "full");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -906,7 +1046,7 @@ mod tests {
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(key.columns[0].name, "b");
+        assert_eq!(key.columns[0].component, "b");
         assert_eq!((key.columns[0].old, key.columns[0].new), (0, 1));
     }
 
@@ -963,7 +1103,7 @@ mod tests {
         // "strong" shares all three values and "weak" only one, so guessing
         // would choose the other column; a declaration is never compared.
         assert_eq!(key.basis, KeyBasis::Declared);
-        assert_eq!(key.columns[0].name, "weak");
+        assert_eq!(key.columns[0].component, "weak");
         assert_eq!(key.overlap, None);
     }
 
@@ -981,7 +1121,7 @@ mod tests {
         let first = resolve_key(&old, &new, &options(&[])).unwrap();
         let second = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(first.columns[0].name, second.columns[0].name);
+        assert_eq!(first.columns[0].component, second.columns[0].component);
         assert_eq!(first.overlap, second.overlap);
         assert_eq!(first.old, second.old);
         assert_eq!(first.new, second.new);

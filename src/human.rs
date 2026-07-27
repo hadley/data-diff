@@ -12,6 +12,19 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
 
     operations.push(key_context(diff));
 
+    // Renames come first: every operation below names its column as the new
+    // file does, which needs explaining when the old file called it something
+    // else.
+    for coordinate in &diff.columns.identities {
+        let (old, new) = coordinate.positions();
+        if raw_name(&diff.schemas.old, old) != raw_name(&diff.schemas.new, new) {
+            operations.push(format!(
+                "col_rename({}, {})",
+                column_name(&diff.schemas.old, old),
+                column_name(&diff.schemas.new, new)
+            ));
+        }
+    }
     for &position in &diff.columns.dropped {
         operations.push(format!(
             "col_drop({})",
@@ -28,7 +41,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let (old, new) = coordinate.positions();
         operations.push(format!(
             "col_order({}, {old} -> {new})",
-            column_name(&diff.schemas.old, old)
+            column_name(&diff.schemas.new, new)
         ));
     }
     for edit in &diff.summary.columns {
@@ -51,7 +64,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         };
         operations.push(format!(
             "col_edit({}{suffix})",
-            column_name(&diff.schemas.old, old)
+            column_name(&diff.schemas.new, new)
         ));
     }
 
@@ -99,13 +112,24 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
 /// Render the resolved key as a bracketed component list.
 ///
 /// A guessed key is single-column today, but it is still bracketed so the
-/// format does not change shape once compound guesses exist.
+/// format does not change shape once compound guesses exist. A declared pair
+/// renders as `"old" -> "new"` rather than as two names, which would make
+/// `--key a/b` and `--key a,b` indistinguishable.
 fn key_context(diff: &Diff) -> String {
     let components = diff
         .key
         .columns
         .iter()
-        .map(|coordinate| column_name(&diff.schemas.old, coordinate.positions().0))
+        .map(|coordinate| {
+            let (old, new) = coordinate.positions();
+            let old_name = column_name(&diff.schemas.old, old);
+            let new_name = column_name(&diff.schemas.new, new);
+            if old_name == new_name {
+                old_name
+            } else {
+                format!("{old_name} -> {new_name}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     match diff.key.basis {
@@ -124,10 +148,15 @@ fn key_context(diff: &Diff) -> String {
 }
 
 fn column_name(schema: &[ColumnSchema], one_based_position: usize) -> String {
+    raw_name(schema, one_based_position)
+        .map(quote)
+        .unwrap_or_else(|| format!("#{one_based_position}"))
+}
+
+fn raw_name(schema: &[ColumnSchema], one_based_position: usize) -> Option<&str> {
     schema
         .get(one_based_position.saturating_sub(1))
-        .map(|column| quote(&column.name))
-        .unwrap_or_else(|| format!("#{one_based_position}"))
+        .map(|column| column.name.as_str())
 }
 
 fn column_type(schema: &[ColumnSchema], one_based_position: usize) -> String {
@@ -273,6 +302,51 @@ mod tests {
         assert_eq!(
             render(&old, &new),
             "col_key(declared: [\"id\"])\nrow_fanout(4 -> [4, 5])"
+        );
+    }
+
+    #[test]
+    fn names_a_renamed_column_as_the_new_file_does() {
+        let old = table! {
+            "customer_id" => [1, 2, 3],
+            "gone" => [1, 2, 3],
+            "value" => i32[10, 20, 30],
+        };
+        let new = table! {
+            "value" => [11, 20, 30],
+            "id" => [1, 2, 3],
+            "fresh" => [1, 2, 3],
+        };
+
+        // The key pair is renamed, and "value" is edited and reordered. Every
+        // operation about a surviving column names it as "new" does; only the
+        // dropped column keeps its old name, having no other.
+        insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @r#"
+        col_key(declared: ["customer_id" -> "id"])
+        col_rename("customer_id", "id")
+        col_drop("gone")
+        col_add("fresh")
+        col_order("value", 3 -> 1)
+        col_edit("value", type "Int32" -> "Int64", values)
+        "#);
+    }
+
+    #[test]
+    fn a_paired_component_cannot_be_read_as_two_components() {
+        let old = table! {
+            "a" => [1, 2],
+            "b" => [10, 20],
+        };
+        let new = table! {
+            "a" => [10, 20],
+            "b" => [1, 2],
+        };
+
+        // `--key a/b` identifies one column pair, while `--key a,b` would be a
+        // compound key over two, so the two must not render alike.
+        assert_eq!(
+            render_with(&old, &new, &["a/b"]),
+            "col_key(declared: [\"a\" -> \"b\"])\ncol_rename(\"a\", \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
         );
     }
 

@@ -258,6 +258,56 @@ fn an_excessive_fanout_rejects_the_declared_key() {
 }
 
 #[test]
+fn a_renamed_key_identifies_rows_across_both_files() {
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "value" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [3, 1, 2],
+        "value" => [30, 10, 21],
+    };
+    let options = DiffOptions {
+        key: vec!["customer_id/id".into()],
+    };
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Without the pair these two columns would be a drop and an addition, and
+    // no key could be resolved at all.
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Declared,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: None,
+        }
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+
+    // Identity, row matching, ordering, and cells all follow the pair rather
+    // than the names.
+    assert_eq!(
+        diff.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+    assert_eq!(diff.order.rows, vec![Coordinate::from_zero_based(2, 0)]);
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 2, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
 fn a_guessed_key_may_fan_out() {
     let old = table! {
         "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
