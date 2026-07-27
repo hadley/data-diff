@@ -45,12 +45,13 @@ Column names are quoted, and row and column coordinates are one-based. The summa
 * guesses a single-column row key from exact cross-file evidence when `--key` is omitted, and reports the selected basis and overlap;
 * reports schema additions, drops, and source-type edits;
 * reports added, dropped, matched, and relatively reordered rows;
+* keeps a declared key that identifies one old row and several new rows, when at most 10% of the key values shared by the two files are duplicated in the new one, and reports each affected key as a `row_fanout()` event holding the old row, its new rows, and the values that differ between them;
 * reports relatively reordered columns and every changed matched cell;
 * summarizes changed cells with an exact minimum set of row and column edits;
   and
 * emits deterministic one-based coordinates referring to the original files.
 
-It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, new-side duplicates that would require fanout, and comparisons where no key was supplied and no eligible key could be guessed.
+It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, declared keys whose new-side duplication exceeds the fanout limit, and comparisons where no key was supplied and no eligible key could be guessed. A guessed key is never allowed to fan out, because a column that repeats a value is not eligible to be guessed in the first place.
 
 It does not yet expose the complete cell-level result to users, fall back to row numbers when no key can be guessed, guess compound keys, accept paired old/new key names, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
 

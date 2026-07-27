@@ -1,6 +1,6 @@
 use data_diff::{
-    CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, KeyBasis,
-    KeyDiff, KeyOverlap, diff_tables, write_human,
+    CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, FanoutEvent,
+    KeyBasis, KeyDiff, KeyOverlap, diff_tables, write_human,
 };
 use test_support::table;
 
@@ -187,6 +187,93 @@ fn automatic_resolution_without_an_eligible_key_is_an_error() {
         diff_tables(&rows, &disjoint, &DiffOptions::default()).unwrap_err(),
         DiffError::MissingKey
     );
+}
+
+#[test]
+fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 7, 0, 0, 5, 0, 0, 0],
+    };
+
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.rows.fanout,
+        vec![FanoutEvent {
+            old: 4,
+            new: vec![4, 5],
+            cells: vec![CellCoordinate::from_zero_based(3, 1, 4, 1)],
+        }]
+    );
+    // The fanned-out rows are not additions, drops, or matches, and they take
+    // no part in ordering.
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert_eq!(diff.rows.matched.len(), 9);
+    assert!(diff.order.rows.is_empty());
+
+    // The matched change in the same column still travels the ordinary
+    // one-to-one path, so every changed cell remains reachable from exactly one
+    // place. The summary is asserted whole: a leaked fanout cell would show up
+    // here as a second event.
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(6, 1, 7, 1)]
+    );
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: false,
+            values_changed: true,
+        }]
+    );
+    assert_eq!(
+        diff.summary,
+        EditSummary {
+            optimal: true,
+            columns: vec![],
+            rows: vec![Coordinate::from_zero_based(6, 7)],
+        }
+    );
+}
+
+#[test]
+fn an_excessive_fanout_rejects_the_declared_key() {
+    let old = table! { "id" => [1, 2] };
+    let new = table! { "id" => [1, 1, 2] };
+
+    assert_eq!(
+        diff_tables(&old, &new, &declared("id")).unwrap_err(),
+        DiffError::ExcessiveFanout {
+            affected: 1,
+            shared: 2,
+        }
+    );
+}
+
+#[test]
+fn repeated_fanout_comparisons_are_identical() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+        "value" => [0, 0, 0, 0, 7, 0, 0, 5, 0, 0, 0],
+    };
+    let options = declared("id");
+
+    let first = diff_tables(&old, &new, &options).unwrap();
+    let second = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(render(&first), render(&second));
 }
 
 #[test]

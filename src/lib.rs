@@ -17,8 +17,8 @@ pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, EditSummary, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,
-    OrderDiff, RowsDiff, Schemas, Side,
+    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, KeyBasis, KeyDiff, KeyOverlap,
+    NormalizedType, OrderDiff, RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -75,6 +75,26 @@ pub fn diff_tables(
                 .matched
                 .iter()
                 .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .collect(),
+            fanout: cells
+                .fanout
+                .iter()
+                .map(|group| FanoutEvent {
+                    old: group.old + 1,
+                    new: one_based(&group.new),
+                    cells: group
+                        .cells
+                        .iter()
+                        .map(|cell| {
+                            CellCoordinate::from_zero_based(
+                                cell.old_row,
+                                cell.old_column,
+                                cell.new_row,
+                                cell.new_column,
+                            )
+                        })
+                        .collect(),
+                })
                 .collect(),
         },
         order: OrderDiff {

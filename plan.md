@@ -1,156 +1,191 @@
 ---
-title: Compact test fixture construction
+title: Bounded declared-key fanout
 ---
 
 # Todo
 
-- [x] **Add the `test-support` workspace member.** Turn the root `Cargo.toml` into a workspace with one member, add `test-support/Cargo.toml` depending on `arrow-array` and `arrow-schema` at the versions the root crate pins, and add `test-support = { path = "test-support" }` to the root `[dev-dependencies]` so both the inline `#[cfg(test)]` modules and the integration tests can use it. Refresh `Cargo.lock`.
-- [x] **Implement the fixture value model.** In `test-support/src/lib.rs`, add the `CellValue` trait, its `Kind` classification, the `Cell` value enum, the annotation vocabulary, and the array builder that turns a list of cells and a resolved Arrow type into an `ArrayRef`.
-- [x] **Implement the `column!` and `table!` macros.** Cover the annotated and unannotated forms, the empty-list form, and the zero-column form, and add `rows_without_columns`. Give the crate its own unit tests asserting the produced `DataType`, null placement, row count, and field nullability for every form the fixtures use, the exact keys and dictionary of `dict` and the exact bytes of `binary`, and a `#[should_panic]` case for each run-time misuse through both macros.
-- [x] **Convert the five behavior modules.** Rewrite the fixtures in `src/cells.rs`, `src/human.rs`, `src/key.rs`, `src/rows.rs`, and `src/schema.rs` to `table!`, delete each module's local `fn table`, and confirm each test module's imports no longer mention `std::sync::Arc` or any Arrow array type.
-- [x] **Convert the representation modules.** Rewrite the fixtures in `src/input.rs` and `src/compare.rs`, and delete `input.rs`'s local `fn table` and `fn empty`. Keep explicit Arrow construction where an Arrow type is the subject of the assertion, which after this step means `compare.rs`'s hand-encoded dictionary alone; leave a comment there saying why it stays.
-- [x] **Convert the integration tests.** Replace `common::batch` and `common::empty_batch` with `table!` in `tests/diff.rs`, `tests/cli.rs`, `tests/input.rs`, and `tests/smoke.rs`, and delete both helpers from `tests/common/mod.rs`, which keeps `TempDir` and the Parquet writers.
-- [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, confirm no inline snapshot changed, and confirm repeated runs still produce byte-identical output.
+- [x] **Admit bounded fanout during key resolution.** In `src/key.rs`, extract the collision-safe key lookup shared by validation and row matching into a `KeyIndex`, keep old-side duplication fatal, and replace new-side rejection with the affected-key rate rule: retain the declared key when at most 10% of shared key values are duplicated in `new`, and otherwise fail with a new `DiffError::ExcessiveFanout { affected, shared }`. Delete `DiffError::UnsupportedFanout`.
+- [x] **Classify fanout groups when matching rows.** In `src/rows.rs`, rebuild `match_rows` on `KeyIndex` and apply the design's classification order, so a shared key with two or more new rows becomes one `FanoutGroup { old, new }` whose new rows are neither matched nor added, and a duplicated key absent from `old` still produces additions.
+- [x] **Nest fanout cells inside their event.** In `src/cells.rs`, compare each fanout group's old row against every new row over identified non-key columns during the existing per-identity pass, and return the result as `CellChanges::fanout` — one entry per group, ordered by old row, with cells sorted by `(new_row, old_column, new_column)`. Fanout cells never enter `ColumnChanges::rows`, so they cannot reach `changed_cells()`, `columns.edited`, or summarization. Growing the struct breaks the three exhaustive `CellChanges` literals in `src/summary.rs`'s test module, which gain `..CellChanges::default()` so they stay about the columns they construct and survive the next field too.
+- [x] **Surface fanout at the library boundary.** In `src/model.rs`, add `FanoutEvent { old, new, cells }` with one-based coordinates and `RowsDiff::fanout`; export `FanoutEvent` from `src/lib.rs` and populate the field from `CellChanges::fanout`.
+- [x] **Render `row_fanout()`.** In `src/human.rs`, emit one `row_fanout(old -> [new, ...])` line per event between the `row_add()` and `row_order()` blocks, with a `, values` suffix when the event has changed cells.
+- [x] **Add integration coverage and determinism checks.** Extend `tests/diff.rs` with a bounded-fanout comparison asserting the complete `Diff`, that fanout cells stay out of `cells` and `summary`, and that repeated runs are structurally and byte-identical; extend `tests/cli.rs` with a retained-fanout snapshot and the excessive-fanout error.
+- [x] **Refresh the demo datasets and documentation.** Regenerate `demo/fanout-*.parquet` as a retained fanout, add `demo/fanout-broad-*.parquet` for the rejected case in `examples/generate_demo.rs`, and update `demo/README.md` and `README.md` to describe fanout as supported within the bound.
+- [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-Every fixture in the suite is written as `("id", Arc::new(Int64Array::from(vec![1, 2, 3])))`, and the same `fn table(columns: Vec<(&str, ArrayRef)>) -> RecordBatch` is copied into six modules and duplicated again as `common::batch` for the integration tests. The scaffolding is longer than the data it carries, so a two-column fixture takes six lines and the shape of the table has to be decoded rather than read.
+A declared key that is unique in `old` but repeats in `new` is currently fatal: `validate_unique` reports `UnsupportedFanout` for the first repeat and no comparison happens. That is the wrong answer for the case the design cares about — a join that accidentally duplicated a handful of rows — where the key still identifies almost every row and the useful report is "these two new rows both came from this old row", not "your key is broken".
 
-Replace both with one shared construction helper that infers the Arrow array type from the literal values:
+This step implements the design's declared-key fanout rule. A key survives when at most 10% of the key values shared between the two inputs are duplicated in `new`; each affected key becomes one `row_fanout()` event holding the old row, all of its new rows, and the cells that differ between them. Everything else about the comparison is unchanged, because a fanout event is self-contained: its cells stay inside it, so the top-level cell set, the minimum edit summary, and row ordering all continue to describe one-to-one matched rows only.
 
-```rust
-let old = table! {
-    "id" => [1, 2, 3],
-    "value" => [10, 20, 30],
-};
+After this step:
+
+```console
+$ data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
+col_key(declared: ["id"])
+row_fanout(4 -> [4, 5], values)
 ```
-
-A successful result is a suite that mentions Arrow only where an Arrow type is genuinely part of what a test says: the `RecordBatch` and `ArrayRef` parameters of a module's own pipeline helpers, the `DataType` enumerations that two tests are entirely about, and one hand-encoded dictionary whose subject is the encoding. This is a pure refactor: every existing assertion keeps its current meaning, every fixture keeps its current Arrow types, no inline snapshot changes, and the suite stays green throughout.
 
 # Scope
 
 ## What changes
 
-* One new workspace member, `test-support`, holding the fixture macros and the small helpers that go with them.
-* The fixtures and imports of the seven inline test modules that build tables or arrays: `cells`, `human`, `key`, `rows`, `schema`, `input`, and `compare`.
-* The fixtures of the four integration test files, and the removal of `batch` and `empty_batch` from `tests/common/mod.rs`.
-* `Cargo.toml`, which gains a `[workspace]` section and one dev-dependency, and `Cargo.lock`.
+* `src/key.rs`: a shared `KeyIndex`, the affected-key rate, and the admission decision.
+* `src/rows.rs`: fanout groups in `RowMatches`, and the classification order that produces them.
+* `src/cells.rs`: per-group cell comparison, kept out of the one-to-one cell set.
+* `src/summary.rs`: three test-module `CellChanges` literals only; the solver and its inputs are unchanged.
+* `src/model.rs` and `src/lib.rs`: `FanoutEvent`, `RowsDiff::fanout`, the replaced error variant, and the assembled result.
+* `src/human.rs`: the `row_fanout()` operation.
+* `tests/diff.rs` and `tests/cli.rs`: integration and CLI coverage.
+* `examples/generate_demo.rs`, `demo/README.md`, and `README.md`: the demo pair that now succeeds, a new pair that still fails, and the prose describing both.
 
 ## What stays and why
 
-Every assertion, test name, and inline snapshot stays exactly as it is. The fixtures must produce the same Arrow types they produce today, because several tests are about those types: `human.rs` snapshots `type "Int32" -> "Int64"`, `cells.rs` asserts `type_changed` across `Int32`, `Int64`, and `Float64`, and `input.rs` enumerates every supported Arrow representation. Any snapshot change during this step is a bug in the conversion, not an update to accept.
+`src/order.rs` and `src/summary.rs` keep their logic. Both already consume only `RowMatches::matched` and `CellChanges::columns`, which is exactly the exclusion the design requires of fanout rows and fanout cells, so keeping fanout out of those two inputs is the whole of the work; `summary.rs` changes only where its tests build `CellChanges` exhaustively. That the solvers need no edit is a property worth asserting: the integration test checks that a fanout with changed values produces no `row_edit()`, no `col_edit()`, and no `row_order()` entry for the fanned-out row.
 
-`tests/common/mod.rs` keeps `TempDir`, `write_parquet`, and `write_parquet_batches`. They are Parquet fixtures shared between integration test binaries, not table construction, and moving them would pull a `parquet` dependency into `test-support` for no benefit to this step.
+Old-side duplication stays fatal with `NonUniqueOldKey`. The design defines fanout as one-directional and says the MVP terminates on old-side duplication, and nothing in this step changes that. Old uniqueness is also what makes the rate well defined, so it is still validated first: with a unique `old`, each old row contributes one distinct key and the shared-key count is a row count.
 
-`src/input.rs` and `src/compare.rs` keep the Arrow imports their subjects require. `rejects_every_unsupported_type_family` enumerates `DataType` variants and `comparison_matrix_accepts_only_compatible_pairs` enumerates `DataType` pairs; both are about the Arrow type system and should keep naming it directly, and `dictionary_strings_use_logical_values` keeps building its dictionary by hand for the reason given under conversion notes. What those modules lose everywhere else is the `Arc::new(SomeArray::from(vec![...]))` wrapping around their data.
+Guessed keys still cannot fan out. `candidate_overlap` rejects any candidate column that repeats a value on either side, so a guessed key is unique on both sides by construction. This step adds a test pinning that, but no code. Whether guessing should admit bounded fanout is a real question rather than a settled one, and it is the first item in `plan-next.md`; it changes key selection rather than key validation, so it needs its own `design.md` amendment.
 
-Unit tests stay inline in their production module, as the settled conventions require. `test-support` is a fixture library, not a home for tests.
+`KeyOverlap` stays `None` for declared keys. The affected-key rate is an admission decision, not evidence about the key that a consumer needs; reporting it belongs with the issue channel described below.
 
 ## Explicitly deferred
 
-* Moving `TempDir` and the Parquet writers out of `tests/common/mod.rs`.
-* Any change to what the tests assert, including the granularity or naming of existing tests.
-* Any change to production code. `src/lib.rs` and the eleven production modules are untouched apart from their inline test modules.
-* Extending the fixture vocabulary beyond the Arrow types the current fixtures use; new types arrive with the steps that need them.
+* **Falling back to a guessed key when a declared key is rejected.** The design says an invalid declared key records an `invalid_key` issue and continues to guessing and then to row numbers, with the fallback basis visible. There is no issue channel in `Diff` today, and inventing one here would mean silently swapping the user's declared key for a guessed one with nowhere to say so. Excessive fanout therefore stays a fatal error with counts in the message, and the fallback arrives with the row-number fallback step, which is where the design's "which stages remain valid" question is decided.
+* **Reverse fanout.** Many old rows mapping to one new row is undefined by the design.
+* **Tuning the 10% threshold, or exposing it as an option.** It is a named constant with the design's value.
+* **Rendering fanout cells.** The human format never enumerates cells; `row_fanout()` reports the coordinates and whether anything differs, and the cells themselves are reachable only through `Diff`, like the one-to-one cell set.
 
-# Fixture helper design
+# Design
 
-## Where it lives
+## The admission rule
 
-The helper has to be reachable from inline `#[cfg(test)]` modules under `src/` and from integration tests under `tests/`. A `#[cfg(test)]` module inside the crate is invisible to integration tests, which link the crate compiled without `cfg(test)`; a feature-gated `pub mod` would put fixture code in the public API and would have to stay compiled out of normal builds by hand. A separate crate consumed as a path dev-dependency has neither problem: dev-dependencies are available to both kinds of test target and to neither the library nor the binary.
+Key resolution validates a declared key in the existing order: components exist, types are compatible, no null or `NaN`, `old` is unique. Only then does new-side duplication become a question, and it is answered by the design's affected-key rate. With `old` unique, every old row is a distinct key value, so both counts are obtained in one pass over the old rows:
 
-The root `Cargo.toml` becomes a workspace root with one member. CI already runs `cargo build --workspace --all-targets` and `cargo test --workspace`, so no workflow change is needed.
+* `shared` counts old rows whose key occurs at least once in `new`, which is $|K_o \cap K_n|$;
+* `affected` counts old rows whose key occurs two or more times in `new`, which counts each affected key once however many new rows it produces.
 
-`test-support` does not re-export `RecordBatch` or `ArrayRef`. Re-exporting the types that appear in a crate's own API is conventional where it saves the caller a dependency or pins them to one version of a type, and neither applies here: `arrow-array` is an ordinary dependency of the package, so both test targets can already name it, and one workspace on one pinned version has no skew to prevent. What would be left is cosmetic — making the word `arrow` disappear from imports — at the price of misstating where a well-known type comes from. Five local helpers name `RecordBatch` or `ArrayRef` in their signatures and import it from `arrow_array` directly, which is honest and costs one line each.
+The key is retained when `affected * 10 <= shared`, which is $f \le 0.10$ evaluated in exact integer arithmetic, inclusive at the boundary as the design specifies. `shared == 0` forces `affected == 0`, so the design's $f = 0$ convention for no shared keys needs no special case: a new-side key that has no counterpart in `old` is a set of additions, never a fanout, and cannot invalidate the key.
 
-## Syntax
+Otherwise resolution fails with `ExcessiveFanout { affected, shared }`, displayed as `declared key fans out for 3 of 5 shared key values, above the 10% limit; supply a different --key`. The counts are the reason for the decision, which is why they replace `UnsupportedFanout`'s first-repeat row pair: with a rate rule, one example repeat no longer explains the outcome.
 
-A column is a name, an optional type annotation, and a list of values:
+## Sharing the collision-safe lookup
 
-```rust
-let old = table! {
-    "id" => [1, 2, 3],
-    "label" => ["a", "b", "c"],
-    "small" => i32[10, 20, 30],
-    "score" => [Some(1.5), None],
-    "blank" => i64[],
-};
-```
-
-Names are string literals, which is what a column name is, and which keeps unusual names such as `"line\n\"quoted\""` in the same form as every other fixture. `=>` separates the name from the values so the two halves of a column read apart at a glance.
-
-The annotation is a bare token immediately before the bracket, so the common case carries no annotation at all and the exceptional case reads as a typed array literal. `column!` takes the same right-hand side and produces an `ArrayRef` for the tests that compare arrays rather than tables:
+Both `key.rs` and `rows.rs` need "the new rows whose key equals this key", and both need it to survive a hash collision — a bucket may hold rows with different keys, so membership must be confirmed by comparing canonical values, exactly as `match_rows` and `candidate_overlap` do today. This step gives that one home in `key.rs`:
 
 ```rust
-let (old, new) = values(column!(["1", "1.0"]), column!([1, 1]));
+pub(crate) struct KeyIndex<'a> {
+    keys: &'a [Vec<CanonicalValue>],
+    buckets: HashMap<u128, Vec<usize>>,
+    hash: fn(&[CanonicalValue]) -> u128,
+}
+
+impl<'a> KeyIndex<'a> {
+    pub(crate) fn new(keys: &'a [Vec<CanonicalValue>]) -> Self;
+    fn with_hash(keys: &'a [Vec<CanonicalValue>], hash: fn(&[CanonicalValue]) -> u128) -> Self;
+    /// Rows whose key equals `key`, in ascending row order.
+    pub(crate) fn rows(&self, key: &[CanonicalValue]) -> impl Iterator<Item = usize> + '_;
+}
 ```
 
-Two further forms cover the tables that have no columns to infer from. `table! {}` is the schema-preserving empty batch that `common::empty_batch` and `rows.rs`'s empty branch build today, and `rows_without_columns(2)` is the columnless two-row batch that `key.rs` builds with `RecordBatchOptions`.
+Buckets are built in row order and `rows` filters within a bucket, so results are ascending and independent of hash iteration order. `match_rows` is then driven by the old rows in order and a `used_new` mask, which keeps every output list deterministic without sorting.
 
-## Type inference
+The confirmation step is unreachable unless two keys collide, so the hash is a field rather than a hard-wired call and `with_hash` lets a test force every key into one bucket. A plain `fn` pointer carries it, which costs one word and no generic parameter, and it mirrors `candidate_overlap`, which already takes its hash for the same reason.
 
-Each value list is a Rust array literal, so all its elements share one Rust type, and that type determines the Arrow type. A `CellValue` trait maps each supported Rust type to a `Kind` and to a `Cell`; the blanket implementation for `Option<T>` inherits `T`'s kind, so a column of nulls still knows what it is:
+## Row classification
 
-| Rust value type | `Kind` | Arrow type without annotation |
-| --- | --- | --- |
-| `bool` | `Bool` | `Boolean` |
-| `i32`, `i64` | `Int` | `Int64` |
-| `u64` | `Int` | `Int64` |
-| `f32`, `f64` | `Double` | `Float64` |
-| `&str` | `Text` | `Utf8` |
-| `Option<T>` | `T`'s kind | `T`'s type, with nulls where `None` |
+`match_rows` applies the design's table in its stated order, checking old-side presence before new-side multiplicity:
 
-Integer literals fall back to `i32` and float literals to `f64` when nothing else constrains them, and both map to the `Int` and `Double` kinds, so `[1, 2, 3]` builds the `Int64` column the fixtures overwhelmingly want and `[1.5]` builds a `Float64` one. `u64` is implemented because one fixture needs values above `i64::MAX`; cells hold integers as `i128` so that range survives to the builder. This was verified against `rustc` before the plan was written, including the `Option` and empty-list forms.
+| Present in `old` | Rows in `new` | Result |
+| --- | ---: | --- |
+| yes | 0 | `dropped` |
+| no | 1 or more | each row in `added` |
+| yes | 1 | `matched` |
+| yes | 2 or more | one `FanoutGroup` |
 
-An annotation overrides the inferred Arrow type for the column's kind. The vocabulary is exactly what the current fixtures need: `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`, `str`, `large_str`, `dict`, and `binary`. `dict` builds a `Dictionary(Int8, Utf8)` column whose dictionary holds the distinct values in first-appearance order, so its keys carry no information beyond the logical values; `binary` builds a `Binary` column from the bytes of its string values.
+```rust
+pub(crate) struct RowMatches {
+    pub added: Vec<usize>,
+    pub dropped: Vec<usize>,
+    pub matched: Vec<(usize, usize)>,
+    pub fanout: Vec<FanoutGroup>,
+}
 
-Because the dictionary form encodes rather than transcribes, it is only correct for a test whose subject is the logical values. A test that is about the encoding itself keeps building its `DictionaryArray` by hand, as `src/compare.rs` does below. Assigning keys by sorted rather than first-appearance order was considered and rejected: it happens to reproduce today's encoding for one fixture, which would make that test's strength depend on an incidental helper policy rather than on what the test says.
+pub(crate) struct FanoutGroup {
+    pub old: usize,
+    pub new: Vec<usize>,
+}
+```
 
-An unannotated empty list has no element type, which the compiler rejects; the message to the test author is that an empty column must say what it is, as `"blank" => i64[]`. Fields are created nullable, exactly as all six current helpers create them, and a `table!` whose columns disagree in length panics through `RecordBatch::try_new`.
+Groups are ordered by old row and their new rows ascending. A fanned-out old row appears in no other list, and its new rows are not additions, so `added`, `dropped`, and `matched` continue to partition the remaining rows.
 
-## Failure behavior
+## Fanout events and cell separation
 
-Three misuses are caught at run time and panic: an unknown annotation, an annotation whose Arrow type cannot hold the kind it was given (`dict[1, 2]`), and a value outside the annotated width (`u8[300]`). The builder raises these, so its message names the annotation and the offending value but cannot name a column. `table!` passes each column's name into the builder as context and `column!` passes none, so a table failure reads `column "id": 4294967296 does not fit u32` and the same failure from `column!` drops the prefix. The two misuses the compiler already catches — an unannotated empty list, and a value type with no `CellValue` implementation — stay compile errors and are documented rather than tested.
+`compare_cells` already canonicalizes each identified column pair once and then walks the matched rows; the fanout comparison joins that pass rather than adding a second one. For each identity that is not a key column, and for each group, the old row's value is compared against each new row's value and any difference is recorded against that group. Added and dropped columns still produce no cells, and key columns are excluded inside events exactly as they are at the top level.
 
-## The helper's own tests
+```rust
+pub(crate) struct CellChanges {
+    pub columns: Vec<ColumnChanges>,
+    pub fanout: Vec<FanoutChanges>,
+}
 
-`test-support` gets an inline `#[cfg(test)] mod tests`. A silently wrong helper would weaken every fixture in the suite at once, so its behavior is pinned directly rather than only through its callers:
+pub(crate) struct FanoutChanges {
+    pub old: usize,
+    pub new: Vec<usize>,
+    pub cells: Vec<ChangedCell>,
+}
+```
 
-* the inferred Arrow type for each kind, and the resulting type for each annotation in the vocabulary;
-* `None` placement within a column, a typed empty column, the zero-column table, `rows_without_columns`, row counts, and field nullability;
-* the exact contents of the two annotations that transform their values rather than storing them — that `dict["b", "a", "b"]` has keys `[0, 1, 0]` over the dictionary `["b", "a"]`, and that `binary["a"]` holds `b"a"` — since a mistake there would be invisible in the `DataType` alone; and
-* a `#[should_panic(expected = ...)]` test for each of the three run-time misuses, including one through `table!` to pin the column-name prefix and one through `column!` to pin its absence.
+There is one `FanoutChanges` per group even when nothing differs, because the design keeps the event whether or not values changed. Cells are sorted by `(new_row, old_column, new_column)`; the old row is constant within an event, and grouping by new row is what makes the event readable as "how each new row differs from the old one". Nothing is pushed into `ColumnChanges::rows`, so a column whose only differences are inside fanout events is not an edited column, does not appear in `columns.edited`, and contributes no edge to the vertex cover.
 
-# Conversion notes
+At the boundary, `RowsDiff` gains
 
-Most fixtures convert mechanically. The cases that need a decision:
+```rust
+pub struct FanoutEvent {
+    pub old: usize,
+    pub new: Vec<usize>,
+    pub cells: Vec<CellCoordinate>,
+}
+```
 
-* `key.rs`'s `guessing_breaks_ties_by_old_column_order` builds its two identical columns through a `shared()` closure that exists only to clone an `ArrayRef`; the columns become two literal lists.
-* `key.rs`'s `rows_without_columns_leave_nothing_to_guess` builds its batch with `RecordBatchOptions::new().with_row_count(Some(2))`, which becomes the `rows_without_columns(2)` helper and lets the module drop its last Arrow import.
-* `rows.rs`'s local helper special-cases an empty column list to build a schema-less batch; that branch becomes `table! {}` at the one call site that needs it, and the special case disappears with the helper.
-* `input.rs`'s `normalizes_every_supported_arrow_representation` becomes a single `table!` with one annotated column per representation, which is the test's actual subject stated directly. Its dictionary column becomes `dict["a"]`, one row like every other column in that table: today's fixture stores one key over a two-value dictionary, and the unused second value is invisible to the assertion, which only reads the column's normalized type. `dict["a", "b"]` would be two rows against every other column's one and would fail in `RecordBatch::try_new`. `rejects_unsupported_types` becomes `binary["a"]`.
-* `input.rs`'s `rejects_first_out_of_range_unsigned_integer` becomes `u64[Some(1), None, Some(i64::MAX as u64 + 1), Some(u64::MAX)]`.
-* `input.rs`'s `concatenates_batches_in_input_order` and the integration test `parquet_batches_become_one_table_in_file_order` read their result back by downcasting to `Int64Array`, which would keep an array type imported into two tests that are about batch concatenation rather than about Arrow. Both compare the resulting column against a fixture column instead, which says the same thing about the same values and additionally compares the column's type and null mask.
-* `compare.rs` builds arrays rather than tables, so its fixtures become `column!` and lose their `std::sync::Arc::new` wrapping. Its bit-pattern and boundary values — `f64::from_bits(...)`, `-0.0`, `i64::MIN`, `None::<&str>` — are ordinary expressions inside the list and stay exactly as they read today.
-* `compare.rs`'s `dictionary_strings_use_logical_values` is the one fixture that keeps its explicit `DictionaryArray` construction. It stores keys `[1, 0]` over the dictionary `["a", "b"]` precisely so that storage order and logical order disagree, which is what makes it evidence that canonicalization follows the keys. Rebuilt as `dict["b", "a"]` the helper would emit keys `[0, 1]` over `["b", "a"]`, where an implementation that ignored the keys and read the dictionary positionally would still pass. Inventing a second syntax that spells out keys and dictionary separately would serve this one test only; the test is about the encoding, so it states the encoding. This is the reason `compare.rs` keeps importing `Arc`, `Int8Type`, `Int8Array`, `DictionaryArray`, and `StringArray`, and a comment on the fixture records why it was not converted.
-* The integration tests keep their `mod common;` for `TempDir` and the Parquet writers, but their `common::batch([...])` calls become `table! { ... }` and `common::empty_batch()` becomes `table! {}`.
+with one-based positions. `old` and `new` are plain positions rather than `Coordinate`s: a `Coordinate` pairs one old with one new position and collapses when they agree, and a fanout has one old row against many new rows, so there is no pair to collapse. This matches `rows.added` and `rows.dropped`, which are also plain one-based positions. The cells keep `CellCoordinate` because each of them does pair one old and one new coordinate.
+
+## Human format
+
+A fanout is a row-population event like an addition or a drop, so it is emitted with them, after the `row_add()` block and before `row_order()`:
+
+```text
+col_key(declared: ["id"])
+row_add(7)
+row_fanout(4 -> [4, 5], values)
+row_order(6 -> 5)
+row_edit(2)
+```
+
+The arrow and bracketed list mirror `col_key`'s bracketed component list and `row_order`'s `old -> new`, and the `, values` suffix mirrors `col_edit`'s detail suffix. The suffix is present exactly when the event has at least one changed cell, which is the one thing a reader cannot infer from the coordinates and which the design explicitly calls out as varying. No cells are enumerated.
 
 # Verification
 
-The refactor is behavior-preserving, so the evidence is that nothing moved:
-
-* Every inline snapshot in `src/human.rs` and `tests/cli.rs` passes unchanged. Because insta snapshots are inline, an accidental type change shows up as a failing assertion rather than a silent update, and the diff for this step must contain no snapshot edits.
-* The determinism tests in `tests/diff.rs` continue to assert structural equality of repeated `Diff` values and byte equality of their rendered output, on fixtures built through the new helper.
-* The test count is unchanged apart from the new `test-support` unit tests; no test is added, removed, renamed, or merged.
-* The acceptance pass runs `cargo build --workspace --all-targets`, which is what CI runs and what confirms the new workspace layout builds every target; `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; and `git diff --check`.
+* Unit tests in `key.rs` cover: a retained key at exactly the 10% boundary; a rejected key with the counts in the error; each affected key counted once when one key produces three new rows; new-side duplicates whose key is absent from `old` leaving the key valid with `affected == 0`; a duplicated new key with no shared keys at all; old-side duplication still reported as `NonUniqueOldKey` when both sides duplicate; and a guessed key never fanning out.
+* One of those cases exists to pin the denominator, which the other cases cannot distinguish because their old row count and shared-key count coincide. Twenty old keys of which five occur in `new`, with one of those five duplicated, must be rejected as `ExcessiveFanout { affected: 1, shared: 5 }`: dividing by the shared keys gives $f = 0.2$ and rejects, while dividing by all old keys would give $f = 0.05$ and wrongly retain. The error's counts are asserted, so the test also fails if the right decision is reached for the wrong reason.
+* Unit tests in `rows.rs` cover the classification table, including ascending new rows within a group, the disjointness of the four lists, and stability under a forced hash collision.
+* Unit tests in `cells.rs` cover: fanout cells appearing in their event and not in `changed_cells()` or `columns`; an event with no changed cells; and key and added/dropped columns excluded within events.
+* Compound keys are tested rather than assumed. Keys are already tuples of canonical values, so fanout should need no extra code for them, but "should need none" is a claim about the tuple path and is checked directly: one `key.rs` test admits a fanned-out compound key and one `cells.rs` test asserts the resulting event and its cells. The shared fixture makes the duplicated rows agree on the first component and differ only in the second, so a grouping that read one component instead of the tuple would classify the wrong rows, and it gives the second component different types across the sides, so fanout has to be using the same per-component comparison plans as matching. It also needs ten distinct compound keys to put one duplicate inside the 10% bound, which is worth knowing before writing it: the small two-row and three-row compound fixtures already in the suite would be rejected as excessive rather than retained.
+* One `cells.rs` test makes a single identified column carry both kinds of change at once — one matched row differs and one fanned-out key also differs in that column — because separation must partition the column's cells rather than suppress the column. The matched cell stays in `ColumnChanges::rows` and `changed_cells()` while only the fanout cell is nested, and `tests/diff.rs` carries the same fixture to the boundary, asserting that the matched cell still reaches `Diff::cells`, `columns.edited`, and the minimum summary, which covers it with one `row_edit()`. The summary is asserted whole, so a fanout cell leaking into the cover would show up as an extra event. This is the direct check that the complete cell-level diff invariant survives: every changed cell is still reachable, each from exactly one place.
+* A `human.rs` snapshot pins the rendered line, its position among the row operations, and both the plain and `, values` forms.
+* `tests/diff.rs` asserts a complete `Diff` for a bounded fanout — including that `summary` and `order.rows` ignore it — and repeats the comparison to assert structural and byte-identical equality.
+* `tests/cli.rs` snapshots the retained fanout through the binary and asserts the excessive-fanout message on stderr with a non-zero status.
+* The demo pair `demo/fanout-*.parquet` becomes ten keys with one duplicated in `new`, which is exactly the 10% boundary and therefore retained; `demo/fanout-broad-*.parquet` keeps the current two-key shape, whose single duplicate is 50% and is rejected. `demo/README.md` gains a section for each, and `README.md` moves fanout from the rejection list to the current-behavior list.
 
 # Definition of done
 
 This step is complete when:
 
-* one `test-support` workspace member provides `table!`, `column!`, and `rows_without_columns`, with its own unit tests;
-* no `fn table(columns: Vec<(&str, ArrayRef)>)` helper remains anywhere in the repository, and `common::batch` and `common::empty_batch` are gone;
-* every fixture in `src/` and `tests/` is built through the shared helper, except where an Arrow type is the subject of the assertion;
-* the only surviving Arrow imports are the `RecordBatch` or `ArrayRef` named by a module's own helper signature, the `DataType` enumerated by `src/input.rs` and `src/compare.rs`, and the array types `src/compare.rs` needs to build its one hand-encoded dictionary; the suite's one remaining `std::sync::Arc` import is `src/input.rs`'s, which wraps the `Field` inside the `List` and `Struct` types that test enumerates;
-* every assertion, test name, and inline snapshot is unchanged, and every fixture still produces the Arrow types it produced before this step; and
+* a declared key that is unique in `old` and duplicates at most 10% of the shared key values in `new` is retained, and one is rejected above that bound with `ExcessiveFanout { affected, shared }`;
+* every shared key duplicated in `new` produces exactly one fanout event carrying the old row, all its new rows in ascending order, and the cells that differ, and no other row event or cell mentions those rows;
+* fanout cells are absent from `Diff::cells`, `columns.edited`, `summary`, and `order.rows`, and reachable only through `rows.fanout`, while a column carrying both a matched-row change and a fanout change keeps the matched one in the ordinary cell and edit-summary path;
+* the human format renders one `row_fanout()` line per event between the row additions and the row ordering, with `, values` exactly when the event has changed cells;
+* `DiffError::UnsupportedFanout` no longer exists, and old-side duplication is still `NonUniqueOldKey`;
+* the demo datasets and both READMEs describe fanout as supported within the bound and rejected above it; and
 * the full test suite, strict Clippy, formatting, and diff checks pass across the workspace, and repeated runs still produce byte-identical output.

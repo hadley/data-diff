@@ -104,9 +104,46 @@ fn main() {
         ]),
     );
 
+    // One of ten shared keys is exactly the 10% limit, so this pair is
+    // retained and reported as a fanout.
     write(
         &output,
         "fanout-old.parquet",
+        table(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from((1..=10).collect::<Vec<i64>>())),
+            ),
+            (
+                "value",
+                Arc::new(Int64Array::from(
+                    (1..=10).map(|id| id * 10).collect::<Vec<i64>>(),
+                )),
+            ),
+        ]),
+    );
+    write(
+        &output,
+        "fanout-new.parquet",
+        table(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10])),
+            ),
+            (
+                "value",
+                Arc::new(Int64Array::from(vec![
+                    10, 20, 30, 40, 41, 50, 60, 70, 80, 90, 100,
+                ])),
+            ),
+        ]),
+    );
+
+    // One of two shared keys is 50%, which reads as a broken key rather than
+    // as fanout.
+    write(
+        &output,
+        "fanout-broad-old.parquet",
         table(vec![
             ("id", Arc::new(Int64Array::from(vec![1, 2]))),
             ("value", Arc::new(Int64Array::from(vec![10, 20]))),
@@ -114,7 +151,7 @@ fn main() {
     );
     write(
         &output,
-        "fanout-new.parquet",
+        "fanout-broad-new.parquet",
         table(vec![
             ("id", Arc::new(Int64Array::from(vec![1, 1, 2]))),
             ("value", Arc::new(Int64Array::from(vec![10, 11, 20]))),

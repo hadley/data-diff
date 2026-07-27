@@ -61,6 +61,22 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     for &position in &diff.rows.added {
         operations.push(format!("row_add({position})"));
     }
+    for event in &diff.rows.fanout {
+        // The coordinates cannot say whether the new rows differ from the old
+        // one, so the suffix does; the cells themselves are never enumerated.
+        let suffix = if event.cells.is_empty() {
+            ""
+        } else {
+            ", values"
+        };
+        let targets = event
+            .new
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        operations.push(format!("row_fanout({} -> [{targets}]{suffix})", event.old));
+    }
     for coordinate in &diff.order.rows {
         let (old, new) = coordinate.positions();
         operations.push(format!("row_order({old} -> {new})"));
@@ -219,6 +235,44 @@ mod tests {
         assert_eq!(
             render_with(&old, &old, &[]),
             "col_key(guessed: [\"line\\n\\\"quoted\\\"\"], overlap: 1.00)\nno_changes()"
+        );
+    }
+
+    #[test]
+    fn places_fanout_among_the_other_row_operations() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "id" => [2, 1, 3, 4, 4, 5, 6, 7, 8, 9, 10, 99],
+            "value" => [0, 0, 0, 0, 7, 0, 0, 5, 0, 0, 0, 0],
+        };
+
+        insta::assert_snapshot!(render(&old, &new), @r#"
+        col_key(declared: ["id"])
+        row_drop(11)
+        row_add(12)
+        row_fanout(4 -> [4, 5], values)
+        row_order(2 -> 1)
+        row_edit(7 -> 8)
+        "#);
+    }
+
+    #[test]
+    fn a_fanout_without_differences_has_no_suffix() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+
+        assert_eq!(
+            render(&old, &new),
+            "col_key(declared: [\"id\"])\nrow_fanout(4 -> [4, 5])"
         );
     }
 

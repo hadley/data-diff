@@ -7,6 +7,20 @@ use crate::schema::SchemaMatches;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CellChanges {
     pub columns: Vec<ColumnChanges>,
+    /// One entry per fanout group, ordered by old row.
+    pub fanout: Vec<FanoutChanges>,
+}
+
+/// The differences between one old row and each of the new rows sharing its key.
+///
+/// These cells stay here rather than in `columns`, so they reach neither the
+/// one-to-one cell set nor edit summarization. The group is recorded whether or
+/// not anything differs, because the fanout itself is the event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FanoutChanges {
+    pub old: usize,
+    pub new: Vec<usize>,
+    pub cells: Vec<ChangedCell>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +71,7 @@ pub(crate) fn compare_cells(
     rows: &RowMatches,
 ) -> CellChanges {
     let mut result = CellChanges::default();
+    let mut fanout_cells = vec![Vec::new(); rows.fanout.len()];
     for identity in &schema.identities {
         let mut changed_rows = Vec::new();
         if !identity.is_key {
@@ -71,6 +86,20 @@ pub(crate) fn compare_cells(
                     changed_rows.push((old_row, new_row));
                 }
             }
+            // The same canonicalized columns serve the one-to-many comparison,
+            // so a fanout costs no extra pass over the data.
+            for (group, cells) in rows.fanout.iter().zip(&mut fanout_cells) {
+                for &new_row in &group.new {
+                    if old_values[group.old] != new_values[new_row] {
+                        cells.push(ChangedCell {
+                            old_row: group.old,
+                            old_column: identity.old,
+                            new_row,
+                            new_column: identity.new,
+                        });
+                    }
+                }
+            }
         }
         if identity.type_changed || !changed_rows.is_empty() {
             result.columns.push(ColumnChanges {
@@ -81,6 +110,22 @@ pub(crate) fn compare_cells(
             });
         }
     }
+
+    result.fanout = rows
+        .fanout
+        .iter()
+        .zip(fanout_cells)
+        .map(|(group, mut cells)| {
+            // The old row is constant within an event, so grouping by new row
+            // reads as each new row's differences from the old one.
+            cells.sort_by_key(|cell| (cell.new_row, cell.old_column, cell.new_column));
+            FanoutChanges {
+                old: group.old,
+                new: group.new.clone(),
+                cells,
+            }
+        })
+        .collect();
     result
 }
 
@@ -89,7 +134,7 @@ mod tests {
     use arrow_array::RecordBatch;
     use test_support::table;
 
-    use super::{ChangedCell, ColumnChanges, compare_cells};
+    use super::{ChangedCell, ColumnChanges, FanoutChanges, compare_cells};
     use crate::DiffOptions;
     use crate::key::resolve_key;
     use crate::rows::match_rows;
@@ -265,6 +310,128 @@ mod tests {
             ]
         );
         assert_eq!(changes.changed_cells().len(), 1);
+    }
+
+    #[test]
+    fn one_column_separates_its_fanout_cells_from_its_matched_cells() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 7, 0, 0, 5, 0, 0, 0],
+        };
+
+        let changes = changes(&old, &new);
+
+        // Separation partitions a column's cells rather than suppressing the
+        // column: the matched change is still an ordinary changed cell.
+        assert_eq!(
+            changes.columns,
+            [ColumnChanges {
+                old: 1,
+                new: 1,
+                type_changed: false,
+                rows: vec![(6, 7)],
+            }]
+        );
+        assert_eq!(
+            changes.changed_cells(),
+            [ChangedCell {
+                old_row: 6,
+                old_column: 1,
+                new_row: 7,
+                new_column: 1,
+            }]
+        );
+        // The fanout change is reachable only through its event.
+        assert_eq!(
+            changes.fanout,
+            [FanoutChanges {
+                old: 3,
+                new: vec![3, 4],
+                cells: vec![ChangedCell {
+                    old_row: 3,
+                    old_column: 1,
+                    new_row: 4,
+                    new_column: 1,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fanout_event_survives_with_no_changed_cells() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+
+        let changes = changes(&old, &new);
+
+        // The fanout itself is the event, whether or not values differ.
+        assert_eq!(
+            changes.fanout,
+            [FanoutChanges {
+                old: 3,
+                new: vec![3, 4],
+                cells: vec![],
+            }]
+        );
+        assert!(changes.columns.is_empty());
+    }
+
+    #[test]
+    fn fanout_events_exclude_key_added_and_dropped_columns() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "drop" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "add" => [0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0],
+        };
+
+        // The key agrees by construction and neither other column is
+        // identified, so the event has nothing comparable to report.
+        assert!(changes(&old, &new).fanout[0].cells.is_empty());
+    }
+
+    #[test]
+    fn a_compound_key_fans_out_on_the_whole_tuple() {
+        let old = table! {
+            "group" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+            "id" => [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let new = table! {
+            "group" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "b", "b"],
+            "id" => ["1", "2", "3", "4", "5", "1", "2", "3", "3", "4", "5"],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0],
+        };
+
+        let changes = changes_with(&old, &new, &["group", "id"]);
+
+        // ("b", 3) is duplicated while ("a", 3) is not, and the new component
+        // is a string, so the tuple and its comparison plans both matter.
+        assert_eq!(
+            changes.fanout,
+            [FanoutChanges {
+                old: 7,
+                new: vec![7, 8],
+                cells: vec![ChangedCell {
+                    old_row: 7,
+                    old_column: 2,
+                    new_row: 8,
+                    new_column: 2,
+                }],
+            }]
+        );
     }
 
     #[test]

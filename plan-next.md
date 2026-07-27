@@ -8,7 +8,7 @@ Each item below becomes its own detailed plan and dedicated branch from `main`. 
 
 Complete maintenance work and add reconciliation features in dependency order, giving each isolated fixtures, integration coverage, and determinism checks:
 
-1. Support bounded declared-key fanout while keeping fanout cells separate.
+1. Extend bounded fanout to guessed keys, amending `design.md`, admitting a candidate that is unique in `old` and within the fanout bound in `new`, ranking every strictly unique candidate ahead of every fanout-bearing one so no comparison that resolves today changes, and scoring candidates by distinct shared key values rather than matching new rows so duplication cannot inflate a candidate. This must land before row-number fallback, which should be designed against the final guessing rules.
 1. Add paired key components and validated rename/add/drop/edit hints.
 1. Infer exact renames from aligned matched rows.
 1. Add approximate rename inference and then swap detection, initially examining all matched rows.

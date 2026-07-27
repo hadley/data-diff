@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::key::MAX_FANOUT_PERCENT;
+
 /// Options that influence reconciliation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
@@ -54,8 +56,8 @@ pub enum DiffError {
     },
     /// The declared key is not unique in the old input.
     NonUniqueOldKey { first_row: usize, row: usize },
-    /// New-side duplication requires fanout, which the MVP defers.
-    UnsupportedFanout { first_row: usize, row: usize },
+    /// New-side duplication is too broad to be read as fanout.
+    ExcessiveFanout { affected: usize, shared: usize },
     /// Same-name non-key columns cannot be compared.
     IncompatibleColumns {
         column: String,
@@ -130,9 +132,10 @@ impl std::fmt::Display for DiffError {
                 f,
                 "old key is non-unique at rows {first_row} and {row} (non_unique_old)"
             ),
-            DiffError::UnsupportedFanout { first_row, row } => write!(
+            DiffError::ExcessiveFanout { affected, shared } => write!(
                 f,
-                "new key repeats at rows {first_row} and {row}; fanout is not supported yet"
+                "declared key fans out for {affected} of {shared} shared key values, \
+                 above the {MAX_FANOUT_PERCENT}% limit; supply a different --key"
             ),
             DiffError::IncompatibleColumns {
                 column,
@@ -308,6 +311,21 @@ pub struct RowsDiff {
     pub added: Vec<usize>,
     pub dropped: Vec<usize>,
     pub matched: Vec<Coordinate>,
+    pub fanout: Vec<FanoutEvent>,
+}
+
+/// One old row that corresponds to several new rows sharing its key.
+///
+/// The row positions are plain and one-based rather than `Coordinate`s: a
+/// `Coordinate` pairs one old with one new position and collapses when they
+/// agree, and a fanout has no such pair. The cells do pair, so they keep their
+/// coordinate type; they are held here rather than in `Diff::cells` because a
+/// one-to-many comparison is not evidence of an edit to a matched row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FanoutEvent {
+    pub old: usize,
+    pub new: Vec<usize>,
+    pub cells: Vec<CellCoordinate>,
 }
 
 /// Minimal relative-order changes.

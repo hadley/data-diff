@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::key::{ResolvedKey, compound_hash};
+use crate::key::{KeyIndex, ResolvedKey};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RowMatches {
@@ -8,31 +6,40 @@ pub(crate) struct RowMatches {
     pub dropped: Vec<usize>,
     /// One-to-one `(old, new)` row positions, ordered by `old`.
     pub matched: Vec<(usize, usize)>,
+    /// One-to-many groups, ordered by `old`.
+    pub fanout: Vec<FanoutGroup>,
 }
 
-pub(crate) fn match_rows(key: &ResolvedKey) -> RowMatches {
-    let mut new_buckets = HashMap::<u128, Vec<usize>>::new();
-    for (row, value) in key.new.iter().enumerate() {
-        new_buckets
-            .entry(compound_hash(value))
-            .or_default()
-            .push(row);
-    }
+/// One old row and the several new rows that share its key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FanoutGroup {
+    pub old: usize,
+    /// New rows in ascending order.
+    pub new: Vec<usize>,
+}
 
+/// Classify every row by its key.
+///
+/// Old-side presence is decided before new-side multiplicity, so a key that
+/// repeats in `new` without occurring in `old` produces additions rather than a
+/// fanout. The key is unique in `old`, so each group of new rows is claimed by
+/// at most one old row and the four results partition the rows between them.
+pub(crate) fn match_rows(key: &ResolvedKey) -> RowMatches {
+    let index = KeyIndex::new(&key.new);
     let mut result = RowMatches::default();
     let mut used_new = vec![false; key.new.len()];
     for (old_row, old_key) in key.old.iter().enumerate() {
-        let matched = new_buckets
-            .get(&compound_hash(old_key))
-            .into_iter()
-            .flatten()
-            .copied()
-            .find(|new_row| key.new[*new_row] == *old_key);
-        if let Some(new_row) = matched {
+        let group = index.rows(old_key).collect::<Vec<_>>();
+        for &new_row in &group {
             used_new[new_row] = true;
-            result.matched.push((old_row, new_row));
-        } else {
-            result.dropped.push(old_row);
+        }
+        match group.len() {
+            0 => result.dropped.push(old_row),
+            1 => result.matched.push((old_row, group[0])),
+            _ => result.fanout.push(FanoutGroup {
+                old: old_row,
+                new: group,
+            }),
         }
     }
     result.added = used_new
@@ -48,7 +55,7 @@ mod tests {
     use arrow_array::RecordBatch;
     use test_support::table;
 
-    use super::{RowMatches, match_rows};
+    use super::{FanoutGroup, RowMatches, match_rows};
     use crate::DiffOptions;
     use crate::key::resolve_key;
 
@@ -70,6 +77,7 @@ mod tests {
                 added: vec![2],
                 dropped: vec![1],
                 matched: vec![(0, 1), (2, 0)],
+                fanout: vec![],
             }
         );
     }
@@ -85,6 +93,7 @@ mod tests {
                 added: vec![0, 1],
                 dropped: vec![0, 1],
                 matched: vec![],
+                fanout: vec![],
             }
         );
     }
@@ -104,6 +113,44 @@ mod tests {
     }
 
     #[test]
+    fn classifies_fanout_alongside_matches_adds_and_drops() {
+        let old = table! { "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] };
+        let new = table! { "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 99] };
+
+        let rows = rows(old, new, &["id"]);
+
+        // Key 4 fans out, key 11 has no new row, and key 99 has no old row.
+        assert_eq!(
+            rows.fanout,
+            [FanoutGroup {
+                old: 3,
+                new: vec![3, 4],
+            }]
+        );
+        assert_eq!(rows.dropped, [10]);
+        assert_eq!(rows.added, [11]);
+
+        // The four results partition the rows: a fanned-out old row is neither
+        // matched nor dropped, and its new rows are not additions.
+        assert_eq!(rows.matched.len(), 9);
+        assert!(!rows.matched.iter().any(|&(old, _)| old == 3));
+        assert!(!rows.matched.iter().any(|&(_, new)| new == 3 || new == 4));
+    }
+
+    #[test]
+    fn a_duplicate_without_an_old_row_is_two_additions() {
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [1, 2, 3, 3] };
+
+        let rows = rows(old, new, &["id"]);
+
+        // Old-side presence is decided before new-side multiplicity, so key 3
+        // never reaches the fanout branch.
+        assert_eq!(rows.added, [2, 3]);
+        assert!(rows.fanout.is_empty());
+    }
+
+    #[test]
     fn handles_an_empty_side_without_special_cases() {
         let old = table! { "id" => i64[] };
         let new = table! { "id" => [1, 2] };
@@ -114,6 +161,7 @@ mod tests {
                 added: vec![0, 1],
                 dropped: vec![],
                 matched: vec![],
+                fanout: vec![],
             }
         );
     }

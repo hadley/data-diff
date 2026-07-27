@@ -442,6 +442,7 @@ mod tests {
                 changed_column(2, 0, false, &[(0, 1)]),
                 changed_column(3, 3, true, &[]),
             ],
+            ..CellChanges::default()
         };
 
         assert_eq!(
@@ -461,12 +462,14 @@ mod tests {
     fn selected_vertices_retain_moved_identities() {
         let column_dominant = CellChanges {
             columns: vec![changed_column(2, 0, false, &[(0, 2), (1, 0)])],
+            ..CellChanges::default()
         };
         let row_dominant = CellChanges {
             columns: vec![
                 changed_column(1, 2, false, &[(0, 2)]),
                 changed_column(2, 1, false, &[(0, 2)]),
             ],
+            ..CellChanges::default()
         };
 
         assert_eq!(
