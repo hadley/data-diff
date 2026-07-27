@@ -23,7 +23,6 @@ Include the following sections only when they tells the reader something the sum
 
 - `## Example` — a concrete example of the new behavior (code snippet, before/after output, short usage walkthrough; for UI changes, a screenshot — ask the user if you can't produce one). Add when seeing the behavior clarifies more than describing it does.
 - `## Not included` — when the PR deliberately leaves related work out (e.g. "TUI support comes in a separate PR"), to head off "did you forget X?" review questions.
-- `## Design decisions` — when the PR makes a non-obvious choice a reviewer might question or that future work must respect; explain the choice and the alternative rejected.
 - `## Breaking changes` — when the PR changes behavior, config, or disk formats in a way that affects existing users or other packages; say what breaks and what to do about it.
 
 Write in accessible, plain language — avoid jargon and deep implementation detail where possible. A reader who doesn't work in this codebase daily should be able to understand what the PR does and why. Save technical specifics for the optional sections, and keep them brief.
