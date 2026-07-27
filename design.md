@@ -189,7 +189,9 @@ Fanout is intentionally one-directional: a unique old row can be compared unambi
 
 ### Guessed key
 
-If no declared key survives, we consider compatible, identified single columns that contain no missing values, are unique on both sides, and share at least one value. We select the candidate with the most shared values, breaking ties by column order; guessed keys never infer fanout.
+If no declared key survives, we consider compatible, identified single columns that contain no missing values, are unique in `old`, and share at least one value. A candidate may be duplicated in `new` under the same affected-key rate that admits a declared key, and is ineligible above it. We select the candidate with the most shared key values, preferring one that does not fan out when two candidates tie, and then the earlier column in `old`.
+
+Selection follows the evidence rather than the absence of fanout: a true key that duplicated one row identifies more rows than a column that is unique by coincidence, and is the better guess. Duplicated values whose key is absent from `old` are additions rather than fanout, so they neither count against a candidate nor make it ineligible.
 
 For each candidate, let $m$ be the number of shared key values and report normalized overlap as
 
@@ -197,7 +199,7 @@ $$
 r = \frac{m}{\min(n_o, n_n)},
 $$
 
-where $n_o$ and $n_n$ are the row counts. The denominator is constant, so $r$ summarizes but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible.
+where $n_o$ and $n_n$ are the numbers of distinct key values on each side. Because `old` is unique, $n_o$ is its row count, and $n_n$ is smaller than the new row count exactly when `new` duplicates a value. The denominator does not depend on the candidate's shared count, so $r$ summarizes but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible.
 
 ### Row-number fallback
 

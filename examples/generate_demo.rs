@@ -139,6 +139,43 @@ fn main() {
         ]),
     );
 
+    // The only candidate that can identify rows is the one that fans out:
+    // "region" repeats in `old` and so can never be a key.
+    write(
+        &output,
+        "guessed-fanout-old.parquet",
+        table(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from((1..=10).collect::<Vec<i64>>())),
+            ),
+            (
+                "region",
+                Arc::new(StringArray::from(vec![
+                    "north", "south", "north", "south", "north", "south", "north", "south",
+                    "north", "south",
+                ])),
+            ),
+        ]),
+    );
+    write(
+        &output,
+        "guessed-fanout-new.parquet",
+        table(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10])),
+            ),
+            (
+                "region",
+                Arc::new(StringArray::from(vec![
+                    "north", "south", "north", "south", "east", "north", "south", "north", "south",
+                    "north", "south",
+                ])),
+            ),
+        ]),
+    );
+
     // One of two shared keys is 50%, which reads as a broken key rather than
     // as fanout.
     write(

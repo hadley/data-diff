@@ -9,7 +9,7 @@ operation-oriented summary.
 data-diff old.parquet new.parquet
 ```
 
-When `--key` is omitted, `data-diff` guesses the row key: it considers every same-name single column that is compatible, free of nulls and `NaN`, and unique on both sides, and selects the one whose canonical values share the largest exact intersection across the files, breaking ties by old-column order. If no column qualifies — including when either input has no rows — the comparison fails and asks for an explicit key; a positional row-number fallback is planned as a separate step.
+When `--key` is omitted, `data-diff` guesses the row key: it considers every same-name single column that is compatible, free of nulls and `NaN`, unique in the old file, and no more duplicated in the new file than the fanout limit allows, and selects the one sharing the largest number of key values across the files. A candidate that duplicates a shared key is not penalized for it beyond that limit, because a true key that duplicated a row identifies more rows than a column that is unique by coincidence; freedom from fanout only breaks a tie, and old-column order breaks what remains. If no column qualifies — including when either input has no rows — the comparison fails and asks for an explicit key; a positional row-number fallback is planned as a separate step.
 
 A user who knows the correct identity can declare it instead:
 
@@ -42,7 +42,7 @@ Column names are quoted, and row and column coordinates are one-based. The summa
 * supports booleans, signed and in-range unsigned integers, `float32`,
   `float64`, UTF-8 strings, dictionary-encoded strings, and typed nulls;
 * compares compatible numeric and parsed string representations exactly;
-* guesses a single-column row key from exact cross-file evidence when `--key` is omitted, and reports the selected basis and overlap;
+* guesses a single-column row key from exact cross-file evidence when `--key` is omitted, allowing it to fan out under the same limit as a declared key, and reports the selected basis and overlap;
 * reports schema additions, drops, and source-type edits;
 * reports added, dropped, matched, and relatively reordered rows;
 * keeps a declared key that identifies one old row and several new rows, when at most 10% of the key values shared by the two files are duplicated in the new one, and reports each affected key as a `row_fanout()` event holding the old row, its new rows, and the values that differ between them;
@@ -51,7 +51,7 @@ Column names are quoted, and row and column coordinates are one-based. The summa
   and
 * emits deterministic one-based coordinates referring to the original files.
 
-It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, declared keys whose new-side duplication exceeds the fanout limit, and comparisons where no key was supplied and no eligible key could be guessed. A guessed key is never allowed to fan out, because a column that repeats a value is not eligible to be guessed in the first place.
+It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, declared keys whose new-side duplication exceeds the fanout limit, and comparisons where no key was supplied and no eligible key could be guessed. A guessed key is held to the same fanout limit as a declared one, but a candidate that exceeds it is simply passed over rather than reported.
 
 It does not yet expose the complete cell-level result to users, fall back to row numbers when no key can be guessed, guess compound keys, accept paired old/new key names, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
 

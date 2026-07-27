@@ -258,6 +258,49 @@ fn an_excessive_fanout_rejects_the_declared_key() {
 }
 
 #[test]
+fn a_guessed_key_may_fan_out() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "status" => ["x", "x", "x", "x", "x", "x", "x", "x", "x", "x"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+        "status" => ["x", "x", "x", "x", "y", "x", "x", "x", "x", "x", "x"],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    // "status" repeats in `old`, so the only candidate is one that fans out.
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: Some(KeyOverlap {
+                shared: 10,
+                possible: 10,
+            }),
+        }
+    );
+    // Nothing downstream asks how the key was chosen, so a guessed fanout
+    // produces the same self-contained event a declared one does.
+    assert_eq!(
+        diff.rows.fanout,
+        vec![FanoutEvent {
+            old: 4,
+            new: vec![4, 5],
+            cells: vec![CellCoordinate::from_zero_based(3, 1, 4, 1)],
+        }]
+    );
+    assert!(diff.cells.is_empty());
+    assert_eq!(diff.summary, EditSummary::default());
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
 fn repeated_fanout_comparisons_are_identical() {
     let old = table! {
         "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],

@@ -199,6 +199,35 @@ fn reports_a_bounded_fanout() {
 }
 
 #[test]
+fn guesses_a_key_that_fans_out() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "status" => ["x", "x", "x", "x", "x", "x", "x", "x", "x", "x"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+        "status" => ["x", "x", "x", "x", "y", "x", "x", "x", "x", "x", "x"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(guessed: ["id"], overlap: 1.00)
+    row_fanout(4 -> [4, 5], values)
+    "#);
+}
+
+#[test]
 fn rejects_a_declared_key_that_fans_out_too_broadly() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
