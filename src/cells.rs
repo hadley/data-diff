@@ -107,8 +107,14 @@ mod tests {
     }
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
+        changes_with(old, new, &["id"])
+    }
+
+    /// Compare cells under a specific key, or under a guessed one when `key` is
+    /// empty, so key exclusion can be checked for either basis.
+    fn changes_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> super::CellChanges {
         let options = DiffOptions {
-            key: vec!["id".into()],
+            key: key.iter().map(|name| (*name).to_owned()).collect(),
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
@@ -176,6 +182,30 @@ mod tests {
                     rows: vec![(0, 1), (1, 0)],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_guessed_key_column_is_excluded_like_a_declared_one() {
+        let old = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("value", Arc::new(Int64Array::from(vec![10, 20]))),
+        ]);
+        let new = table(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("value", Arc::new(Int64Array::from(vec![10, 21]))),
+        ]);
+
+        // "id" shares both values and "value" only one, so guessing selects
+        // "id"; the selected column is excluded whatever the basis.
+        assert_eq!(
+            changes_with(&old, &new, &[]).changed_cells(),
+            [ChangedCell {
+                old_row: 1,
+                old_column: 1,
+                new_row: 1,
+                new_column: 1,
+            }]
         );
     }
 

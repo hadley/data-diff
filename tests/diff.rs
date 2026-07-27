@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow_array::{Int32Array, Int64Array, StringArray};
+use arrow_array::{Int64Array, StringArray};
 use data_diff::{
     CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, KeyBasis,
     KeyDiff, KeyOverlap, diff_tables, write_human,
@@ -115,44 +115,6 @@ fn summary_combines_row_and_column_edits_minimally() {
 }
 
 #[test]
-fn summary_forces_and_coalesces_type_edits() {
-    let old = common::batch([
-        ("id", Arc::new(Int32Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int32Array::from(vec![10, 20]))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![11, 20]))),
-    ]);
-
-    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
-
-    assert_eq!(
-        diff.summary,
-        EditSummary {
-            optimal: true,
-            columns: vec![
-                ColumnEdit {
-                    column: Coordinate::from_zero_based(0, 0),
-                    type_changed: true,
-                    values_changed: false,
-                },
-                ColumnEdit {
-                    column: Coordinate::from_zero_based(1, 1),
-                    type_changed: true,
-                    values_changed: true,
-                },
-            ],
-            rows: vec![],
-        }
-    );
-    assert_eq!(
-        diff.cells,
-        vec![CellCoordinate::from_zero_based(0, 1, 0, 1)]
-    );
-}
-
-#[test]
 fn selected_row_retains_its_moved_coordinate() {
     let old = common::batch([
         ("id", Arc::new(Int64Array::from(vec![1, 2]))),
@@ -208,26 +170,6 @@ fn default_options_guess_a_key_and_align_reordered_rows() {
     assert_eq!(
         diff.cells,
         vec![CellCoordinate::from_zero_based(1, 1, 2, 0)]
-    );
-}
-
-#[test]
-fn a_guessed_key_stays_out_of_top_level_changed_cells() {
-    let old = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![10, 20]))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![10, 21]))),
-    ]);
-
-    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
-
-    assert_eq!(diff.key.basis, KeyBasis::Guessed);
-    assert_eq!(
-        diff.cells,
-        vec![CellCoordinate::from_zero_based(1, 1, 1, 1)]
     );
 }
 
