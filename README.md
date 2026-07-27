@@ -28,7 +28,7 @@ data-diff old.parquet new.parquet --key id --format json
 The default human format leads with the resolved key and then emits one operation per line:
 
 ```text
-col_key(guessed: "id", overlap: 0.6666666666666666)
+col_key(guessed: ["id"], overlap: 0.67)
 col_drop("product")
 col_add("stock")
 col_order("price", 3 -> 1)
@@ -38,7 +38,7 @@ row_add(3)
 row_order(3 -> 1)
 ```
 
-Column names are quoted, and row and column coordinates are one-based. The `col_key` line reports `declared: [...]` for an explicit key or `guessed: ...` with the normalized overlap `shared_values / min(old_rows, new_rows)` for a guessed key; the same ratio appears in the JSON `key.overlap` field. This initial human format intentionally identifies rows by position and does not include old or new cell values. It uses an exact minimum combination of `row_edit` and `col_edit` operations to summarize changed cells; for example, multiple changes in one row become `row_edit(2)`. An unchanged comparison emits `no_changes()` after the key line. Use `--format json` to inspect the summary together with the complete changed-cell evidence.
+Column names are quoted, and row and column coordinates are one-based.
 
 ## Current behavior
 

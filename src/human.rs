@@ -80,33 +80,29 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     writer.write_all(operations.join("\n").as_bytes())
 }
 
+/// Render the resolved key as a bracketed component list.
+///
+/// A guessed key is single-column today, but it is still bracketed so the
+/// format does not change shape once compound guesses exist.
 fn key_context(diff: &Diff) -> String {
-    let component_name =
-        |coordinate: &crate::Coordinate| column_name(&diff.schemas.old, coordinate.positions().0);
+    let components = diff
+        .key
+        .columns
+        .iter()
+        .map(|coordinate| column_name(&diff.schemas.old, coordinate.positions().0))
+        .collect::<Vec<_>>()
+        .join(", ");
     match diff.key.basis {
-        KeyBasis::Declared => {
-            let components = diff
-                .key
-                .columns
-                .iter()
-                .map(component_name)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("col_key(declared: [{components}])")
-        }
+        KeyBasis::Declared => format!("col_key(declared: [{components}])"),
         KeyBasis::Guessed => {
-            let name = diff
-                .key
-                .columns
-                .first()
-                .map(component_name)
-                .unwrap_or_else(|| "#0".to_owned());
+            // Human output rounds the ratio to two digits; JSON keeps the
+            // exact quotient for anything that needs full precision.
             let overlap = diff
                 .key
                 .overlap
-                .map(|overlap| serde_json::to_string(&overlap).expect("numbers always serialize"))
-                .unwrap_or_else(|| "0".to_owned());
-            format!("col_key(guessed: {name}, overlap: {overlap})")
+                .map(|overlap| overlap.ratio())
+                .unwrap_or(0.0);
+            format!("col_key(guessed: [{components}], overlap: {overlap:.2})")
         }
     }
 }
@@ -222,7 +218,7 @@ mod tests {
         ]);
 
         insta::assert_snapshot!(render_with(&old, &new, &[]), @r#"
-        col_key(guessed: "id", overlap: 0.6666666666666666)
+        col_key(guessed: ["id"], overlap: 0.67)
         row_drop(2)
         row_add(3)
         row_order(3 -> 1)
@@ -239,7 +235,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &[]),
-            "col_key(guessed: \"line\\n\\\"quoted\\\"\", overlap: 1.0)\nno_changes()"
+            "col_key(guessed: [\"line\\n\\\"quoted\\\"\"], overlap: 1.00)\nno_changes()"
         );
     }
 

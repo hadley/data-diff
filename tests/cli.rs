@@ -144,7 +144,7 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(guessed: "id", overlap: 0.6666666666666666)
+    col_key(guessed: ["id"], overlap: 0.67)
     row_drop(3)
     row_add(3)
     row_edit(2)

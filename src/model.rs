@@ -308,12 +308,22 @@ pub struct KeyOverlap {
     pub possible: usize,
 }
 
+impl KeyOverlap {
+    /// The normalized `shared / possible` ratio.
+    ///
+    /// Exact counts are what the model stores; the ratio is derived only where
+    /// it is reported, so the model itself stays comparable with `Eq`.
+    pub fn ratio(&self) -> f64 {
+        self.shared as f64 / self.possible as f64
+    }
+}
+
 impl Serialize for KeyOverlap {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        serializer.serialize_f64(self.shared as f64 / self.possible as f64)
+        serializer.serialize_f64(self.ratio())
     }
 }
 

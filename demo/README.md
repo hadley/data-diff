@@ -20,7 +20,7 @@ The commands below use that installed `data-diff` binary.
 data-diff demo/basic-old.parquet demo/basic-new.parquet
 ```
 
-With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(guessed: "id", overlap: 1.0)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
+With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(guessed: ["id"], overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
 
 ## Declaring the key explicitly
 
