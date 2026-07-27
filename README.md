@@ -1,7 +1,7 @@
 # data-diff
 
-`data-diff` compares two Parquet files and emits a semantic diff as either
-coordinate JSON or a compact, operation-oriented summary.
+`data-diff` compares two Parquet files and emits a semantic diff as a compact,
+operation-oriented summary.
 
 ## Usage
 
@@ -17,15 +17,9 @@ A user who knows the correct identity can declare it instead:
 data-diff old.parquet new.parquet --key customer_id,date,region
 ```
 
-`--key` accepts a comma-separated simple or compound key whose columns have the same names in both files. An explicit key always overrides guessing, even when another column would be the strongest guess, and errors in a declared key stay fatal rather than being silently replaced by a guess. Output is the compact human format on stdout by default. Input, schema, and key errors are written to stderr and return a non-zero exit status.
+`--key` accepts a comma-separated simple or compound key whose columns have the same names in both files. An explicit key always overrides guessing, even when another column would be the strongest guess, and errors in a declared key stay fatal rather than being silently replaced by a guess. The human format is the only output and is written to stdout. Input, schema, and key errors are written to stderr and return a non-zero exit status.
 
-To inspect the complete structured result, select JSON explicitly:
-
-```console
-data-diff old.parquet new.parquet --key id --format json
-```
-
-The default human format leads with the resolved key and then emits one operation per line:
+Output leads with the resolved key and then emits one operation per line:
 
 ```text
 col_key(guessed: ["id"], overlap: 0.67)
@@ -38,7 +32,7 @@ row_add(3)
 row_order(3 -> 1)
 ```
 
-Column names are quoted, and row and column coordinates are one-based.
+Column names are quoted, and row and column coordinates are one-based. The summary is deliberately minimal: several changed cells in one row are reported as a single `row_edit()`. The complete cell-level diff is retained in the library result rather than printed.
 
 ## Current behavior
 
@@ -58,7 +52,7 @@ Column names are quoted, and row and column coordinates are one-based.
 
 It rejects duplicate column names, unsupported types, incompatible same-name columns, invalid declared keys, null or `NaN` declared-key values, non-unique old keys, new-side duplicates that would require fanout, and comparisons where no key was supplied and no eligible key could be guessed.
 
-It does not yet fall back to row numbers when no key can be guessed, guess compound keys, accept paired old/new key names, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
+It does not yet expose the complete cell-level result to users, fall back to row numbers when no key can be guessed, guess compound keys, accept paired old/new key names, infer renames, stream large files, or provide an interactive UI. See [plan.md](plan.md) for the current implementation plan and subsequent steps.
 
 ## Development
 

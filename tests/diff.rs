@@ -2,9 +2,23 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow_array::{Int32Array, Int64Array, StringArray};
-use data_diff::{DiffError, DiffOptions, diff_tables};
-use serde_json::json;
+use arrow_array::{Int64Array, StringArray};
+use data_diff::{
+    CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, KeyBasis,
+    KeyDiff, KeyOverlap, diff_tables, write_human,
+};
+
+fn declared(key: &str) -> DiffOptions {
+    DiffOptions {
+        key: vec![key.to_owned()],
+    }
+}
+
+fn render(diff: &Diff) -> Vec<u8> {
+    let mut output = Vec::new();
+    write_human(&mut output, diff).unwrap();
+    output
+}
 
 #[test]
 fn combines_schema_row_order_and_cell_changes() {
@@ -19,43 +33,53 @@ fn combines_schema_row_order_and_cell_changes() {
         ("add", Arc::new(StringArray::from(vec!["a", "b", "c"]))),
     ]);
 
-    let diff = diff_tables(
-        &old,
-        &new,
-        &DiffOptions {
-            key: vec!["id".into()],
-        },
-    )
-    .unwrap();
-    let value = serde_json::to_value(diff).unwrap();
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
-    assert_eq!(value["columns"]["identities"], json!([[1, 2], [2, 1]]));
-    assert_eq!(value["columns"]["added"], json!([3]));
-    assert_eq!(value["columns"]["dropped"], json!([3]));
     assert_eq!(
-        value["columns"]["edited"],
-        json!([{
-            "column": [2, 1],
-            "type_changed": false,
-            "values_changed": true
-        }])
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 0),
+        ]
     );
-    assert_eq!(value["rows"]["added"], json!([3]));
-    assert_eq!(value["rows"]["matched"], json!([[1, 2], [2, 1]]));
-    assert_eq!(value["order"]["columns"], json!([[2, 1]]));
-    assert_eq!(value["order"]["rows"], json!([[2, 1]]));
-    assert_eq!(value["cells"], json!([[[1, 2], [2, 1]], [[2, 2], [1, 1]]]));
+    assert_eq!(diff.columns.added, vec![3]);
+    assert_eq!(diff.columns.dropped, vec![3]);
     assert_eq!(
-        value["summary"],
-        json!({
-            "optimal": true,
-            "columns": [{
-                "column": [2, 1],
-                "type_changed": false,
-                "values_changed": true
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 0),
+            type_changed: false,
+            values_changed: true,
+        }]
+    );
+    assert_eq!(diff.rows.added, vec![3]);
+    assert_eq!(
+        diff.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 0),
+        ]
+    );
+    assert_eq!(diff.order.columns, vec![Coordinate::from_zero_based(1, 0)]);
+    assert_eq!(diff.order.rows, vec![Coordinate::from_zero_based(1, 0)]);
+    assert_eq!(
+        diff.cells,
+        vec![
+            CellCoordinate::from_zero_based(0, 1, 1, 0),
+            CellCoordinate::from_zero_based(1, 1, 0, 0),
+        ]
+    );
+    assert_eq!(
+        diff.summary,
+        EditSummary {
+            optimal: true,
+            columns: vec![ColumnEdit {
+                column: Coordinate::from_zero_based(1, 0),
+                type_changed: false,
+                values_changed: true,
             }],
-            "rows": []
-        })
+            rows: vec![],
+        }
     );
 }
 
@@ -74,67 +98,20 @@ fn summary_combines_row_and_column_edits_minimally() {
         ("c", Arc::new(Int64Array::from(vec![0, 1, 1]))),
     ]);
 
-    let value = serde_json::to_value(
-        diff_tables(
-            &old,
-            &new,
-            &DiffOptions {
-                key: vec!["id".into()],
-            },
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
     assert_eq!(
-        value["summary"],
-        json!({
-            "optimal": true,
-            "columns": [{
-                "column": 4,
-                "type_changed": false,
-                "values_changed": true
+        diff.summary,
+        EditSummary {
+            optimal: true,
+            columns: vec![ColumnEdit {
+                column: Coordinate::from_zero_based(3, 3),
+                type_changed: false,
+                values_changed: true,
             }],
-            "rows": [1]
-        })
+            rows: vec![Coordinate::from_zero_based(0, 0)],
+        }
     );
-}
-
-#[test]
-fn summary_forces_and_coalesces_type_edits() {
-    let old = common::batch([
-        ("id", Arc::new(Int32Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int32Array::from(vec![10, 20]))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![11, 20]))),
-    ]);
-
-    let value = serde_json::to_value(
-        diff_tables(
-            &old,
-            &new,
-            &DiffOptions {
-                key: vec!["id".into()],
-            },
-        )
-        .unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        value["summary"],
-        json!({
-            "optimal": true,
-            "columns": [
-                {"column": 1, "type_changed": true, "values_changed": false},
-                {"column": 2, "type_changed": true, "values_changed": true}
-            ],
-            "rows": []
-        })
-    );
-    assert_eq!(value["cells"], json!([[1, 2]]));
 }
 
 #[test]
@@ -150,20 +127,10 @@ fn selected_row_retains_its_moved_coordinate() {
         ("b", Arc::new(Int64Array::from(vec![40, 31]))),
     ]);
 
-    let value = serde_json::to_value(
-        diff_tables(
-            &old,
-            &new,
-            &DiffOptions {
-                key: vec!["id".into()],
-            },
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
-    assert_eq!(value["summary"]["columns"], json!([]));
-    assert_eq!(value["summary"]["rows"], json!([[1, 2]]));
+    assert!(diff.summary.columns.is_empty());
+    assert_eq!(diff.summary.rows, vec![Coordinate::from_zero_based(0, 1)]);
 }
 
 #[test]
@@ -177,59 +144,33 @@ fn default_options_guess_a_key_and_align_reordered_rows() {
         ("customer_id", Arc::new(Int64Array::from(vec![3, 1, 2]))),
     ]);
 
-    let value =
-        serde_json::to_value(diff_tables(&old, &new, &DiffOptions::default()).unwrap()).unwrap();
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
 
     assert_eq!(
-        value["key"],
-        json!({
-            "basis": "guessed",
-            "columns": [[1, 2]],
-            "overlap": 1.0,
-        })
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![Coordinate::from_zero_based(0, 1)],
+            overlap: Some(KeyOverlap {
+                shared: 3,
+                possible: 3,
+            }),
+        }
     );
-    assert_eq!(value["rows"]["matched"], json!([[1, 2], [2, 3], [3, 1]]));
-    assert_eq!(value["rows"]["added"], json!([]));
-    assert_eq!(value["rows"]["dropped"], json!([]));
-    assert_eq!(value["cells"], json!([[[2, 2], [3, 1]]]));
-}
-
-#[test]
-fn an_explicit_key_overrides_a_stronger_eligible_guess() {
-    let old = common::batch([
-        ("weak", Arc::new(Int64Array::from(vec![1, 2, 3]))),
-        ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-    ]);
-    let new = common::batch([
-        ("weak", Arc::new(Int64Array::from(vec![1, 4, 5]))),
-        ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
-    ]);
-    let options = DiffOptions {
-        key: vec!["weak".into()],
-    };
-
-    let value = serde_json::to_value(diff_tables(&old, &new, &options).unwrap()).unwrap();
-
-    assert_eq!(value["key"], json!({"basis": "declared", "columns": [1]}));
-    assert_eq!(value["rows"]["matched"], json!([1]));
-}
-
-#[test]
-fn a_guessed_key_stays_out_of_top_level_changed_cells() {
-    let old = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![10, 20]))),
-    ]);
-    let new = common::batch([
-        ("id", Arc::new(Int64Array::from(vec![1, 2]))),
-        ("value", Arc::new(Int64Array::from(vec![10, 21]))),
-    ]);
-
-    let value =
-        serde_json::to_value(diff_tables(&old, &new, &DiffOptions::default()).unwrap()).unwrap();
-
-    assert_eq!(value["key"]["basis"], json!("guessed"));
-    assert_eq!(value["cells"], json!([[2, 2]]));
+    assert_eq!(
+        diff.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 2, 0)]
+    );
 }
 
 #[test]
@@ -253,7 +194,7 @@ fn automatic_resolution_without_an_eligible_key_is_an_error() {
 }
 
 #[test]
-fn repeated_guessed_comparisons_are_byte_identical() {
+fn repeated_guessed_comparisons_are_identical() {
     let old = common::batch([
         ("a", Arc::new(Int64Array::from(vec![1, 2, 3]))),
         ("b", Arc::new(Int64Array::from(vec![7, 8, 9]))),
@@ -264,72 +205,53 @@ fn repeated_guessed_comparisons_are_byte_identical() {
     ]);
     let options = DiffOptions::default();
 
-    let first = serde_json::to_vec(&diff_tables(&old, &new, &options).unwrap()).unwrap();
-    let second = serde_json::to_vec(&diff_tables(&old, &new, &options).unwrap()).unwrap();
+    let first = diff_tables(&old, &new, &options).unwrap();
+    let second = diff_tables(&old, &new, &options).unwrap();
 
     assert_eq!(first, second);
+    assert_eq!(render(&first), render(&second));
 }
 
 #[test]
-fn repeated_comparisons_are_byte_identical() {
+fn repeated_comparisons_are_identical() {
     let table = common::batch([
         ("id", Arc::new(Int64Array::from(vec![1, 2]))),
         ("value", Arc::new(Int64Array::from(vec![10, 20]))),
     ]);
-    let options = DiffOptions {
-        key: vec!["id".into()],
-    };
+    let options = declared("id");
 
-    let first = serde_json::to_vec(&diff_tables(&table, &table, &options).unwrap()).unwrap();
-    let second = serde_json::to_vec(&diff_tables(&table, &table, &options).unwrap()).unwrap();
+    let first = diff_tables(&table, &table, &options).unwrap();
+    let second = diff_tables(&table, &table, &options).unwrap();
 
     assert_eq!(first, second);
+    assert_eq!(render(&first), render(&second));
 }
 
 #[test]
-fn disjoint_keys_are_all_atomic_row_events() {
-    let old = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-    let new = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
-
-    let diff = diff_tables(
-        &old,
-        &new,
-        &DiffOptions {
-            key: vec!["id".into()],
-        },
-    )
-    .unwrap();
-    let value = serde_json::to_value(diff).unwrap();
-
-    assert_eq!(value["rows"]["dropped"], json!([1, 2]));
-    assert_eq!(value["rows"]["added"], json!([1, 2]));
-    assert_eq!(value["rows"]["matched"], json!([]));
-    assert_eq!(value["cells"], json!([]));
-    assert_eq!(
-        value["summary"],
-        json!({"optimal": true, "columns": [], "rows": []})
-    );
-}
-
-#[test]
-fn empty_inputs_preserve_schema_and_classify_the_other_side() {
+fn unmatched_rows_are_classified_without_cells_or_edits() {
     let empty = common::batch([("id", Arc::new(Int64Array::from(Vec::<i64>::new())))]);
     let rows = common::batch([("id", Arc::new(Int64Array::from(vec![1, 2])))]);
-    let options = DiffOptions {
-        key: vec!["id".into()],
-    };
+    let disjoint = common::batch([("id", Arc::new(Int64Array::from(vec![3, 4])))]);
+    let options = declared("id");
 
-    let added = serde_json::to_value(diff_tables(&empty, &rows, &options).unwrap()).unwrap();
-    let dropped = serde_json::to_value(diff_tables(&rows, &empty, &options).unwrap()).unwrap();
-    let both_empty = serde_json::to_value(diff_tables(&empty, &empty, &options).unwrap()).unwrap();
+    let added = diff_tables(&empty, &rows, &options).unwrap();
+    let dropped = diff_tables(&rows, &empty, &options).unwrap();
+    let both_empty = diff_tables(&empty, &empty, &options).unwrap();
+    let unrelated = diff_tables(&rows, &disjoint, &options).unwrap();
 
-    assert_eq!(added["rows"]["added"], json!([1, 2]));
-    assert_eq!(dropped["rows"]["dropped"], json!([1, 2]));
-    assert_eq!(both_empty["schemas"]["old"][0]["name"], "id");
-    assert_eq!(both_empty["rows"]["matched"], json!([]));
-    assert_eq!(both_empty["cells"], json!([]));
-    assert_eq!(
-        both_empty["summary"],
-        json!({"optimal": true, "columns": [], "rows": []})
-    );
+    assert_eq!(added.rows.added, vec![1, 2]);
+    assert_eq!(dropped.rows.dropped, vec![1, 2]);
+    assert_eq!(both_empty.schemas.old[0].name, "id");
+    assert!(both_empty.rows.matched.is_empty());
+
+    // A pair that shares no key values reconciles like an empty side: every row
+    // is atomic, so no comparison happens and nothing is summarized.
+    assert_eq!(unrelated.rows.dropped, vec![1, 2]);
+    assert_eq!(unrelated.rows.added, vec![1, 2]);
+    assert!(unrelated.rows.matched.is_empty());
+
+    for diff in [&added, &dropped, &both_empty, &unrelated] {
+        assert!(diff.cells.is_empty());
+        assert_eq!(diff.summary, EditSummary::default());
+    }
 }

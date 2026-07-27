@@ -574,6 +574,26 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_key_overrides_a_stronger_candidate() {
+        let old = table(vec![
+            ("weak", Arc::new(Int64Array::from(vec![1, 2, 3]))),
+            ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+        ]);
+        let new = table(vec![
+            ("weak", Arc::new(Int64Array::from(vec![1, 4, 5]))),
+            ("strong", Arc::new(Int64Array::from(vec![10, 20, 30]))),
+        ]);
+
+        let key = resolve_key(&old, &new, &options(&["weak"])).unwrap();
+
+        // "strong" shares all three values and "weak" only one, so guessing
+        // would choose the other column; a declaration is never compared.
+        assert_eq!(key.basis, KeyBasis::Declared);
+        assert_eq!(key.columns[0].name, "weak");
+        assert_eq!(key.overlap, None);
+    }
+
+    #[test]
     fn repeated_guessing_is_deterministic() {
         let old = table(vec![
             ("a", Arc::new(Int64Array::from(vec![1, 2, 3]))),

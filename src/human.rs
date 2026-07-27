@@ -95,8 +95,8 @@ fn key_context(diff: &Diff) -> String {
     match diff.key.basis {
         KeyBasis::Declared => format!("col_key(declared: [{components}])"),
         KeyBasis::Guessed => {
-            // Human output rounds the ratio to two digits; JSON keeps the
-            // exact quotient for anything that needs full precision.
+            // Rounded to two digits for display; `KeyOverlap` keeps the exact
+            // shared and possible counts for anything that needs them.
             let overlap = diff
                 .key
                 .overlap

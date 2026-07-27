@@ -4,7 +4,6 @@ mod cells;
 mod compare;
 mod human;
 mod input;
-mod json;
 mod key;
 mod model;
 mod order;
@@ -16,7 +15,6 @@ use arrow_array::RecordBatch;
 
 pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
-pub use json::write_json;
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
     DiffOptions, DuplicateColumnName, EditSummary, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,

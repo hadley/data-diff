@@ -1,197 +1,142 @@
 ---
-title: Guess eligible single-column keys
+title: Drop JSON output
 ---
 
 # Todo
 
-- [x] **Separate declared and guessed key resolution.** Preserve the current syntax and strict validation path whenever `DiffOptions.key` is non-empty. When it is empty, try key guessing instead of immediately returning `MissingKey`. Keep declared compound keys supported; guessed keys are single-column only.
-- [x] **Reject impossible guesses before candidate work.** After choosing automatic resolution, check the two row counts before enumerating or canonicalizing columns. If either input has zero rows, return `MissingKey` immediately because no shared value can support a guess.
-- [x] **Build exact candidate evidence.** Examine same-name column identities in stable old-column order. For each compatible pair, canonicalize both sides with one `ComparisonPlan`, then retain it only if neither side contains null or `NaN`, values are unique independently on both sides, and the sides share at least one canonical value. Count shared values with hash buckets plus equality checks so collisions cannot manufacture overlap.
-- [x] **Select one deterministic guessed key.** Choose the eligible candidate with the greatest number of shared values and break ties by old-column position. Return the already-canonicalized values with the selected column so row matching does not repeat work. If no candidate is eligible, return `MissingKey`.
-- [x] **Record exact overlap evidence.** Add `Guessed` to `KeyBasis`, retain the selected collapsed column coordinate, and store exact `shared` and `possible` counts. Serialize those counts as the normalized ratio `shared / min(old_rows, new_rows)` while preserving `Eq` on the result model. Declared keys have no overlap.
-- [x] **Expose every resolved key in human output.** Lead output with `col_key(declared: [...])` for an explicit key or `col_key(guessed: ..., overlap: ...)` for a guessed key. Use the existing quoting rules for column names and serialize the same normalized overlap value used by JSON.
-- [x] **Make declaration an optional override.** Remove the CLI requirement that `--key` be present. An omitted flag attempts guessing; a supplied simple or compound key always takes precedence and is reported as `declared`, even when another column would be the strongest guess. Keep errors in an explicitly supplied key fatal rather than silently substituting a guess.
-- [x] **Integrate guessing through reconciliation.** Propagate the resolved basis, columns, and overlap from key resolution into `Diff.key`, while leaving schema identity, row matching, ordering, cell evidence, and edit summarization driven by the selected key exactly as they are for a declared key.
-- [x] **Complete the acceptance pass.** Add focused inline unit tests, library-level integration coverage, CLI coverage for omission and override, human and JSON snapshots, byte-identical repeated-output checks, and documentation examples. Run the full tests, strict Clippy, formatting, and diff checks.
+- [x] **Remove the JSON output path.** Delete `src/json.rs`, its `mod json;` declaration, and the `write_json` re-export from `src/lib.rs`. In `src/main.rs`, delete the `OutputFormat` enum, the `--format` argument, and the `clap::ValueEnum` import, leaving one unconditional `write_human` call that keeps its current error message and trailing newline.
+- [x] **Strip serialization from the result model.** In `src/model.rs`, remove the `use serde::Serialize` import, every `Serialize` derive, every `#[serde(...)]` attribute, and the three hand-written `impl Serialize` blocks for `Coordinate`, `CellCoordinate`, and `KeyOverlap`. Every field, constructor, and variant keeps its current name, visibility, and meaning; `KeyOverlap::ratio()` stays because `human.rs` reports it.
+- [x] **Prune dependencies left without a consumer.** Drop `serde` from `[dependencies]`, drop the unused `indoc` dev-dependency, and reduce `insta` to its default features once no `assert_json_snapshot!` remains. Keep `serde_json`, which `human::quote` still uses to quote and escape column names, and refresh `Cargo.lock`.
+- [x] **Rewrite the library integration tests against `Diff`.** Replace every `serde_json::to_value(diff)` assertion in `tests/diff.rs` with a direct assertion on the corresponding `Diff` field, building expected coordinates with the public `Coordinate::from_zero_based` and `CellCoordinate::from_zero_based`. Keep each surviving test's current granularity rather than collapsing them into whole-value comparisons, and remove the two tests that belong below it: delete the one whose claims are already made stage by stage, folding its composed claim into its neighbour, and move declared-key precedence into `key.rs`.
+- [x] **Restate the determinism guarantee.** Convert both byte-comparison tests to assert structural equality of the two `Diff` values and byte equality of their rendered human output, so determinism covers both the retained evidence and the artifact users actually see.
+- [x] **Rework CLI coverage around the single output format.** Update the help snapshot, convert the JSON-based process tests to human-output assertions, and delete the mixed-change JSON test that now only duplicates its human-format twin.
+- [x] **Prune the model's serialization-shape tests.** In `src/model.rs`, replace the JSON assertions with `positions()` and `ratio()` assertions where behavior is still observable, and delete the tests whose only subject was the JSON document shape.
+- [x] **Record the evidence deferral in `design.md`.** State that the CLI emits only the human format, that the complete cell-level change set is retained in the library `Diff` value, and that exposing that evidence to users again is future work.
+- [x] **Update the README.** Remove the JSON format from the summary, usage, and behavior sections, and add re-exposing the complete result to the list of things `data-diff` does not do yet.
+- [x] **Complete the acceptance pass.** Run the full test suite, strict Clippy, formatting, and diff checks, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-Make the common invocation work without requiring the user to know the row key when the inputs contain an eligible same-name single column:
+`data-diff` is a visual tool for humans, and `design.md` states that machine-readable output is not a goal of the final product. The JSON format was an early scaffold for inspecting the result before the human format existed; it now has no place in the product but still shapes the result model, the CLI surface, the dependency list, and almost every integration test.
+
+Remove it, leaving the human format as the only output, and leave behind a result model that carries exactly the same evidence with none of the serialization machinery:
 
 ```console
 data-diff old.parquet new.parquet
 ```
 
-`data-diff` should select the column with the strongest exact cross-table evidence, use it for reconciliation, and expose the selected basis and normalized overlap. A user who knows the correct identity can override the guess explicitly:
-
-```console
-data-diff old.parquet new.parquet --key account_id,revision
-```
-
-The guess is an evidence-backed input to the existing pipeline, not a schema or row event. Downstream reconciliation must receive the same canonical key values it receives today, so complete cell evidence and deterministic output retain their current meanings.
+This is a subtraction with no behavior change. Every diff that succeeds today succeeds afterwards, with byte-identical human output; every diff that fails today fails afterwards with the same message and exit status.
 
 # Scope
 
-This step adds automatic selection among provisional same-name identities. Rename inference and paired key names do not exist yet, so an identified candidate in this step is exactly one column name present once on each side. Added, dropped, and differently named columns are not candidates.
+The step removes the JSON output path and every fragment that existed only to serve it, then rewrites the tests that were written through it.
 
-The resolution rule is:
+## What is removed
 
-1. If `DiffOptions.key` is non-empty, validate and use it exactly as today.
-2. Otherwise, if either input has zero rows, return `MissingKey` without enumerating columns.
-3. Evaluate every same-name single-column pair.
-4. Discard a pair unless its types are compatible under `ComparisonPlan`.
-5. Discard a pair if either side contains null or `NaN`.
-6. Discard a pair unless its canonical values are unique on both sides.
-7. Compute the exact intersection size of its canonical old and new values and discard it when that size is zero.
-8. Select the greatest intersection size, breaking ties by old-column order.
-9. If no candidate remains, return `MissingKey`.
+* `src/json.rs`, including `write_json` and the `CompactArrayFormatter` that kept coordinate arrays on one line.
+* The `mod json;` declaration and the `pub use json::write_json;` re-export in `src/lib.rs`.
+* The `OutputFormat` enum, the `--format` flag, and the format match in `src/main.rs`.
+* Every `Serialize` derive, `#[serde(...)]` attribute, and hand-written `Serialize` implementation in `src/model.rs`.
+* The `serde` dependency, the unused `indoc` dev-dependency, and `insta`'s `json` feature.
 
-Uniqueness and overlap use values canonicalized for that specific old/new type pair. Thus cross-type representations such as string and integer may form a guessed key when the existing comparison rules make their values equal. Unparseable strings remain tagged string values and participate normally; missing values and `NaN` make the whole candidate ineligible.
+## What stays and why
 
-The normalized overlap is descriptive evidence:
+The result model keeps every type, field, constructor, and doc comment it has today. `cells`, `columns.identities`, `rows.matched`, and the rest retain their current meanings even though nothing prints them: they are the complete cell-level evidence that `design.md` treats as a central invariant, and the human format deliberately summarizes rather than enumerates them.
 
-```text
-overlap = shared_values / min(old_rows, new_rows)
-```
+`serde_json` stays in `[dependencies]`. `human::quote` uses `serde_json::to_string` to render column names as quoted, escaped JSON strings, which is what makes unusual names unambiguous in the human format. Hand-rolling that escaping to shed the dependency is a separate question and is not part of this step.
 
-It does not alter ranking because the denominator is the same for every candidate. An eligible guessed key always has a non-zero denominator and a ratio in `(0, 1]`.
+`Coordinate` and `CellCoordinate` keep their private `CoordinateRepr` and `CellCoordinateRepr` enums. Those enums are reachable from `from_zero_based` and `positions()`, so they are not dead code, and the collapsed old/new form is the coordinate vocabulary `design.md` uses throughout. Flattening them into plain old/new fields would be a behavior-preserving simplification, but it belongs with the step that decides how the retained evidence is displayed again, not with this removal.
 
-An explicit declaration is the override mechanism for this non-interactive step. A supplied key is never compared with guesses and never silently replaced when it is invalid. Existing missing-column, incompatible-type, missing-value, non-unique-old, and unsupported-fanout errors therefore retain their current behavior for declared keys.
+`KeyOverlap` keeps its exact `shared` and `possible` counts and its `ratio()` accessor. Exact counts are what preserve `Eq` on `KeyDiff` and `Diff`, and `human.rs` calls `ratio()` for the `overlap:` field.
 
-Explicitly deferred:
+## Explicitly deferred
 
-* row-number fallback and the audit of which reconciliation stages are valid without a semantic key;
-* paired old/new key components and rename-aware identities;
-* recovery from an invalid declared key via an issue plus a guessed fallback;
-* guessed compound keys;
-* accepting duplicate new-side values as bounded fanout;
-* candidate lists, interactive confirmation, and an in-process rerun UI;
-* sampling, budgets, approximate overlap, and partial key searches.
+* Re-exposing the complete cell-level diff, which will most likely be library-only access to `Diff`, possibly with public coordinate accessors.
+* Any change to what the human format prints, including rendering cells.
+* Removing `serde_json` by writing the string escaping by hand.
+* Simplifying the collapsed coordinate representations.
+* Compacting test table construction, which is the next queued step and must not be mixed into this one.
 
-Row-number fallback is the first item in `plan-next.md`. That step will decide how schema reconciliation, row and column ordering, changed-cell interpretation, edit summarization, rename inference, and incomplete-stage reporting behave when row position is the only basis. Reserve `col_key(row_number)` as its human representation, but do not emit it in this step.
+# Test-rewrite design
 
-Reuse the existing public `MissingKey` variant when automatic guessing is impossible or exhausts its candidates, and update its message so it explains that no key was supplied and no eligible key could be guessed. Errors in a non-empty declared key remain specific and fatal.
+## Library integration tests
 
-# Key-resolution design
+`tests/diff.rs` is rewritten rather than dropped alongside the format it was written through, because it is the only coverage of three things. It exercises the assembly in `diff_tables` itself, including the zero-based to one-based translation applied to every index: no unit test calls `diff_tables`, so an off-by-one there, or `old` and `new` swapped in one `Coordinate::from_zero_based` call, passes the entire unit suite. It observes the public fields no output prints — `cells`, `columns.identities`, `rows.matched`, `summary.optimal`, and the exact `key.overlap` counts — which after this step is the only place the retained cell-level evidence is observed at all, making this file the working guard on the invariant `design.md` is asked to restate below. And it checks cross-stage consistency on a single input, where the unit tests feed each stage hand-built inputs standing in for the previous one.
 
-## Declared path
+Delete `disjoint_keys_are_all_atomic_row_events`. Its classification assertions restate `rows.rs`'s `disjoint_keys_make_every_row_atomic` on the same fixture values, and its empty-`cells` assertion restates `cells.rs`'s `added_and_dropped_rows_do_not_manufacture_cells`. Its one composed claim — that a fully disjoint pair yields no cells and an empty summary through the public entry point — moves into `empty_inputs_preserve_schema_and_classify_the_other_side` as a fourth case, which is renamed `unmatched_rows_are_classified_without_cells_or_edits` and keeps its existing schema-retention assertion.
 
-Keep syntax validation and compound-key assembly separate from guessing. `validate_components()` continues to reject empty, paired, or repeated declared components. Each declared component continues to require a column on both sides, a compatible comparison plan, present values, and independent uniqueness.
+Move `an_explicit_key_overrides_a_stronger_eligible_guess` into `key.rs`. Declared-key precedence is a key-resolution rule, and `key.rs` currently asserts it only in `declared_keys_bypass_the_zero_row_guard`, which covers the zero-row case; nothing covers a declared key winning over a stronger eligible candidate on non-empty inputs. As a unit test it asserts the declared basis, the absent overlap, and the selected column on inputs where a different column is the stronger candidate. The downstream half of the integration test, that the weaker declared key then drives row matching, follows mechanically from the resolved key and is covered by `rows.rs`. Keep `automatic_resolution_without_an_eligible_key_is_an_error`: the absence of any usable key is worth pinning at the public entry point even though `key.rs` covers each ineligibility rule.
 
-The resolved internal key should carry:
+Move `a_guessed_key_stays_out_of_top_level_changed_cells` into `cells.rs` as `a_guessed_key_column_is_excluded_like_a_declared_one`. Key exclusion is a cell-comparison rule that `cells.rs` already covers for a declared key, and cell comparison cannot see the basis, so the claim needs a unit test with a guessed key rather than a whole-pipeline one. The test helper there gains a `changes_with` variant that resolves automatically when no key is named.
+
+Delete `summary_forces_and_coalesces_type_edits`; every claim it makes exists upstream. `cells.rs`'s `type_changes_are_independent_of_value_changes` covers a key column whose type changes without producing cells and a column that changes in both type and value, `schema.rs`'s `records_key_and_non_key_type_changes` covers type changes on and off the key, `summary.rs`'s `forced_columns_are_coalesced_before_optimization` covers forcing a cell-free type-changed column into the summary, and the CLI's `empty_files_still_report_type_only_schema_changes` now shows the whole path end to end as printed output.
+
+The remaining tests currently read the diff through `serde_json::to_value` and assert against `json!` literals with one-based coordinates. Each assertion becomes a direct comparison against the matching `Diff` field, with expected values built through the public constructors:
 
 ```rust
-struct ResolvedKey {
-    basis: KeyBasis,
-    columns: Vec<KeyColumn>,
-    old: Vec<Vec<CanonicalValue>>,
-    new: Vec<Vec<CanonicalValue>>,
-    overlap: Option<KeyOverlap>,
-}
+assert_eq!(
+    diff.columns.identities,
+    vec![
+        Coordinate::from_zero_based(0, 1),
+        Coordinate::from_zero_based(1, 0),
+    ]
+);
 ```
 
-Declared keys set `basis: Declared` and `overlap: None`. The public result continues to contain every component coordinate in declaration order.
+`from_zero_based` names its convention at every call site, so no local one-based helper is introduced. `Vec<usize>` fields such as `columns.added` and `rows.dropped` are already one-based and compare against plain vectors unchanged. `summary` compares against a constructed `EditSummary`, and `key` against a constructed `KeyDiff` including `Some(KeyOverlap { shared, possible })`, which replaces today's float assertion with exact counts.
 
-## Guessed candidates
+Assertions stay field-by-field at their current granularity. Comparing whole `Diff` values would force every test to spell out both schemas and would obscure what each test is about.
 
-Keep candidate evaluation in `key.rs`, next to canonicalization and validation, rather than coupling it to `schema.rs` or row matching. Once both row counts are known to be non-zero, enumerate old schema fields in position order, find the unique same-name field in the already name-validated new schema, and skip incompatible pairs.
+## Determinism
 
-Candidate rejection is ordinary control flow, not a `DiffError`: a nullable, duplicated, incompatible, or disjoint column simply is not a guess. Reuse small validation and intersection helpers where their semantics match declared-key validation, but retain declared errors with their current row and side context.
-
-Use stable hashes only as bucket indexes. Confirm canonical equality inside a bucket both when checking uniqueness and when counting cross-side matches. Because eligible candidates are unique on each side, every matched canonical value contributes exactly one to the intersection. Put this logic behind a small helper that accepts a value-hash function: production passes `stable_hash`, while tests pass a constant function to force every distinct value into one bucket and prove that collisions do not create duplicates or overlap.
-
-Store canonical columns in each candidate and move the winning vectors into `ResolvedKey`; do not canonicalize the winner a second time. Candidate comparison should use a tuple equivalent to:
-
-```text
-(Reverse(shared_values), old_column_position)
-```
-
-No `HashMap` or filesystem iteration order may influence enumeration, selection, or output.
-
-# Result and interface
-
-Extend `KeyBasis` with `Guessed`. Model overlap exactly:
+Today both determinism tests compare `serde_json::to_vec` output byte-for-byte. Restate the guarantee as two assertions over the same pair of runs:
 
 ```rust
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyOverlap {
-    pub shared: usize,
-    pub possible: usize,
-}
+assert_eq!(first, second);
+assert_eq!(render(&first), render(&second));
 ```
 
-`KeyDiff` stores `Option<KeyOverlap>`. `KeyOverlap` implements `Serialize` as the numeric quotient `shared / possible`, so guessed JSON remains compact:
+Structural equality of the two `Diff` values is the broader check: it covers the retained evidence the human format never prints, and because every field is `Eq` — including `KeyOverlap`, which stores counts rather than a float — the comparison is exact and total. Byte equality of `write_human` output preserves the guarantee in the form users observe. Both determinism tests, declared-key and guessed-key, get both assertions.
 
-```json
-{
-  "key": {
-    "basis": "guessed",
-    "columns": [3],
-    "overlap": 0.6666666666666666
-  }
-}
-```
+## Model unit tests
 
-The selected column uses the existing collapsed, one-based coordinate, so a same-name column moved from old position 1 to new position 3 is `[1, 3]`. Keeping overlap absent for declared keys avoids attaching guess-specific evidence to an explicit choice. Storing exact counts preserves `Eq` on `KeyOverlap`, `KeyDiff`, and `Diff`; the quotient can never be `NaN` or infinite because a guessed key has `possible > 0`.
+The tests in `src/model.rs` that assert a JSON document shape have no subject once serialization is gone:
 
-At the CLI boundary, `--key` keeps its comma-delimited syntax but is no longer required. Help and README text should explain that omission attempts one same-name guessed key, failure asks for `--key`, and an explicit declaration overrides guessing.
+* `coordinate_collapses_equal_positions` and `coordinate_retains_moved_positions` become assertions on `positions()`, which is `pub(crate)` and reachable from the inline test module.
+* `cell_collapses_when_both_positions_agree` and `cell_retains_both_positions_when_either_moves` are deleted. `CellCoordinate` has no accessor, and adding a `pub(crate)` one with no production caller would be dead code under strict Clippy. Cell coordinates remain covered by equality in `tests/diff.rs`.
+* `diff_serializes_in_stable_field_order` and `declared_keys_omit_overlap` are deleted; field order is not a property of a Rust value, and a declared key's absent overlap is asserted where keys are resolved.
+* `overlap_serializes_as_a_normalized_ratio` becomes a `ratio()` assertion.
+* `empty_summary_is_still_optimal` is unchanged.
 
-Human output always announces the resolved key before change operations. Column names use the existing JSON-string quoting so unusual names remain unambiguous:
+## CLI tests
 
-```text
-col_key(declared: ["account_id", "revision"])
-col_key(guessed: "customer_id", overlap: 0.6666666666666666)
-```
+* The help snapshot loses its `--format` line.
+* `compares_two_parquet_files_as_json` becomes a human-format test over an identical pair, asserting `col_key(declared: ["id"])` followed by `no_changes()`, a successful status, and empty stderr. It remains the one test that proves a clean run writes nothing to stderr.
+* `guesses_a_key_when_the_flag_is_omitted` keeps its human snapshot and loses the second invocation that re-ran the binary for JSON.
+* `reports_mixed_changes_from_real_parquet_files` is deleted. Its schema, row, and order assertions duplicate `reports_mixed_changes_in_human_format` on the same fixture shape, its cell and summary assertions duplicate `combines_schema_row_order_and_cell_changes` in `tests/diff.rs`, and its remaining assertion was about the compact-array JSON formatter.
+* `empty_files_still_report_type_only_schema_changes` becomes a human snapshot of the two type-only `col_edit` lines.
+* `reports_a_missing_key_when_nothing_can_be_guessed`, `failure_writes_context_only_to_stderr`, and `reports_mixed_changes_in_human_format` are unchanged.
 
-Only one line appears. `col_key` is informational context rather than a change operation, so `no_changes()` still follows it when no change operations exist. Declared keys use component declaration order; guessed keys use the selected old-side name and the same normalized overlap serialization as JSON. The future row-number step reserves `col_key(row_number)`.
+`use serde_json::json;` disappears from both `tests/cli.rs` and `tests/diff.rs`; the crate remains reachable there through `human::quote`'s dependency but nothing in the tests needs it.
 
-# Verification
+# Documentation
 
-Keep unit tests inline in `key.rs`. Use compact in-memory tables to cover:
+`design.md` gains the deferral. The introduction's first principle already says machine-readable output is not a goal; extend the cell-comparison section to say that the complete one-to-one change set is retained in the library result model, that no current output renders it, and that giving users access to it again is future work. The invariant now constrains the library rather than the CLI, and the wording should say so plainly.
 
-* an empty old side and an empty new side returning `MissingKey` before any candidate canonicalization;
-* one eligible same-type column;
-* compatible cross-type values;
-* rejection for null, `NaN`, duplicates on either side, incompatible types, and zero shared values;
-* preference for the largest exact intersection;
-* an equal-intersection tie resolved by old-column order;
-* forced hash collisions, using an injected constant hash function, that cannot create false duplicates or false overlap;
-* reuse of selected canonical values in the returned key;
-* declared compound keys bypassing the automatic zero-row check and guessing;
-* invalid declared keys retaining their existing errors;
-* no eligible automatic candidate returning `MissingKey`; and
-* repeated resolution returning the same candidate and exact overlap.
-
-Add library integration coverage showing that:
-
-* default options guess a key and correctly align reordered rows;
-* `Diff.key` reports `guessed`, the collapsed column coordinate, and exact overlap;
-* an explicit key overrides a stronger eligible guess and reports `declared`;
-* moved key columns retain paired coordinates through schema reconciliation;
-* a guessed key remains excluded from top-level changed cells;
-* empty automatic inputs and non-empty inputs without a candidate return `MissingKey`;
-* empty inputs still reconcile when a valid key is declared;
-* repeated complete comparisons serialize to byte-identical JSON.
-
-Add human-output snapshots for a declared compound key, a guessed key with normalized overlap followed by change operations, and each basis followed by `no_changes()` for identical tables. Verify quoting with at least one unusual declared or guessed column name.
-
-At the CLI boundary, update the help snapshot, add one successful invocation without `--key`, add one omitted-key failure that reports `MissingKey`, and keep one explicit-key invocation proving the override syntax. One compact JSON assertion is enough to cover the guessed basis and overlap; do not duplicate the full eligibility matrix outside `key.rs`.
-
-Update the README and demo guidance so the primary example exercises guessing and an adjacent example demonstrates `--key` as an override. Explain that no eligible guess currently fails and that row-number fallback is planned separately. Retain an explicit key in fixtures whose purpose depends on a particular compound key or on an error from a declared key.
+`README.md` loses JSON from its opening sentence, loses the `--format json` example and the paragraph introducing it, and states that the human format is the only output. Add re-exposing the complete result to the closing list of deferred capabilities. `demo/README.md` never mentioned JSON and needs no change beyond a read-through confirming its commands remain accurate.
 
 # Definition of done
 
 This step is complete when:
 
-* automatic resolution rejects an empty side before enumerating or canonicalizing candidates;
-* omitting a key deterministically selects the eligible same-name single column with the greatest exact shared-value count;
-* every guessed key is compatible, present, unique on both sides, and supported by at least one shared canonical value;
-* ties resolve by old-column order and repeated runs are byte-identical;
-* guessed results expose their basis, selected coordinate, exact overlap evidence, and normalized JSON and human ratios;
-* human output reports declared and guessed keys with the unified `col_key(...)` syntax;
-* an explicit simple or compound key takes precedence and retains strict validation;
-* absence of an eligible guess returns the existing `MissingKey` error;
-* row-number fallback is explicitly queued as a separate design and implementation step;
-* existing schema, row, cell, summary, and declared-key behavior remains covered;
-* documentation describes automatic guessing, explicit override, and the current no-guess limitation; and
+* `data-diff` accepts no `--format` flag and writes only the human format;
+* `src/json.rs`, `write_json`, and `OutputFormat` no longer exist;
+* no `Serialize` derive, `#[serde(...)]` attribute, or `Serialize` implementation remains in the crate;
+* `serde`, `indoc`, and `insta`'s `json` feature are gone from `Cargo.toml`, `serde_json` remains for `human::quote`, and `Cargo.lock` is refreshed;
+* the result model exposes the same types, fields, and constructors as before, with the complete cell-level evidence intact;
+* `tests/diff.rs` asserts against `Diff` values directly, carries no test whose claims are already made stage by stage, and both determinism tests assert structural equality of the diff and byte equality of its human output;
+* CLI coverage exercises the single output format, including a clean run, a guessed key, a declared key, a type-only change, and both failure paths;
+* human output for every existing fixture is byte-identical to what it produced before this step;
+* `design.md` records that the complete cell-level diff is retained in the library and that re-exposing it is future work;
+* the README describes the human format as the only output and lists re-exposing the complete result as deferred; and
 * the full test suite, strict Clippy, formatting, and diff checks pass.
