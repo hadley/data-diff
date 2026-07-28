@@ -7,7 +7,7 @@ operation-oriented summary.
 
 ```console
 data-diff old.parquet new.parquet
-> col_key(guessed: ["id"], overlap: 1.00)
+> col_key(["id"], basis: guessed, overlap: 1.00)
 > col_drop("product")
 > col_add("stock")
 > col_edit("price", values)
@@ -17,7 +17,7 @@ If you know what the primary key is (i.e. the set of variables that uniquely ide
 
 ```console
 data-diff old.parquet new.parquet --key customer_id,date
-> col_key(declared: ["customer_id", "date"])
+> col_key(["customer_id", "date"], basis: declared)
 > row_drop(4)
 > row_add(9)
 > row_edit(2)
@@ -29,7 +29,7 @@ Use a pair when the key column itself was renamed:
 
 ```console
 data-diff old.parquet new.parquet --key customer_id/id
-> col_key(declared: ["customer_id" -> "id"])
+> col_key(["customer_id" -> "id"], basis: declared)
 > col_rename("customer_id" -> "id")
 > row_edit(2)
 ```

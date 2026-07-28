@@ -20,7 +20,7 @@ The commands below use that installed `data-diff` binary.
 data-diff demo/basic-old.parquet demo/basic-new.parquet
 ```
 
-With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(guessed: ["id"], overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
+With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(["id"], basis: guessed, overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
 
 ## Declaring the key explicitly
 
@@ -28,7 +28,7 @@ With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and s
 data-diff demo/basic-old.parquet demo/basic-new.parquet --key id
 ```
 
-The same comparison with a declared key produces the same operations behind a `col_key(declared: ["id"])` line. An explicit `--key` always overrides guessing, which matters when the strongest same-name overlap is not the real row identity.
+The same comparison with a declared key produces the same operations behind a `col_key(["id"], basis: declared)` line. An explicit `--key` always overrides guessing, which matters when the strongest same-name overlap is not the real row identity.
 
 ## Scattered value edits
 
@@ -88,7 +88,7 @@ Both `price` and `cost` change in every row, which read alone would be two colum
 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
-col_key(declared: ["id"])
+col_key(["id"], basis: declared)
 col_rename("price" -> "cost")
 col_rename("cost" -> "price")
 col_order("price", 3 -> 2)
@@ -104,16 +104,17 @@ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet --key customer
 
 The key column is `customer_id` in the old file and `id` in the new one. A paired `--key` component names both, which identifies them as one column and lets the rows line up: the output is one `col_rename()` and the single row that changed.
 
-Without the pair the same files read as unrelated. Column identity is name equality, so `customer_id` is dropped, `id` is added, and the only guessable key left is `amount` — which reports the changed row as a drop and an add rather than an edit:
+Without the pair the rows no longer line up. Inference does still identify the two columns, their values agreeing in every row the files share, but it runs after the key has been resolved and so cannot supply one. The only guessable key is `amount`, and by the time the rename is worked out the rows have already been matched by it — which reports the changed row as a drop and an add rather than an edit:
 
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
-col_key(guessed: ["amount"], overlap: 0.67)
-col_drop("customer_id")
-col_add("id")
+col_key(["amount"], basis: guessed, overlap: 0.67)
+col_rename("customer_id" -> "id")
 row_drop(2)
 row_add(2)
 ```
+
+So the pair earns its keep even where inference would have found the rename anyway: naming both sides is what makes the identity available early enough to match rows with.
 
 ## Bounded fanout
 

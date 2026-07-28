@@ -41,6 +41,25 @@ Note that rows and columns are not exactly symmetrical. You can add, remove, and
 
 The `old` and `new` subscripts above say which side an operation's arguments come from, not which name is displayed. An operation about an identity is displayed under the column's new name, because that is the name the reader will find in the new data; an operation about an unmatched column uses the only name it has, so `col_drop()` shows the old name and `col_add()` the new one. `col_rename()` shows both, as `old -> new`, which is the same arrow every other old-to-new pair in the output uses.
 
+## Line grammar
+
+Every line the human format writes obeys one grammar:
+
+```
+line      := kind "(" [ argument { ", " argument } ] ")"
+argument  := value | field
+field     := name ": " value
+value     := quoted | number | word | pair | list | line
+pair      := value " -> " value
+list      := "[" [ value { ", " value } ] "]"
+```
+
+Two rules keep it regular, and both are load-bearing rather than stylistic. Every field carries a colon, so a keyword is never mistakable for a bare value. Field names are drawn from a fixed set — `basis`, `overlap`, `type` — rather than varying with what they describe, so `col_key(["id"], basis: guessed, overlap: 0.67)` rather than putting the basis in the name position.
+
+A `pair` always reads old to new, whether its sides are names, positions, or one position and a list of them. A `quoted` value is a JSON string, so any column name can be spelled exactly, including one holding a comma, a bracket, an arrow, or a newline. A `word` is an unquoted identifier, used for enumerated values and for flags such as the `values` in `col_edit("price", values)`.
+
+The grammar is written down because the format is not only an output. Hints let a user assert what reconciliation could not work out, and the notation they use is this one: a user resolving an ambiguity is reading the operation they want on their screen, and a generated hint has one grammar to target rather than two. Only a small subset is ever supplied — a kind applied to a name, or to a pair of names — but a format with one irregular verb is a reader with a permanent special case, which is why the two exceptions above were removed rather than documented.
+
 This vocabulary allows a single physical change to be described by multiple possible semantic changes. Here are a few examples of such ambiguities:
 
 * `row_edit()` vs `col_edit()`: You can represent a rectangular edit with either `row_edit()` or `col_edit()`. By default, we pick the most parsimonious description: does the change affect fewer rows or fewer columns?

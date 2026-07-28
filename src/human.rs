@@ -49,7 +49,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let mut details = Vec::new();
         if edit.type_changed {
             details.push(format!(
-                "type {} -> {}",
+                "type: {} -> {}",
                 column_type(&diff.schemas.old, old),
                 column_type(&diff.schemas.new, new)
             ));
@@ -133,7 +133,7 @@ fn key_context(diff: &Diff) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     match diff.key.basis {
-        KeyBasis::Declared => format!("col_key(declared: [{components}])"),
+        KeyBasis::Declared => format!("col_key([{components}], basis: declared)"),
         KeyBasis::Guessed => {
             // Rounded to two digits for display; `KeyOverlap` keeps the exact
             // shared and possible counts for anything that needs them.
@@ -142,7 +142,7 @@ fn key_context(diff: &Diff) -> String {
                 .overlap
                 .map(|overlap| overlap.ratio())
                 .unwrap_or(0.0);
-            format!("col_key(guessed: [{components}], overlap: {overlap:.2})")
+            format!("col_key([{components}], basis: guessed, overlap: {overlap:.2})")
         }
     }
 }
@@ -172,6 +172,8 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use arrow_array::RecordBatch;
     use test_support::table;
 
@@ -199,6 +201,75 @@ mod tests {
         render_with(old, new, &["id"])
     }
 
+    /// The `name` of every `name: value` field in some rendered output.
+    ///
+    /// Fields are the one place the grammar could drift, so they are read back
+    /// out of the rendering rather than trusted. Column names are not allowed
+    /// to contain `": "` in the fixtures this is used on, which keeps the scan
+    /// from mistaking a quoted name for a field.
+    fn field_names(output: &str) -> BTreeSet<&str> {
+        output
+            .match_indices(": ")
+            .filter_map(|(end, _)| {
+                let start = output[..end]
+                    .rfind(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .map_or(0, |position| position + 1);
+                (start < end).then(|| &output[start..end])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_field_name_comes_from_the_fixed_set() {
+        let old = table! {
+            "id" => [1, 2, 4],
+            "drop" => ["x", "y", "z"],
+            "value" => i32[10, 20, 40],
+        };
+        let new = table! {
+            "value" => [21, 11, 30],
+            "id" => [2, 1, 3],
+            "add" => ["a", "b", "c"],
+        };
+        let guessed = table! {
+            "id" => [3, 1, 4],
+            "value" => [31, 10, 40],
+        };
+        let key_only = table! { "id" => [1, 2] };
+        let renamed_old = table! {
+            "id" => [1, 2, 3],
+            "amount" => [10, 20, 30],
+        };
+        let renamed_new = table! {
+            "id" => [1, 2, 3],
+            "total" => [10, 20, 30],
+        };
+        let fanned_old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let fanned_new = table! {
+            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "value" => [0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0],
+        };
+
+        // Every line kind the renderer can write, so a field introduced
+        // anywhere in the format has to show up in this set.
+        let rendered = [
+            render(&old, &new),
+            render_with(&old, &guessed, &[]),
+            render(&key_only, &key_only),
+            render(&renamed_old, &renamed_new),
+            render(&fanned_old, &fanned_new),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            field_names(&rendered),
+            BTreeSet::from(["basis", "overlap", "type"])
+        );
+    }
+
     #[test]
     fn writes_mixed_changes_as_one_operation_per_line() {
         let old = table! {
@@ -213,11 +284,11 @@ mod tests {
         };
 
         insta::assert_snapshot!(render(&old, &new), @r#"
-        col_key(declared: ["id"])
+        col_key(["id"], basis: declared)
         col_drop("drop")
         col_add("add")
         col_order("value", 3 -> 1)
-        col_edit("value", type "Int32" -> "Int64", values)
+        col_edit("value", type: "Int32" -> "Int64", values)
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
@@ -233,7 +304,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &["group", "id"]),
-            "col_key(declared: [\"group\", \"id\"])\nno_changes()"
+            "col_key([\"group\", \"id\"], basis: declared)\nno_changes()"
         );
     }
 
@@ -249,7 +320,7 @@ mod tests {
         };
 
         insta::assert_snapshot!(render_with(&old, &new, &[]), @r#"
-        col_key(guessed: ["id"], overlap: 0.67)
+        col_key(["id"], basis: guessed, overlap: 0.67)
         row_drop(2)
         row_add(3)
         row_order(3 -> 1)
@@ -263,7 +334,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &[]),
-            "col_key(guessed: [\"line\\n\\\"quoted\\\"\"], overlap: 1.00)\nno_changes()"
+            "col_key([\"line\\n\\\"quoted\\\"\"], basis: guessed, overlap: 1.00)\nno_changes()"
         );
     }
 
@@ -279,7 +350,7 @@ mod tests {
         };
 
         insta::assert_snapshot!(render(&old, &new), @r#"
-        col_key(declared: ["id"])
+        col_key(["id"], basis: declared)
         row_drop(11)
         row_add(12)
         row_fanout(4 -> [4, 5], values)
@@ -301,7 +372,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key(declared: [\"id\"])\nrow_fanout(4 -> [4, 5])"
+            "col_key([\"id\"], basis: declared)\nrow_fanout(4 -> [4, 5])"
         );
     }
 
@@ -322,12 +393,12 @@ mod tests {
         // operation about a surviving column names it as "new" does; only the
         // dropped column keeps its old name, having no other.
         insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @r#"
-        col_key(declared: ["customer_id" -> "id"])
+        col_key(["customer_id" -> "id"], basis: declared)
         col_rename("customer_id" -> "id")
         col_drop("gone")
         col_add("fresh")
         col_order("value", 3 -> 1)
-        col_edit("value", type "Int32" -> "Int64", values)
+        col_edit("value", type: "Int32" -> "Int64", values)
         "#);
     }
 
@@ -346,7 +417,7 @@ mod tests {
         // compound key over two, so the two must not render alike.
         assert_eq!(
             render_with(&old, &new, &["a/b"]),
-            "col_key(declared: [\"a\" -> \"b\"])\ncol_rename(\"a\" -> \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
+            "col_key([\"a\" -> \"b\"], basis: declared)\ncol_rename(\"a\" -> \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
         );
     }
 
@@ -365,7 +436,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key(declared: [\"id\"])\nrow_edit(2)"
+            "col_key([\"id\"], basis: declared)\nrow_edit(2)"
         );
     }
 
@@ -378,7 +449,7 @@ mod tests {
 
         assert_eq!(
             render(&table, &table),
-            "col_key(declared: [\"id\"])\nno_changes()"
+            "col_key([\"id\"], basis: declared)\nno_changes()"
         );
     }
 
@@ -392,7 +463,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key(declared: [\"id\"])\ncol_drop(\"line\\n\\\"quoted\\\"\")"
+            "col_key([\"id\"], basis: declared)\ncol_drop(\"line\\n\\\"quoted\\\"\")"
         );
     }
 }

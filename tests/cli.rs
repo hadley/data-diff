@@ -52,7 +52,7 @@ fn compares_two_identical_parquet_files() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     no_changes()
     "#);
 }
@@ -81,7 +81,7 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(guessed: ["id"], overlap: 0.67)
+    col_key(["id"], basis: guessed, overlap: 0.67)
     row_drop(3)
     row_add(3)
     row_edit(2)
@@ -157,7 +157,7 @@ fn reports_mixed_changes_in_human_format() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     col_drop("drop")
     col_add("add")
     col_order("value", 2 -> 1)
@@ -193,7 +193,7 @@ fn reports_a_bounded_fanout() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     row_fanout(4 -> [4, 5], values)
     "#);
 }
@@ -227,7 +227,7 @@ fn infers_a_rename_from_the_values() {
     // No new rendering was needed: the rename falls out of an identity whose
     // two ends carry different names.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     col_rename("amount" -> "total")
     row_edit(2)
     "#);
@@ -260,7 +260,7 @@ fn infers_a_rename_that_carried_an_edit() {
     // The columns disagree in one row, which exact inference read as proof
     // that they were unrelated. The rename now absorbs the row it explains.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     col_rename("amount" -> "total")
     row_edit(7)
     "#);
@@ -295,7 +295,7 @@ fn infers_a_swap_between_two_rewritten_columns() {
     // Two columns that each changed in every row become one exchange, and the
     // move falls out of it: the column holding the prices is now second.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
+    col_key(["id"], basis: declared)
     col_rename("price" -> "cost")
     col_rename("cost" -> "price")
     col_order("price", 3 -> 2)
@@ -327,7 +327,7 @@ fn accepts_a_paired_key_component() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["customer_id" -> "id"])
+    col_key(["customer_id" -> "id"], basis: declared)
     col_rename("customer_id" -> "id")
     row_edit(2)
     "#);
@@ -357,7 +357,7 @@ fn guesses_a_key_that_fans_out() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(guessed: ["id"], overlap: 1.00)
+    col_key(["id"], basis: guessed, overlap: 1.00)
     row_fanout(4 -> [4, 5], values)
     "#);
 }
@@ -409,8 +409,8 @@ fn empty_files_still_report_type_only_schema_changes() {
 
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(declared: ["id"])
-    col_edit("id", type "Int32" -> "Int64")
-    col_edit("value", type "Int32" -> "Int64")
+    col_key(["id"], basis: declared)
+    col_edit("id", type: "Int32" -> "Int64")
+    col_edit("value", type: "Int32" -> "Int64")
     "#);
 }
