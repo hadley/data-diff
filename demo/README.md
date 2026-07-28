@@ -60,6 +60,14 @@ data-diff demo/types-old.parquet demo/types-new.parquet --key id
 `double`, while all canonical values remain equal. The result contains two
 type-only column edits and no changed cells.
 
+## A renamed column, worked out from the values
+
+```console
+data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
+```
+
+Nothing here declares that `amount` became `total`. They are identified as one column because they hold the same value in every row the two files share, which is the strongest evidence available that they are the same column. The `row_edit(2)` belongs to `note`: a column identified this way agrees everywhere by definition, so it can never be the source of a value change.
+
 ## A key column that was renamed
 
 ```console

@@ -85,6 +85,27 @@ fn main() {
         },
     );
 
+    // "amount" and "total" hold the same values in every matched row, which
+    // is what identifies them as one renamed column.
+    write(
+        &output,
+        "rename-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "amount" => [10, 20, 30],
+            "note" => ["ok", "ok", "ok"],
+        },
+    );
+    write(
+        &output,
+        "rename-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "total" => [10, 20, 30],
+            "note" => ["ok", "checked", "ok"],
+        },
+    );
+
     // The key column is called something different in each file, so only a
     // paired --key component can line these rows up.
     write(

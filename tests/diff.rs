@@ -258,6 +258,64 @@ fn an_excessive_fanout_rejects_the_declared_key() {
 }
 
 #[test]
+fn an_undeclared_rename_is_inferred_from_the_values() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "amount" => i32[10, 20, 30],
+        "note" => ["a", "b", "c"],
+    };
+    let new = table! {
+        "note" => ["a", "B", "c"],
+        "id" => [1, 2, 3],
+        "total" => [10, 20, 30],
+    };
+    let options = declared("id");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Nothing declared the pair: "amount" and "total" are one column because
+    // they agree in every matched row.
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+
+    // The rename changed type, which is an edit with no cells; the value
+    // change belongs to the other column, because an exactly inferred rename
+    // agrees everywhere by construction.
+    assert_eq!(
+        diff.columns.edited,
+        vec![
+            ColumnEdit {
+                column: Coordinate::from_zero_based(1, 2),
+                type_changed: true,
+                values_changed: false,
+            },
+            ColumnEdit {
+                column: Coordinate::from_zero_based(2, 0),
+                type_changed: false,
+                values_changed: true,
+            },
+        ]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 2, 1, 0)]
+    );
+    assert_eq!(diff.order.columns, vec![Coordinate::from_zero_based(2, 0)]);
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
 fn a_renamed_key_identifies_rows_across_both_files() {
     let old = table! {
         "customer_id" => [1, 2, 3],

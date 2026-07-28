@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use arrow_array::RecordBatch;
-use xxhash_rust::xxh3::xxh3_128_with_seed;
-
-use crate::compare::{CanonicalValue, ComparisonPlan, stable_hash};
+use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
 use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
+use arrow_array::RecordBatch;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedKey {
@@ -42,7 +40,7 @@ pub(crate) struct KeyIndex<'a> {
 
 impl<'a> KeyIndex<'a> {
     pub(crate) fn new(keys: &'a [Vec<CanonicalValue>]) -> Self {
-        Self::with_hash(keys, compound_hash)
+        Self::with_hash(keys, sequence_hash)
     }
 
     /// The bucketing is parameterized by its hash so a test can force every key
@@ -449,17 +447,6 @@ fn validate_fanout(old_keys: &[Vec<CanonicalValue>], new: &KeyIndex) -> Result<(
 /// inclusive at the limit.
 fn within_fanout_limit(affected: usize, shared: usize) -> bool {
     affected * 100 <= shared * MAX_FANOUT_PERCENT
-}
-
-pub(crate) fn compound_hash(key: &[CanonicalValue]) -> u128 {
-    let mut bytes = Vec::with_capacity(8 + key.len() * 24);
-    bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-    for component in key {
-        let hash = stable_hash(component).to_le_bytes();
-        bytes.extend_from_slice(&(hash.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&hash);
-    }
-    xxh3_128_with_seed(&bytes, 0)
 }
 
 #[cfg(test)]
