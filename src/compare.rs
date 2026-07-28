@@ -6,7 +6,7 @@ use arrow_cast::cast;
 use arrow_schema::DataType;
 use xxhash_rust::xxh3::xxh3_128_with_seed;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Kind {
     Boolean,
     Int,
@@ -14,7 +14,7 @@ enum Kind {
     String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Domain {
     Boolean,
     Int,
@@ -27,7 +27,7 @@ enum Domain {
 }
 
 /// A type-pair-specific equality and hashing plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ComparisonPlan {
     old: Kind,
     new: Kind,
@@ -371,6 +371,23 @@ impl StableHasher for Xxh3 {
 
 pub(crate) fn stable_hash(value: &CanonicalValue) -> u128 {
     hash_with(value, &Xxh3)
+}
+
+/// Hash an ordered sequence of values.
+///
+/// Lengths are written before the values they describe, so no two sequences
+/// share a byte encoding. Key tuples and whole columns are both sequences, and
+/// hashing them the same way keeps row identity and column identity on one
+/// definition of equality.
+pub(crate) fn sequence_hash(values: &[CanonicalValue]) -> u128 {
+    let mut bytes = Vec::with_capacity(8 + values.len() * 24);
+    bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        let hash = stable_hash(value).to_le_bytes();
+        bytes.extend_from_slice(&(hash.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&hash);
+    }
+    xxh3_128_with_seed(&bytes, 0)
 }
 
 fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {

@@ -199,6 +199,41 @@ fn reports_a_bounded_fanout() {
 }
 
 #[test]
+fn infers_a_rename_from_the_values() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "amount" => [10, 20, 30],
+        "note" => ["a", "b", "c"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "total" => [10, 20, 30],
+        "note" => ["a", "B", "c"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    // No new rendering was needed: the rename falls out of an identity whose
+    // two ends carry different names.
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["id"])
+    col_rename("amount" -> "total")
+    row_edit(2)
+    "#);
+}
+
+#[test]
 fn accepts_a_paired_key_component() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
@@ -224,7 +259,7 @@ fn accepts_a_paired_key_component() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
     col_key(declared: ["customer_id" -> "id"])
-    col_rename("customer_id", "id")
+    col_rename("customer_id" -> "id")
     row_edit(2)
     "#);
 }

@@ -7,6 +7,7 @@ mod input;
 mod key;
 mod model;
 mod order;
+mod rename;
 mod rows;
 mod schema;
 mod summary;
@@ -33,7 +34,8 @@ pub fn diff_tables(
     let schemas = validate_tables(old, new)?;
     let key = key::resolve_key(old, new, options)?;
     let rows = rows::match_rows(&key);
-    let schema = schema::reconcile_schema(old, new, &key)?;
+    let mut schema = schema::reconcile_schema(old, new, &key)?;
+    rename::infer_exact(old, new, &mut schema, &rows);
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
     let summary = summary::summarize(&cells);

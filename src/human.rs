@@ -19,7 +19,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let (old, new) = coordinate.positions();
         if raw_name(&diff.schemas.old, old) != raw_name(&diff.schemas.new, new) {
             operations.push(format!(
-                "col_rename({}, {})",
+                "col_rename({} -> {})",
                 column_name(&diff.schemas.old, old),
                 column_name(&diff.schemas.new, new)
             ));
@@ -315,7 +315,7 @@ mod tests {
         let new = table! {
             "value" => [11, 20, 30],
             "id" => [1, 2, 3],
-            "fresh" => [1, 2, 3],
+            "fresh" => [4, 5, 6],
         };
 
         // The key pair is renamed, and "value" is edited and reordered. Every
@@ -323,7 +323,7 @@ mod tests {
         // dropped column keeps its old name, having no other.
         insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @r#"
         col_key(declared: ["customer_id" -> "id"])
-        col_rename("customer_id", "id")
+        col_rename("customer_id" -> "id")
         col_drop("gone")
         col_add("fresh")
         col_order("value", 3 -> 1)
@@ -338,7 +338,7 @@ mod tests {
             "b" => [10, 20],
         };
         let new = table! {
-            "a" => [10, 20],
+            "a" => [30, 40],
             "b" => [1, 2],
         };
 
@@ -346,7 +346,7 @@ mod tests {
         // compound key over two, so the two must not render alike.
         assert_eq!(
             render_with(&old, &new, &["a/b"]),
-            "col_key(declared: [\"a\" -> \"b\"])\ncol_rename(\"a\", \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
+            "col_key(declared: [\"a\" -> \"b\"])\ncol_rename(\"a\" -> \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
         );
     }
 
