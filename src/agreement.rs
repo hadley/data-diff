@@ -1,8 +1,7 @@
 //! How far two columns agree over the rows their tables have in common.
 //!
-//! Rename and swap inference both ask the same question of a candidate pair,
-//! and both have to answer it identically on every run, so the measurement
-//! lives here rather than in either of them.
+//! Rename and swap inference ask the same question of a candidate pair, so the
+//! measurement lives here rather than in either of them.
 
 use std::collections::HashMap;
 
@@ -12,6 +11,12 @@ use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash};
 use crate::rows::RowMatches;
 
 /// The share of aligned rows a pair must agree in to be one column.
+///
+/// Being strict, this also fixes the smallest table an imperfect pair can be
+/// identified in: nine of ten rows is not *more* than nine in ten, so eleven
+/// aligned rows are needed before a single disagreement can be tolerated. A
+/// pair agreeing in every row clears it at any size. There is no separate row
+/// minimum, and `design.md` records why one was declined.
 pub(crate) const MIN_AGREEMENT_PERCENT: u64 = 90;
 
 /// The chance-corrected agreement a pair must reach as well.
@@ -20,29 +25,22 @@ pub(crate) const MIN_KAPPA_PERCENT: u64 = 80;
 /// The share of aligned rows a column must fall short of to read as rewritten.
 pub(crate) const MAX_EDITED_AGREEMENT_PERCENT: u64 = 50;
 
-/// What two aligned columns agree about, counted rather than proportioned.
+/// What two aligned columns agree about, as counts rather than proportions.
 ///
-/// The design states its rules as proportions: $p_o$ observed agreement, $p_e$
-/// expected agreement, and $\kappa = (p_o - p_e) / (1 - p_e)$. Keeping the
-/// counts they are derived from is what makes the answer reproducible.
-/// Expected agreement is a sum over a frequency map, and floating-point
-/// addition is not associative, so summing it in hash order would let its last
-/// bit depend on the iteration order of a `HashMap`. Integer addition has no
-/// such property, so the counts are exact and every threshold below is the
-/// design's inequality multiplied out into whole numbers.
+/// Counts are what makes the design's proportions reproducible. Expected
+/// agreement is a sum over a frequency map, and floating-point addition is not
+/// associative, so accumulating it in hash order would let its last bit follow
+/// the iteration order of a `HashMap`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Agreement {
     /// Rows compared, the $n$ the proportions are taken over.
     rows: u64,
     /// Rows whose two values are equal, so that $p_o$ is `agreeing / rows`.
     agreeing: u64,
-    /// $\sum_v c_{old}(v) \, c_{new}(v)$, so that $p_e$ is this over `rows`².
+    /// $\sum_v c_{old}(v) \, c_{new}(v)$, so that $p_e$ is this over $n^2$.
     ///
-    /// Wider than the other two because it counts pairs rather than rows: it
-    /// grows as $n^2$, and is compared against $n^2$, which leaves `u64` at
-    /// four billion rows. The row counts have no such ceiling worth minding —
-    /// multiplying one by a percentage stays inside `u64` past any table that
-    /// could be held in memory.
+    /// Wider than the row counts because it grows as $n^2$ and is compared
+    /// against $n^2$, which would exhaust `u64` at four billion rows.
     expected: u128,
 }
 
@@ -50,26 +48,8 @@ impl Agreement {
     /// Whether the pair agrees closely enough, and by enough more than chance,
     /// to be read as one column.
     ///
-    /// There is deliberately no minimum row count. `design.md` asked for
-    /// twenty aligned rows; the requirement was weighed and dropped. What a
-    /// minimum buys is control over the variance of $\kappa$, which is a point
-    /// estimate and knows nothing about sample size — two unrelated boolean
-    /// columns agreeing in ten of eleven rows do reach these thresholds, and
-    /// two fair coins do that about six times in a thousand. Reaching it in
-    /// practice needs low-cardinality columns, a table with barely more than
-    /// ten rows, and a candidate list long enough for a rare event to surface
-    /// in it, and those rarely coincide. A minimum, meanwhile, withholds a
-    /// correct rename from every small table, which is the commoner case.
-    ///
-    /// Renames keep a floor regardless, because [`MIN_AGREEMENT_PERCENT`] is a
-    /// strict inequality: below eleven aligned rows an imperfect pair cannot
-    /// clear nine-in-ten at all, so approximate inference can only re-derive
-    /// what exact inference already settled. Swaps have no such floor, a
-    /// perfect cross-match clearing the threshold at any size, which is the
-    /// standard exact rename inference has always been held to.
-    ///
-    /// This is the bar for an *imperfect* match. Exact inference does not
-    /// apply it: complete agreement needs no correcting for chance.
+    /// This is the bar for an *imperfect* match. Exact inference does not apply
+    /// it, complete agreement having no element of chance to correct for.
     pub(crate) fn is_close(&self) -> bool {
         self.informative()
             && self.observed_above(MIN_AGREEMENT_PERCENT)
@@ -78,11 +58,10 @@ impl Agreement {
 
     /// Whether the pair agrees in so few rows that it reads as rewritten.
     ///
-    /// This is not the negation of [`Agreement::is_close`]. The gap between
-    /// them is deliberate: a pair that agrees in most rows but not nearly all
-    /// of them is evidence of nothing in particular, and neither stage should
-    /// act on it. Nothing compared is likewise nothing to act on, and falls
-    /// out of the arithmetic: with no rows, neither side of this is above zero.
+    /// Not the negation of [`Agreement::is_close`]: the gap between them is
+    /// deliberate, a pair agreeing in most rows but not nearly all of them
+    /// being evidence of nothing in particular. With nothing compared, neither
+    /// side rises above zero and neither predicate holds.
     pub(crate) fn is_distant(&self) -> bool {
         self.agreeing * 100 < self.rows * MAX_EDITED_AGREEMENT_PERCENT
     }
@@ -92,12 +71,9 @@ impl Agreement {
     /// Expected agreement reaches one exactly when both columns hold a single
     /// value in every aligned row — two all-null columns being the case worth
     /// naming. Such values narrow nothing down, so they cannot tell one
-    /// candidate from another, and $\kappa$ is undefined there.
-    ///
-    /// That makes this fatal to an imperfect match, which has no other way to
-    /// know how much of its agreement was luck, but not to a perfect one,
-    /// which needs no such correction. Exact inference therefore consults this
-    /// only to decide whether a pairing is arbitrary.
+    /// candidate from another, and leave $\kappa$ undefined. Exact inference,
+    /// needing no $\kappa$, consults this only to decide whether a pairing was
+    /// arbitrary.
     pub(crate) fn informative(&self) -> bool {
         self.expected < self.pairs()
     }
@@ -107,15 +83,20 @@ impl Agreement {
         self.agreeing * 100 > self.rows * percent
     }
 
-    /// $\kappa > \text{percent} / 100$, cleared of both denominators.
+    /// Whether $\kappa$, the agreement left once chance is discounted, exceeds
+    /// `percent`.
     ///
-    /// Multiplying $(p_o - p_e) / (1 - p_e) > k$ through by $n^2 (1 - p_e)$
-    /// preserves the direction only while $p_e < 1$, so [`Self::informative`]
-    /// has to be established first; `is_close` does that. That leaves
-    /// $100 (mn - S) > k (n^2 - S)$, whose differences are then moved across
-    /// to leave every term non-negative — the two sides below — so the whole
-    /// test stays in unsigned arithmetic and needs no conversion that could
-    /// truncate.
+    /// $\kappa = (p_o - p_e) / (1 - p_e)$ measures observed agreement against
+    /// the agreement two unrelated columns would have stumbled into anyway,
+    /// given how often each of their values occurs. It reads 1 when every row
+    /// agrees and 0 when the rows agree no more often than those frequencies
+    /// predict, so a pair of nearly constant columns cannot look identified
+    /// merely by coinciding almost everywhere. Undefined at $p_e = 1$, where
+    /// [`Self::informative`] must have ruled the pair out already.
+    ///
+    /// Clearing the denominators gives $100 (mn - S) > k (n^2 - S)$; moving
+    /// both differences across leaves every term non-negative, keeping the
+    /// comparison in unsigned arithmetic.
     fn kappa_above(&self, percent: u64) -> bool {
         let observed = u128::from(self.agreeing) * u128::from(self.rows);
         let percent = u128::from(percent);
