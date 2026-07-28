@@ -78,7 +78,7 @@ We can reduce this problem by encouraging the user to commit changes in smaller 
 
 * `col_rename()` is applied before resolving keys, so we can match rows even if key column names have changed.
 * `col_add()` and `col_drop()` remove columns from rename inference, both improving performance and preventing false matches.
-* `col_edit()` prevents us from interpreting the column as part of a swap and simplifies how we display value changes.
+* `col_edit()` prevents us from interpreting the column as part of a swap and simplifies how we display value changes. So does any hinted identity: every other exclusion from swap inference concerns a default reconciliation chose, which better evidence may override, while a hint is an instruction and inference does not overrule one.
 
 With those preliminaries in place, we can outline the full reconciliation process:
 
@@ -172,7 +172,7 @@ We detect conflicts across the complete hint set before mutating the identity ma
 
 Valid rename identities are applied before key resolution. Valid add/drop reservations later remove their endpoints from rename-inference candidates. A `col_add(new.b)` plus `col_drop(old.a)` is not contradictory: together they explicitly choose replacement rather than rename. Edit hints are validated after schema and cell changes are known and may coexist with renames. If an edited identity has neither a type nor value change, we ignore the hint.
 
-Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_no_change`, and `hint_unresolved_identity`. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
+Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_incompatible_types`, `hint_no_change`, and `hint_unresolved_identity`. A hint claiming an identity between columns whose types cannot be compared is declined like any other hint the data does not support, rather than failing the comparison: an accepted identity is used for cell comparison, which would otherwise abort on a pair it cannot compare. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
 
 ## Key resolution
 

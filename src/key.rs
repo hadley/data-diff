@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
-use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
+use crate::hint::Hints;
+use crate::{DiffError, KeyBasis, KeyOverlap, Side};
 use arrow_array::RecordBatch;
 
 #[derive(Clone, Debug)]
@@ -77,12 +78,12 @@ impl<'a> KeyIndex<'a> {
 pub(crate) fn resolve_key(
     old: &RecordBatch,
     new: &RecordBatch,
-    options: &DiffOptions,
+    components: &[Component],
+    hints: &Hints,
 ) -> Result<ResolvedKey, DiffError> {
-    if options.key.is_empty() {
-        return guess_key(old, new);
+    if components.is_empty() {
+        return guess_key(old, new, hints);
     }
-    let components = validate_components(&options.key)?;
     let mut columns = Vec::with_capacity(components.len());
     let mut old_components = Vec::with_capacity(components.len());
     let mut new_components = Vec::with_capacity(components.len());
@@ -90,8 +91,7 @@ pub(crate) fn resolve_key(
     for component in components {
         // Each endpoint is resolved on its own side, so a missing column is
         // reported as the half that is missing rather than as the whole pair.
-        let old_index = column_index(old, component.old, Side::Old)?;
-        let new_index = column_index(new, component.new, Side::New)?;
+        let (old_index, new_index) = component_endpoints(old, new, component, hints)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
         let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
@@ -110,6 +110,12 @@ pub(crate) fn resolve_key(
         });
     }
 
+    // Uniqueness is checked again on the resolved coordinates, not only on the
+    // names. Two components can name different columns and land on the same
+    // one: `--key id,customer_id` with a `customer_id -> id` hint resolves both
+    // through that identity, which the name check cannot see.
+    validate_distinct(&columns)?;
+
     let old_keys = transpose(old.num_rows(), &old_components);
     let new_keys = transpose(new.num_rows(), &new_components);
     validate_present(&old_keys, &columns, Side::Old)?;
@@ -126,13 +132,130 @@ pub(crate) fn resolve_key(
     })
 }
 
-/// Select the eligible same-name single column that shares the most key values.
+/// The name pairs a declared key asserts on its own, one per component.
+///
+/// A component claims an identity even when it names one column: `id` claims
+/// that old `id` and new `id` are the same column, which a hint can contradict
+/// just as a paired component can.
+///
+/// It claims that only where it can, though. A component naming a column one
+/// side does not have asserts nothing, because it cannot be resolved by name at
+/// all — that is the case a hint is there to settle, and treating it as a claim
+/// would have the key contradicting the very hint it depends on.
+pub(crate) fn claims(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    components: &[Component],
+) -> Vec<(String, String)> {
+    components
+        .iter()
+        .filter(|component| {
+            position(old, &component.old).is_some() && position(new, &component.new).is_some()
+        })
+        .map(|component| (component.old.clone(), component.new.clone()))
+        .collect()
+}
+
+/// Key resolution as it looks to tests whose subject is not hints.
+#[cfg(test)]
+pub(crate) mod testing {
+    use arrow_array::RecordBatch;
+
+    use super::{Hints, ResolvedKey, declared_components};
+    use crate::{DiffError, DiffOptions};
+
+    /// Resolve a key from options alone, with no hints in play.
+    ///
+    /// Reconciliation resolves hints first and passes them in. Keeping this
+    /// under the same name spares every test that predates hints from
+    /// restating "and no hints" at each of its call sites.
+    pub(crate) fn resolve_key(
+        old: &RecordBatch,
+        new: &RecordBatch,
+        options: &DiffOptions,
+    ) -> Result<ResolvedKey, DiffError> {
+        let components = declared_components(&options.key)?;
+        super::resolve_key(old, new, &components, &Hints::default())
+    }
+}
+
+/// Resolve one component's endpoints, consulting hints where a name is absent.
+///
+/// A component names a column on each side, which is usually the same name
+/// twice. Where one side lacks it, a hint identity whose other end carries it
+/// supplies the missing endpoint — which is what lets `--key id` work when the
+/// old file still calls that column something else.
+fn component_endpoints(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    component: &Component,
+    hints: &Hints,
+) -> Result<(usize, usize), DiffError> {
+    let old_found = position(old, &component.old);
+    let new_found = position(new, &component.new);
+    let old_index = match (old_found, new_found) {
+        (Some(index), _) => index,
+        (None, Some(new_index)) => hints
+            .old_for_new(new_index)
+            .ok_or_else(|| missing_key_column(Side::Old, &component.old))?,
+        (None, None) => return Err(missing_key_column(Side::Old, &component.old)),
+    };
+    let new_index = match new_found {
+        Some(index) => index,
+        None => hints
+            .new_for_old(old_index)
+            .ok_or_else(|| missing_key_column(Side::New, &component.new))?,
+    };
+    Ok((old_index, new_index))
+}
+
+/// Reject a key whose components resolved to the same column twice.
+fn validate_distinct(columns: &[KeyColumn]) -> Result<(), DiffError> {
+    let mut old_seen = HashSet::new();
+    let mut new_seen = HashSet::new();
+    for column in columns {
+        if !old_seen.insert(column.old) {
+            return Err(DiffError::DuplicateKeyColumn {
+                side: Side::Old,
+                column: column.component.clone(),
+            });
+        }
+        if !new_seen.insert(column.new) {
+            return Err(DiffError::DuplicateKeyColumn {
+                side: Side::New,
+                column: column.component.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn missing_key_column(side: Side, component: &str) -> DiffError {
+    DiffError::MissingKeyColumn {
+        side,
+        component: component.to_owned(),
+    }
+}
+
+fn position(table: &RecordBatch, name: &str) -> Option<usize> {
+    table
+        .schema()
+        .fields()
+        .iter()
+        .position(|field| field.name() == name)
+}
+
+/// Select the eligible identified single column that shares the most key values.
 ///
 /// Ranking follows the evidence: the candidate identifying the most rows across
 /// the two files wins, and freedom from fanout only settles a tie. A true key
 /// that duplicated one row is a better guess than a column that happens to be
 /// unique but identifies far fewer rows.
-fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffError> {
+fn guess_key(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    hints: &Hints,
+) -> Result<ResolvedKey, DiffError> {
     if old.num_rows() == 0 || new.num_rows() == 0 {
         return Err(DiffError::MissingKey);
     }
@@ -154,11 +277,19 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch) -> Result<ResolvedKey, DiffEr
     let new_schema = new.schema();
     let mut best: Option<Candidate> = None;
     for (old_index, old_field) in old.schema().fields().iter().enumerate() {
-        let Some(new_index) = new_schema
+        // An identified column, which a hint may have identified across a
+        // rename; a name whose counterpart a hint claimed for another column is
+        // not this column's to use.
+        let by_name = new_schema
             .fields()
             .iter()
             .position(|field| field.name() == old_field.name())
-        else {
+            .filter(|&index| {
+                hints
+                    .old_for_new(index)
+                    .is_none_or(|owner| owner == old_index)
+            });
+        let Some(new_index) = hints.new_for_old(old_index).or(by_name) else {
             continue;
         };
         let old_column = old.column(old_index);
@@ -308,11 +439,15 @@ fn first_occurrences<'a>(
 }
 
 /// One declared key component and the column it names on each side.
-struct Component<'a> {
+/// One declared key component, parsed but not yet resolved to columns.
+///
+/// Owned rather than borrowed because components are parsed before hints are
+/// considered and resolved after, so they outlive the strings they came from.
+pub(crate) struct Component {
     /// The component as the user wrote it, for messages about the pair.
-    spelling: &'a str,
-    old: &'a str,
-    new: &'a str,
+    spelling: String,
+    old: String,
+    new: String,
 }
 
 /// Parse each component and check that no column is claimed twice.
@@ -320,7 +455,7 @@ struct Component<'a> {
 /// Uniqueness is a property of the endpoints rather than of the component
 /// string: `id,id/other` claims `id` on the old side twice while spelling its
 /// components differently, and `a/b,c/b` claims `b` on the new side twice.
-fn validate_components(keys: &[String]) -> Result<Vec<Component<'_>>, DiffError> {
+pub(crate) fn declared_components(keys: &[String]) -> Result<Vec<Component>, DiffError> {
     let mut old_seen = HashSet::new();
     let mut new_seen = HashSet::new();
     let mut components = Vec::with_capacity(keys.len());
@@ -349,21 +484,13 @@ fn validate_components(keys: &[String]) -> Result<Vec<Component<'_>>, DiffError>
                 column: new.to_owned(),
             });
         }
-        components.push(Component { spelling, old, new });
+        components.push(Component {
+            spelling: spelling.clone(),
+            old: old.to_owned(),
+            new: new.to_owned(),
+        });
     }
     Ok(components)
-}
-
-fn column_index(table: &RecordBatch, name: &str, side: Side) -> Result<usize, DiffError> {
-    table
-        .schema()
-        .fields()
-        .iter()
-        .position(|field| field.name() == name)
-        .ok_or_else(|| DiffError::MissingKeyColumn {
-            side,
-            component: name.to_owned(),
-        })
 }
 
 fn transpose(rows: usize, columns: &[Vec<CanonicalValue>]) -> Vec<Vec<CanonicalValue>> {
@@ -453,13 +580,17 @@ fn within_fanout_limit(affected: usize, shared: usize) -> bool {
 mod tests {
     use test_support::{rows_without_columns, table};
 
-    use super::{KeyIndex, Overlap, candidate_overlap, resolve_key};
+    use super::testing::resolve_key;
+    use super::{KeyIndex, Overlap, candidate_overlap};
+    #[cfg(test)]
+    use crate::DiffOptions;
     use crate::compare::{CanonicalValue, stable_hash};
-    use crate::{DiffError, DiffOptions, KeyBasis, KeyOverlap, Side};
+    use crate::{DiffError, KeyBasis, KeyOverlap, Side};
 
     fn options(key: &[&str]) -> DiffOptions {
         DiffOptions {
             key: key.iter().map(|value| (*value).to_owned()).collect(),
+            hints: Vec::new(),
         }
     }
 

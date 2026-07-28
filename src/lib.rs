@@ -3,6 +3,7 @@
 mod agreement;
 mod cells;
 mod compare;
+mod hint;
 mod human;
 mod input;
 mod key;
@@ -20,8 +21,8 @@ pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, KeyBasis, KeyDiff, KeyOverlap,
-    NormalizedType, OrderDiff, RowsDiff, Schemas, Side,
+    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind, Issue,
+    IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -34,13 +35,18 @@ pub fn diff_tables(
     options: &DiffOptions,
 ) -> Result<Diff, DiffError> {
     let schemas = validate_tables(old, new)?;
-    let key = key::resolve_key(old, new, options)?;
+    // Hints resolve first, and against what the key already claims rather than
+    // beside it, so a rename can be asserted in time to identify rows through a
+    // key column the two files call different things.
+    let components = key::declared_components(&options.key)?;
+    let hints = hint::resolve(old, new, options, &key::claims(old, new, &components))?;
+    let key = key::resolve_key(old, new, &components, &hints)?;
     let rows = rows::match_rows(&key);
-    let mut schema = schema::reconcile_schema(old, new, &key)?;
+    let mut schema = schema::reconcile_schema(old, new, &key, &hints)?;
 
     // Both resolve column identity, before ordering and cells go on to read it
     rename::infer(old, new, &mut schema, &rows);
-    swap::infer(old, new, &mut schema, &rows);
+    swap::infer(old, new, &mut schema, &rows, &hints);
 
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
@@ -128,6 +134,7 @@ pub fn diff_tables(
                 )
             })
             .collect(),
+        issues: hints.issues,
         summary: EditSummary {
             optimal: summary.optimal,
             columns: summary

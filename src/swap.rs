@@ -4,6 +4,7 @@ use arrow_array::RecordBatch;
 
 use crate::agreement::Aligned;
 use crate::compare::ComparisonPlan;
+use crate::hint::Hints;
 use crate::rows::RowMatches;
 use crate::schema::{ColumnIdentity, SchemaMatches};
 
@@ -19,12 +20,13 @@ pub(crate) fn infer(
     new: &RecordBatch,
     schema: &mut SchemaMatches,
     rows: &RowMatches,
+    hints: &Hints,
 ) {
     if rows.matched.is_empty() {
         return;
     }
     let mut values = Aligned::new(old, new, rows);
-    let eligible = eligible(old, new, schema);
+    let eligible = eligible(old, new, schema, hints);
 
     let mut candidates = Vec::new();
     for (position, &first) in eligible.iter().enumerate() {
@@ -57,7 +59,18 @@ pub(crate) fn infer(
 /// carries different names at its ends — and could not qualify anyway, since
 /// inference only ever establishes identities that agree closely while a swap
 /// needs two that barely agree at all.
-fn eligible(old: &RecordBatch, new: &RecordBatch, schema: &SchemaMatches) -> Vec<usize> {
+///
+/// A hinted identity is excluded whatever its names are. Every other exclusion
+/// here is about a default reconciliation chose, which a swap may override on
+/// better evidence; a hint is not a default but an instruction, and inference
+/// does not get to overrule one. This only bites for a hint whose two ends carry
+/// the same name, every other hinted identity being ineligible already.
+fn eligible(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    schema: &SchemaMatches,
+    hints: &Hints,
+) -> Vec<usize> {
     let old_schema = old.schema();
     let new_schema = new.schema();
     schema
@@ -66,6 +79,7 @@ fn eligible(old: &RecordBatch, new: &RecordBatch, schema: &SchemaMatches) -> Vec
         .enumerate()
         .filter(|(_, identity)| {
             !identity.is_key
+                && !hints.asserted(identity.old, identity.new)
                 && old_schema.field(identity.old).name() == new_schema.field(identity.new).name()
         })
         .map(|(position, _)| position)
@@ -181,7 +195,8 @@ mod tests {
 
     use super::infer;
     use crate::DiffOptions;
-    use crate::key::resolve_key;
+    use crate::hint::Hints;
+    use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
     use crate::schema::{ColumnIdentity, SchemaMatches, reconcile_schema};
@@ -189,11 +204,12 @@ mod tests {
     fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(old, new, &key).unwrap();
-        infer(old, new, &mut schema, &rows);
+        let mut schema = reconcile_schema(old, new, &key, &Hints::default()).unwrap();
+        infer(old, new, &mut schema, &rows, &Hints::default());
         schema
     }
 
@@ -374,13 +390,14 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(&old, &new, &key).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key, &Hints::default()).unwrap();
         rename::infer(&old, &new, &mut schema, &rows);
         let inferred = schema.clone();
-        infer(&old, &new, &mut schema, &rows);
+        infer(&old, &new, &mut schema, &rows, &Hints::default());
 
         // "kept" was rewritten and "gone" became "fresh", and the two stages
         // do not interact: the inferred identity carries different names at
@@ -390,6 +407,35 @@ mod tests {
         assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
         assert!(schema.dropped.is_empty());
         assert!(schema.added.is_empty());
+    }
+
+    #[test]
+    fn a_hinted_identity_is_not_reinterpreted_as_a_swap() {
+        let old = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "a" => [30, 40],
+            "b" => [10, 20],
+        };
+
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            hints: vec!["col_rename(a -> a)".into()],
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+        let hints = crate::hint::resolve(&old, &new, &options, &[]).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key, &hints).unwrap();
+        infer(&old, &new, &mut schema, &rows, &hints);
+
+        // The values would read as an exchange, and a hint says otherwise. Every
+        // other exclusion here is about a default reconciliation chose; this one
+        // is about an instruction, which inference does not get to overrule.
+        assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
     }
 
     #[test]

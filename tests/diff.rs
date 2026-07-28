@@ -1,12 +1,20 @@
 use data_diff::{
     CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, FanoutEvent,
-    KeyBasis, KeyDiff, KeyOverlap, diff_tables, write_human,
+    HintKind, IssueKind, KeyBasis, KeyDiff, KeyOverlap, Side, diff_tables, write_human,
 };
 use test_support::table;
 
 fn declared(key: &str) -> DiffOptions {
     DiffOptions {
         key: vec![key.to_owned()],
+        hints: Vec::new(),
+    }
+}
+
+fn hinted(key: &[&str], hints: &[&str]) -> DiffOptions {
+    DiffOptions {
+        key: key.iter().map(|name| (*name).to_owned()).collect(),
+        hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
     }
 }
 
@@ -425,6 +433,7 @@ fn a_renamed_key_identifies_rows_across_both_files() {
     };
     let options = DiffOptions {
         key: vec!["customer_id/id".into()],
+        hints: Vec::new(),
     };
 
     let diff = diff_tables(&old, &new, &options).unwrap();
@@ -586,4 +595,212 @@ fn unmatched_rows_are_classified_without_cells_or_edits() {
         assert!(diff.cells.is_empty());
         assert_eq!(diff.summary, EditSummary::default());
     }
+}
+
+#[test]
+fn a_hint_identifies_a_column_inference_could_not_have() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "discount" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "markdown" => [99, 98, 97],
+    };
+    let options = hinted(&["id"], &[r#"col_rename("discount" -> "markdown")"#]);
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // No value agrees, so no amount of inference would have paired these. The
+    // hint is the only thing that knows.
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+        ]
+    );
+
+    // A hint asserts identity, not equality: the values that changed are now
+    // visible as an edit, which is what being unmatched was hiding.
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: false,
+            values_changed: true,
+        }]
+    );
+    assert_eq!(diff.cells.len(), 3);
+    assert!(diff.issues.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_hint_can_supply_a_renamed_key_column() {
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "value" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [3, 1, 2],
+        "value" => [30, 10, 21],
+    };
+    let options = hinted(&["id"], &["col_rename(customer_id -> id)"]);
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // `--key id` names a column the old file does not have. The hint is applied
+    // before the key is resolved, so the component finds its other endpoint
+    // through the identity rather than failing.
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Declared,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: None,
+        }
+    );
+    assert_eq!(
+        diff.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 2, 1)]
+    );
+}
+
+#[test]
+fn a_hint_the_key_contradicts_is_reported_and_dropped() {
+    let old = table! {
+        "id" => [1, 2],
+        "gone" => [10, 20],
+    };
+    let new = table! {
+        "code" => [1, 2],
+        "fresh" => [10, 20],
+    };
+    let options = hinted(&["id/code"], &["col_rename(id -> fresh)"]);
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // The key pairs old "id" with new "code"; the hint wants old "id"
+    // elsewhere. The key is what rows are identified by, so the hint gives way
+    // rather than taking the key's endpoint with it.
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(diff.issues.len(), 1);
+    assert_eq!(diff.issues[0].kind, IssueKind::ContradictoryHints);
+    assert_eq!(diff.issues[0].hints[0].kind, HintKind::Rename);
+
+    // "gone" and "fresh" agree in every row, so inference pairs them once the
+    // hint is out of the way.
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+        ]
+    );
+}
+
+#[test]
+fn a_missing_target_is_reported_without_failing_the_comparison() {
+    let old = table! {
+        "id" => [1, 2],
+        "discount" => [10, 20],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "markdown" => [99, 98],
+    };
+    let options = hinted(&["id"], &["col_rename(discount -> mrkdown)"]);
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.issues[0].kind,
+        IssueKind::HintMissingTarget {
+            side: Side::New,
+            column: "mrkdown".into(),
+        }
+    );
+    // Reconciliation carried on without the instruction, reporting the columns
+    // as what they look like absent one.
+    assert_eq!(diff.columns.dropped, vec![2]);
+    assert_eq!(diff.columns.added, vec![2]);
+}
+
+#[test]
+fn a_hint_can_be_guessed_as_the_key() {
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "value" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "value" => [10, 25, 30],
+    };
+    let options = hinted(&[], &["col_rename(customer_id -> id)"]);
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Key guessing considers identified columns, and a hint is what identified
+    // this one. Without the hint the only guessable key is "value", which reads
+    // the changed row as a drop and an addition.
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: Some(KeyOverlap {
+                shared: 3,
+                possible: 3,
+            }),
+        }
+    );
+    assert_eq!(diff.summary.rows, vec![Coordinate::from_zero_based(1, 1)]);
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+}
+
+#[test]
+fn a_rendered_rename_can_be_fed_back_as_a_hint() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "amount" => [10, 20, 30],
+        "note" => ["a", "b", "c"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "total" => [10, 20, 30],
+        "note" => ["a", "b", "c"],
+    };
+
+    // Inference finds this rename on its own, so the output carries a
+    // col_rename() line.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    let rendered = String::from_utf8(render(&inferred)).unwrap();
+    let line = rendered
+        .lines()
+        .find(|line| line.starts_with("col_rename("))
+        .expect("the rename is reported");
+    assert_eq!(line, r#"col_rename("amount" -> "total")"#);
+
+    // The claim of the format being an input language is that this line, taken
+    // exactly as printed, is a hint asserting what it describes.
+    let hinted = diff_tables(&old, &new, &hinted(&["id"], &[line])).unwrap();
+
+    assert_eq!(hinted.columns.identities, inferred.columns.identities);
+    assert!(hinted.issues.is_empty());
+    assert_eq!(render(&hinted), render(&inferred));
 }

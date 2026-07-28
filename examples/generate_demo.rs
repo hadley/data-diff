@@ -165,6 +165,27 @@ fn main() {
         },
     );
 
+    // "discount" became "markdown" and every value changed with it, so no
+    // evidence connects the two columns and only a hint can.
+    write(
+        &output,
+        "hint-rename-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "discount" => [10, 20, 30],
+            "note" => ["ok", "ok", "ok"],
+        },
+    );
+    write(
+        &output,
+        "hint-rename-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "markdown" => [99, 98, 97],
+            "note" => ["ok", "ok", "ok"],
+        },
+    );
+
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(

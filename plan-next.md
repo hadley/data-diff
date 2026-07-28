@@ -6,13 +6,14 @@ title: data-diff next steps
 
 Small things to fix in additional commits before the next big thing. These don't need a PR.
 
+* Only emit quotes in human output when needed
+
 # Next steps
 
 Each item below becomes its own detailed plan and dedicated branch from `main`. Implement only that plan, leave the result uncommitted for owner review, and do not start the following item until the owner has reviewed and committed the current work.
 
 Complete maintenance work and add reconciliation features in dependency order, giving each isolated fixtures, integration coverage, and determinism checks:
 
-1. Add validated `col_rename` hints, carrying the hint machinery every kind shares: parsing, normalization, deduplication, whole-group rejection of contradictory claims, and the issue channel with `hint_missing_target` and `contradictory_hints`.
 1. Add validated `col_add`, `col_drop`, and `col_edit` hints, extending conflict detection across all four kinds and adding the `hint_no_change` and `hint_unresolved_identity` issues.
 1. Flag the source of each column identity in the human format, so an inferred rename reads as the judgement it is rather than as a certainty, in the way a guessed key already does. The sources are the declared key pair, a rename hint, exact inference, and approximate inference; decide whether a swap is labelled as approximate inference or earns its own. Carry the source on the identity through to `Diff` rather than reconstructing it in the renderer, and settle how a swap renders, including whether the vocabulary's combined `col_rename([a, b], [b, a])` form should replace the two separate lines it produces today. Agreement statistics are deliberately not rendered: the thresholds put every accepted rename above 0.9, so the source carries the information and the number would only dress it up.
 1. Design and implement row-number fallback, explicitly deciding which reconciliation stages remain valid, must be skipped, or must report incomplete results without a semantic row key. This is also where a rejected declared key must stop discarding the identities its paired components asserted: separate component parsing and endpoint resolution from key validation, so those identities survive into the diff the fallback produces.

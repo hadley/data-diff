@@ -4,6 +4,7 @@ use arrow_array::RecordBatch;
 
 use crate::DiffError;
 use crate::compare::ComparisonPlan;
+use crate::hint::Hints;
 use crate::key::ResolvedKey;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,16 +26,29 @@ pub(crate) fn reconcile_schema(
     old: &RecordBatch,
     new: &RecordBatch,
     key: &ResolvedKey,
+    hints: &Hints,
 ) -> Result<SchemaMatches, DiffError> {
     let key_columns = key
         .columns
         .iter()
         .map(|column| (column.old, column.new))
         .collect::<HashMap<_, _>>();
+    // Key components and accepted hints reserve their identities before names
+    // are considered, so a declared pair or an asserted rename holds both its
+    // endpoints whatever they are called. Hints cannot contradict the key here,
+    // having already been rejected where they did.
+    let reserved = key_columns
+        .iter()
+        .map(|(&old_index, &new_index)| (old_index, new_index))
+        .chain(
+            hints
+                .identities
+                .iter()
+                .map(|identity| (identity.old, identity.new)),
+        )
+        .collect::<HashMap<_, _>>();
     let mut matched_new = vec![false; new.num_columns()];
-    // Key components reserve their identities before names are considered, so
-    // a declared pair holds both its endpoints whatever they are called.
-    for &new_index in key_columns.values() {
+    for &new_index in reserved.values() {
         matched_new[new_index] = true;
     }
     let mut result = SchemaMatches::default();
@@ -42,11 +56,11 @@ pub(crate) fn reconcile_schema(
     let new_schema = new.schema();
 
     for (old_index, old_field) in old_schema.fields().iter().enumerate() {
-        let new_index = match key_columns.get(&old_index) {
-            Some(&reserved) => Some(reserved),
-            // A same-named column that a pair already claimed is unavailable,
-            // which leaves this column unmatched rather than sharing an
-            // endpoint.
+        let new_index = match reserved.get(&old_index) {
+            Some(&claimed) => Some(claimed),
+            // A same-named column that a pair or a hint already claimed is
+            // unavailable, which leaves this column unmatched rather than
+            // sharing an endpoint.
             None => new_schema
                 .fields()
                 .iter()
@@ -87,15 +101,17 @@ mod tests {
     use test_support::table;
 
     use super::{ColumnIdentity, SchemaMatches, reconcile_schema};
-    use crate::key::resolve_key;
+    use crate::hint::Hints;
+    use crate::key::testing::resolve_key;
     use crate::{DiffError, DiffOptions};
 
     fn reconcile(old: &RecordBatch, new: &RecordBatch) -> Result<SchemaMatches, DiffError> {
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options)?;
-        reconcile_schema(old, new, &key)
+        reconcile_schema(old, new, &key, &Hints::default())
     }
 
     #[test]
@@ -147,6 +163,7 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["a/b".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
 
@@ -154,7 +171,7 @@ mod tests {
         // other side, but their endpoints are taken, so old "b" has nothing
         // left to match and new "a" is unclaimed.
         assert_eq!(
-            reconcile_schema(&old, &new, &key).unwrap(),
+            reconcile_schema(&old, &new, &key, &Hints::default()).unwrap(),
             SchemaMatches {
                 identities: vec![ColumnIdentity {
                     old: 0,
@@ -181,9 +198,10 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["customer_id/id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
-        let schema = reconcile_schema(&old, &new, &key).unwrap();
+        let schema = reconcile_schema(&old, &new, &key, &Hints::default()).unwrap();
 
         assert_eq!(
             schema.identities,

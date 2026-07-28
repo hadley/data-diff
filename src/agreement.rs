@@ -244,13 +244,14 @@ mod tests {
     use super::{Agreement, Aligned, MIN_AGREEMENT_PERCENT, MIN_KAPPA_PERCENT};
     use crate::DiffOptions;
     use crate::compare::ComparisonPlan;
-    use crate::key::resolve_key;
+    use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
 
     /// Measure the second column of each table against the other.
     fn measure(old: &RecordBatch, new: &RecordBatch) -> Agreement {
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
