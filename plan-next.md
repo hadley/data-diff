@@ -6,8 +6,6 @@ title: data-diff next steps
 
 Small things to fix in additional commits before the next big thing. These don't need a PR.
 
-* Simplify the README so it doesn't churn so much
-
 # Next steps
 
 Each item below becomes its own detailed plan and dedicated branch from `main`. Implement only that plan, leave the result uncommitted for owner review, and do not start the following item until the owner has reviewed and committed the current work.
