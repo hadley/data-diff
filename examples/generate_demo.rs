@@ -106,6 +106,46 @@ fn main() {
         },
     );
 
+    // "amount" and "total" agree in ten of the eleven shared rows, which is
+    // enough to identify them as one column that was renamed and edited.
+    write(
+        &output,
+        "approx-rename-old.parquet",
+        table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "amount" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+        },
+    );
+    write(
+        &output,
+        "approx-rename-new.parquet",
+        table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "total" => [10, 20, 30, 40, 50, 60, 99, 80, 90, 100, 110],
+        },
+    );
+
+    // Each column holds what the other used to, so the likelier account is one
+    // exchange rather than two columns rewritten from scratch.
+    write(
+        &output,
+        "swap-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "price" => [10, 20, 30],
+            "cost" => [1000, 2000, 3000],
+        },
+    );
+    write(
+        &output,
+        "swap-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "price" => [1000, 2000, 3000],
+            "cost" => [10, 20, 30],
+        },
+    );
+
     // The key column is called something different in each file, so only a
     // paired --key component can line these rows up.
     write(

@@ -1,5 +1,6 @@
 //! Semantic diffs for tabular data.
 
+mod agreement;
 mod cells;
 mod compare;
 mod human;
@@ -11,6 +12,7 @@ mod rename;
 mod rows;
 mod schema;
 mod summary;
+mod swap;
 
 use arrow_array::RecordBatch;
 
@@ -35,7 +37,11 @@ pub fn diff_tables(
     let key = key::resolve_key(old, new, options)?;
     let rows = rows::match_rows(&key);
     let mut schema = schema::reconcile_schema(old, new, &key)?;
-    rename::infer_exact(old, new, &mut schema, &rows);
+
+    // Both resolve column identity, before ordering and cells go on to read it
+    rename::infer(old, new, &mut schema, &rows);
+    swap::infer(old, new, &mut schema, &rows);
+
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
     let summary = summary::summarize(&cells);

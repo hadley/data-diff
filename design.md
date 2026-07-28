@@ -68,15 +68,16 @@ With those preliminaries in place, we can outline the full reconciliation proces
 3. Resolve row keys.
 4. Match rows, including duplicate-key groups.
 5. Create aligned datasets for comparison.
-6. Detect column renaming.
-7. Determine row and column reordering.
-8. Determine value changes.
+6. Infer column renames.
+7. Infer column swaps.
+8. Determine row and column reordering.
+9. Determine value changes.
 
 ## Column identity model
 
 Column identity is a partial bijection $I \subseteq C_{old} \times C_{new}$: each old column and each new column appears in at most one pair. Paired key components and accepted rename hints reserve identities first. Remaining same-named columns receive provisional identities, and exact or approximate rename inference adds identities between unmatched columns.
 
-Swap detection atomically replaces two provisional same-name identities. For example, `old.a` → `new.a` and `old.b` → `new.b` become `old.a` → `new.b` and `old.b` → `new.a`. Because identity is a bipartite coordinate map rather than a name-to-name graph, this is not considered a rename cycle. Any hint or inference that would reuse an old or new endpoint is contradictory or ambiguous and cannot mutate the map.
+Swap inference atomically replaces two provisional same-name identities. For example, `old.a` → `new.a` and `old.b` → `new.b` become `old.a` → `new.b` and `old.b` → `new.a`. Because identity is a bipartite coordinate map rather than a name-to-name graph, this is not considered a rename cycle. Any hint or inference that would reuse an old or new endpoint is contradictory or ambiguous and cannot mutate the map.
 
 An unmatched old column is a drop and an unmatched new column is an addition. A rename is derived whenever the schema names at the ends of a final identity differ. Type changes, edits, cell coordinates, and column-order analysis attach to the final identity. The structured diff stores the complete final bijection in `columns.identities` using collapsed coordinates.
 
@@ -137,7 +138,7 @@ Row emptiness and schema emptiness are independent. We always compare schemas no
 
 If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist and have compatible types. No key can be guessed when either side is empty because there are no shared values.
 
-With no matched rows, value-based rename inference is skipped as described below. Column order can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
+With no matched rows, value-based rename and swap inference are skipped as described below. Column order can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
 
 ## Initial hint processing
 
@@ -242,13 +243,19 @@ We first generate candidate lists of adds, drops, and edits, excluding the endpo
 
 ### Exact renames
 
-We hash each remaining removed and added column over the matched rows, then verify equal-hash pairs. A mutually unique exact pair becomes a `col_rename()`; ambiguous exact pairs are matched in column order and remain overrideable. Initially there is no minimum row-count or information-content requirement.
+We hash each remaining removed and added column over the matched rows, then verify equal-hash pairs. A mutually unique exact pair becomes a `col_rename()`; ambiguous exact pairs are matched in column order and remain overrideable. There is no minimum row-count requirement.
+
+There is no information-content requirement either. Two columns holding one repeated value — two all-null columns being the case worth naming — agree without that agreement narrowing anything down, and it is tempting to reject them for it. We do not: reporting them as a drop and an addition asserts two changes where one accounts for the evidence, and we prefer the more parsimonious reading wherever both fit. Chance correction belongs to imperfect matches, which need some way to tell how much of their agreement was luck. Complete agreement does not.
+
+Ambiguity is the exception, and the real content of the concern. When values cannot distinguish candidates, every constant column matches every other, so pairing them in column order is not resolving a tie between indistinguishable answers but choosing one relationship out of many equally good ones. We therefore accept an uninformative exact pair only when it is the only exact match available to both of its ends, and leave competing ones as additions and removals.
 
 ### Approximate renames
 
 Among remaining pairs, approximate rename-and-modify inference uses bounded candidate counts and matched rows. Candidate pairs are processed in deterministic endpoint groups. We accept a rename only after examining every candidate incident to both endpoints. If the pair budget is exhausted, completed groups remain accepted and incomplete endpoints remain unresolved. Large row sets use a deterministic key-based sample; completing inference over that sample is not budget exhaustion.
 
-Approximate inference requires at least 20 aligned pairs. All pairs count, including null/null agreements and null/present disagreements. With fewer rows, we retain additions/removals and record `approximate_rename_insufficient_rows`. The minimum is tunable.
+All aligned pairs count, including null/null agreements and null/present disagreements. There is no minimum row count. A minimum of 20 aligned pairs was specified and then rejected, which is recorded here so that it is not reintroduced as an oversight. What a minimum buys is control over the variance of $\kappa$, which is a point estimate and knows nothing about sample size: two unrelated boolean columns agreeing in ten of eleven rows do clear these thresholds, and two fair coins do that about six times in a thousand. Reaching that in practice needs low-cardinality columns, a table of barely more than ten rows, and a candidate list long enough for a rare event to surface, and those seldom coincide; a minimum, meanwhile, withholds a correct rename from every small table.
+
+Renames retain an implicit floor regardless, because $p_o > 0.9$ is strict: below eleven aligned rows an imperfect pair cannot exceed nine in ten at all, so approximate inference can only re-derive what exact inference has already settled.
 
 For each compatible pair in the sample, let $p_o$ be the observed proportion of equal values. Raw agreement is less informative for low-cardinality columns, where unrelated columns may often agree by chance, so we also calculate the expected agreement from the two columns' value frequencies:
 
@@ -268,11 +275,17 @@ A pair is a candidate if $p_o > 0.9$ and $\kappa > 0.8$. If $p_e = 1$, $\kappa$ 
 
 We accept only mutually unique candidates; overlapping candidates remain for the user rather than invoking a complex assignment algorithm.
 
-### Swaps
+## Swap inference
 
-We also test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when at least 20 aligned rows exist, both same-name pairs have $p_o < 0.5$, both cross-pairs have compatible types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
+We test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when both same-name pairs have $p_o < 0.5$, both cross-pairs have identical source types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
 
-Agreement, missing values, parsing, deterministic sampling, and expected agreement use the same rules as approximate rename inference. We accept a swap only when each involved column belongs to exactly one candidate; competing swaps remain unresolved for the user. An accepted swap atomically updates the identity bijection as described above, replacing the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. The 50%, 90%, 80%, and 20-row thresholds are tunable implementation parameters.
+The type requirement is stricter than rename inference's, which asks only for compatibility, and deliberately so. A cross-type rename relates two columns that would otherwise be a drop and an addition, related not at all; a swap instead overrides an identity that schema normalization already established, so it answers to a higher bar, and an exchange evidenced by values compared in their own representation is the cleaner claim. A swap therefore never carries a type change: columns that were both exchanged and retyped remain two `col_edit()` events, which describes them truthfully if less specifically.
+
+Rename inference consumes unmatched columns and produces identities; a swap consumes two identities and exchanges their ends. The two therefore cannot interact: an added column and a dropped column never share a name, because schema normalization matches equal names first, so an identity established by rename inference is never a same-name one and can never be a swap candidate. That both stages express their result as a `col_rename()` is a fact about the vocabulary, not about what they consume.
+
+Agreement, missing values, parsing, deterministic sampling, and expected agreement use the same rules as approximate rename inference, including the absence of a row minimum. Unlike renames, swaps have no implicit floor either: a cross-pair may agree perfectly, and a perfect crossing clears $p_o > 0.9$ at any number of rows. This is the standard exact rename inference has always been held to, and for the same reason — an exact crossing is not a coincidence a threshold needs to guard against.
+
+We accept a swap only when each involved column belongs to exactly one candidate; competing swaps remain unresolved for the user. An accepted swap atomically updates the identity bijection as described above, replacing the two `col_edit()` interpretations with `col_rename([a, b], [b, a])`. Exchanging the ends also moves each column's new position, so an accepted swap may produce a `col_order()` entry as well; that follows from the bijection rather than being asserted separately. The 50%, 90%, and 80% thresholds are tunable implementation parameters.
 
 ## Ordering changes
 

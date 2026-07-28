@@ -234,6 +234,75 @@ fn infers_a_rename_from_the_values() {
 }
 
 #[test]
+fn infers_a_rename_that_carried_an_edit() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "amount" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "total" => [10, 20, 30, 40, 50, 60, 99, 80, 90, 100, 110],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    // The columns disagree in one row, which exact inference read as proof
+    // that they were unrelated. The rename now absorbs the row it explains.
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["id"])
+    col_rename("amount" -> "total")
+    row_edit(7)
+    "#);
+}
+
+#[test]
+fn infers_a_swap_between_two_rewritten_columns() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "price" => [10, 20, 30],
+        "cost" => [1000, 2000, 3000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "price" => [1000, 2000, 3000],
+        "cost" => [10, 20, 30],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    // Two columns that each changed in every row become one exchange, and the
+    // move falls out of it: the column holding the prices is now second.
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(declared: ["id"])
+    col_rename("price" -> "cost")
+    col_rename("cost" -> "price")
+    col_order("price", 3 -> 2)
+    "#);
+}
+
+#[test]
 fn accepts_a_paired_key_component() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
