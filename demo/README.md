@@ -68,6 +68,34 @@ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
 
 Nothing here declares that `amount` became `total`. They are identified as one column because they hold the same value in every row the two files share, which is the strongest evidence available that they are the same column. The `row_edit(2)` belongs to `note`: a column identified this way agrees everywhere by definition, so it can never be the source of a value change.
 
+## A renamed column that was also edited
+
+```console
+data-diff demo/approx-rename-old.parquet demo/approx-rename-new.parquet --key id
+```
+
+`amount` and `total` disagree in one of the eleven shared rows, so the evidence for identifying them is strong but no longer perfect. Ten in eleven is more than the nine in ten a rename is asked for, and far more than unrelated columns of distinct values would reach by chance, so they are identified anyway and the row they disagree in becomes a `row_edit(7)`. Unlike the exact case above, an approximately identified column can be the source of a value change: that is what makes it approximate.
+
+Nothing here has to reach twenty rows or any other minimum. The threshold does impose one implicitly, though, since nine in ten has to be exceeded rather than met: below eleven rows, a single disagreement is already too many.
+
+## Two columns that swapped
+
+```console
+data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
+```
+
+Both `price` and `cost` change in every row, which read alone would be two columns rewritten from scratch. Each holds exactly what the other used to, so the likelier account is one exchange, and it is reported as the two renames it is:
+
+```console
+$ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
+col_key(declared: ["id"])
+col_rename("price" -> "cost")
+col_rename("cost" -> "price")
+col_order("price", 3 -> 2)
+```
+
+The `col_order()` line is not a separate claim. Identifying old `cost` with new `price` puts that column second where it used to be third, and column ordering reads positions off the identities like any other operation.
+
 ## A key column that was renamed
 
 ```console

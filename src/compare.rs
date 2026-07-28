@@ -34,7 +34,11 @@ pub(crate) struct ComparisonPlan {
     domain: Domain,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Hash` is derived rather than hand-written: `Eq` is derived too, and
+/// doubles are held as bits, so the two agree by construction. It counts value
+/// frequencies; [`stable_hash`] remains the hash that has to stay stable
+/// across runs and versions.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum CanonicalValue {
     Null,
     Boolean(bool),

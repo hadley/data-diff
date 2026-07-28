@@ -316,6 +316,104 @@ fn an_undeclared_rename_is_inferred_from_the_values() {
 }
 
 #[test]
+fn a_rename_is_inferred_despite_an_edit_it_carried() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "amount" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+        "note" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "total" => [99, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+        "note" => [99, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    };
+    let options = declared("id");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Ten of eleven rows agree, which exact inference rejected outright; the
+    // disagreement is now read as an edit the rename carried with it.
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+            Coordinate::from_zero_based(2, 2),
+        ]
+    );
+
+    // Unlike an exact rename, an approximate one has cells of its own, and
+    // they are summarized beside every other change in the row they fall in.
+    assert_eq!(
+        diff.cells,
+        vec![
+            CellCoordinate::from_zero_based(0, 1, 0, 1),
+            CellCoordinate::from_zero_based(0, 2, 0, 2),
+        ]
+    );
+    assert_eq!(
+        diff.summary,
+        EditSummary {
+            optimal: true,
+            columns: vec![],
+            rows: vec![Coordinate::from_zero_based(0, 0)],
+        }
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_swap_replaces_two_edits_with_two_renames() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "price" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+        "cost" => [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "price" => [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000],
+        "cost" => [99, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+    };
+    let options = declared("id");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Both columns changed in almost every row under their own names, and each
+    // holds what the other used to, so the identities cross.
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 1),
+        ]
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+
+    // The move is not asserted separately: exchanging the ends of two
+    // identities changes where each column sits, and ordering reads that off
+    // the bijection like any other.
+    assert_eq!(diff.order.columns, vec![Coordinate::from_zero_based(2, 1)]);
+
+    // One crossing is imperfect, so the swap keeps the cell it could not
+    // explain rather than claiming the columns match exactly.
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(0, 1, 0, 2)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
 fn a_renamed_key_identifies_rows_across_both_files() {
     let old = table! {
         "customer_id" => [1, 2, 3],
