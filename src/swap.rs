@@ -429,8 +429,13 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let hints =
-            crate::hint::resolve(old.schema_ref(), new.schema_ref(), &options.hints, &[]).unwrap();
+        let hints = crate::hint::resolve(
+            old.schema_ref(),
+            new.schema_ref(),
+            &options.hints,
+            crate::schema::ColumnMap::default(),
+        )
+        .unwrap();
         let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints.map).unwrap();
         infer(&old, &new, &mut schema, &rows, &hints.map);
 

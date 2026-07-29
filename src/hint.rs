@@ -46,25 +46,28 @@ impl Hint {
     }
 }
 
-/// Parse, validate, and apply every hint, given what the key already claims.
+/// Parse, validate, and apply every hint, extending what the key already claimed.
 ///
 /// Schemas rather than tables: a hint is a claim about column identity, and
-/// nothing here reads a value. `key_claims` are the name pairs a declared key
-/// asserts, settled before hints are considered rather than competing with
-/// them, because a key decides how every row is matched and an ignored
-/// instruction is the better failure.
+/// nothing here reads a value. `claimed` arrives holding the identities a
+/// declared key asserts, which is how the two are ranked without either knowing
+/// about the other — a hint that wants a column the key has spent is simply one
+/// the map refuses.
 pub(crate) fn resolve(
     old: &Schema,
     new: &Schema,
     spellings: &[String],
-    key_claims: &[(String, String)],
+    claimed: ColumnMap,
 ) -> Result<Hints, DiffError> {
     let parsed = spellings
         .iter()
         .map(|spelling| Ok((spelling.clone(), parse(spelling)?)))
         .collect::<Result<Vec<_>, DiffError>>()?;
 
-    let mut result = Hints::default();
+    let mut result = Hints {
+        map: claimed,
+        issues: Vec::new(),
+    };
     let mut renames: Vec<(HintClaim, usize, usize)> = Vec::new();
     for (spelling, hint) in parsed {
         let Hint::Rename {
@@ -94,7 +97,7 @@ pub(crate) fn resolve(
         }
     }
 
-    let rejected = contradictions(&renames, key_claims);
+    let rejected = contradictions(&renames, &result.map);
     for group in &rejected {
         result.issues.push(Issue {
             kind: IssueKind::ContradictoryHints,
@@ -161,10 +164,7 @@ fn position(schema: &Schema, name: &str) -> Option<usize> {
 /// `a -> b` and `a -> c`, keeping the first would mean the result depended on
 /// which flag came first. Groups rather than single edges because a chain of
 /// claims can be contradictory without any one endpoint looking wrong alone.
-fn contradictions(
-    renames: &[(HintClaim, usize, usize)],
-    key_claims: &[(String, String)],
-) -> Vec<Vec<usize>> {
+fn contradictions(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<Vec<usize>> {
     let mut by_old: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut by_new: HashMap<usize, Vec<usize>> = HashMap::new();
     for (index, (_, old, new)) in renames.iter().enumerate() {
@@ -173,14 +173,14 @@ fn contradictions(
     }
 
     let mut contested = vec![false; renames.len()];
-    // A hint sharing one endpoint with a key component but not the other is
-    // contested on its own, no second hint required: the key has already
-    // claimed that column for something else.
-    for (index, (claim, _, _)) in renames.iter().enumerate() {
-        if key_claims
-            .iter()
-            .any(|(old, new)| (old == &claim.old) != (new == &claim.new))
-        {
+    // A hint wanting a column that is already spoken for is contested on its
+    // own, no second hint required. Asking the map rather than comparing names
+    // means the rule is the same one every stage is held to: an endpoint goes
+    // to whoever claimed it first, and the key claims before hints do. A hint
+    // that merely agrees with what is held is redundant, not contested.
+    for (index, (_, old, new)) in renames.iter().enumerate() {
+        let taken = |held: Option<usize>, wanted: usize| held.is_some_and(|held| held != wanted);
+        if taken(claimed.new_for_old(*old), *new) || taken(claimed.old_for_new(*new), *old) {
             contested[index] = true;
         }
     }
@@ -317,21 +317,25 @@ mod tests {
         try_hints(old, new, hints, &[]).unwrap()
     }
 
+    /// Resolve hints against the identities a key spec would have claimed.
     fn try_hints(
         old: &RecordBatch,
         new: &RecordBatch,
         hints: &[&str],
-        key_claims: &[(&str, &str)],
+        key: &[&str],
     ) -> Result<Hints, DiffError> {
         let spellings = hints
             .iter()
             .map(|hint| (*hint).to_owned())
             .collect::<Vec<_>>();
-        let claims = key_claims
-            .iter()
-            .map(|(old, new)| ((*old).to_owned(), (*new).to_owned()))
-            .collect::<Vec<_>>();
-        resolve(schema(old), schema(new), &spellings, &claims)
+        let components = crate::key::declared_components(
+            &key.iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let claimed = crate::key::claimed_identities(schema(old), schema(new), &components);
+        resolve(schema(old), schema(new), &spellings, claimed)
     }
 
     fn schema(table: &RecordBatch) -> &Schema {
@@ -632,11 +636,12 @@ mod tests {
         let new = table! { "code" => [1], "fresh" => [1] };
 
         // The key pairs old "id" with new "code"; the hint wants old "id"
-        // elsewhere. The key is load-bearing for row matching, so the hint is
-        // what gives way.
-        let hints = try_hints(&old, &new, &["col_rename(id -> fresh)"], &[("id", "code")]).unwrap();
+        // elsewhere. The key claimed first, so the map simply refuses the hint,
+        // and there is no rule about keys anywhere in the contest.
+        let hints = try_hints(&old, &new, &["col_rename(id -> fresh)"], &["id/code"]).unwrap();
 
-        assert!(hints.map.pairs().is_empty());
+        assert_eq!(pairs(&hints), [(0, 0)]);
+        assert!(!hints.map.hinted(0, 0));
         assert_eq!(hints.issues[0].kind, IssueKind::ContradictoryHints);
     }
 
@@ -649,7 +654,7 @@ mod tests {
             &old,
             &new,
             &["col_rename(id -> code)", "col_rename(gone -> fresh)"],
-            &[("id", "code")],
+            &["id/code"],
         )
         .unwrap();
 

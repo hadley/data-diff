@@ -4,6 +4,7 @@ use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash}
 use crate::schema::ColumnMap;
 use crate::{DiffError, KeyBasis, KeyOverlap, Side};
 use arrow_array::RecordBatch;
+use arrow_schema::Schema;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedKey {
@@ -132,28 +133,41 @@ pub(crate) fn resolve_key(
     })
 }
 
-/// The name pairs a declared key asserts on its own, one per component.
+/// The identities a declared key asserts on its own, claimed into a fresh map.
 ///
 /// A component claims an identity even when it names one column: `id` claims
 /// that old `id` and new `id` are the same column, which a hint can contradict
-/// just as a paired component can.
+/// just as a paired component can. Claiming these before hints are considered
+/// is what settles the precedence between them — a key decides how every row is
+/// matched, so an ignored hint is much the better failure — and it leaves the
+/// contest itself to `ColumnMap`, which refuses a spent endpoint whoever asks.
 ///
-/// It claims that only where it can, though. A component naming a column one
-/// side does not have asserts nothing, because it cannot be resolved by name at
-/// all — that is the case a hint is there to settle, and treating it as a claim
-/// would have the key contradicting the very hint it depends on.
-pub(crate) fn claims(
-    old: &RecordBatch,
-    new: &RecordBatch,
+/// A component claims only where it can. One naming a column that a side does
+/// not have asserts nothing, because it cannot be resolved by name at all: that
+/// is the case a hint is there to settle, and treating it as a claim would have
+/// the key contradicting the very hint it depends on.
+pub(crate) fn claimed_identities(
+    old: &Schema,
+    new: &Schema,
     components: &[Component],
-) -> Vec<(String, String)> {
-    components
+) -> ColumnMap {
+    let mut map = ColumnMap::default();
+    for component in components {
+        if let (Some(old_index), Some(new_index)) = (
+            schema_position(old, &component.old),
+            schema_position(new, &component.new),
+        ) {
+            map.claim(old_index, new_index, false);
+        }
+    }
+    map
+}
+
+fn schema_position(schema: &Schema, name: &str) -> Option<usize> {
+    schema
+        .fields()
         .iter()
-        .filter(|component| {
-            position(old, &component.old).is_some() && position(new, &component.new).is_some()
-        })
-        .map(|component| (component.old.clone(), component.new.clone()))
-        .collect()
+        .position(|field| field.name() == name)
 }
 
 /// Key resolution as it looks to tests whose subject is not hints.

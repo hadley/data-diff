@@ -43,7 +43,7 @@ pub fn diff_tables(
         old.schema_ref(),
         new.schema_ref(),
         &options.hints,
-        &key::claims(old, new, &components),
+        key::claimed_identities(old.schema_ref(), new.schema_ref(), &components),
     )?;
     let key = key::resolve_key(old, new, &components, &hints.map)?;
     let rows = rows::match_rows(&key);
