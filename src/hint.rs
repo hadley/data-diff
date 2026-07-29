@@ -159,11 +159,18 @@ fn position(schema: &Schema, name: &str) -> Option<usize> {
 /// Group the claims that cannot all hold, so that none of a group is applied.
 ///
 /// Claims form a bipartite graph, each an edge from an old endpoint to a new
-/// one, and a valid set is a matching. Rejecting a whole connected group rather
-/// than picking a winner is what keeps input order out of the answer: given
-/// `a -> b` and `a -> c`, keeping the first would mean the result depended on
-/// which flag came first. Groups rather than single edges because a chain of
-/// claims can be contradictory without any one endpoint looking wrong alone.
+/// one, and a valid set is a matching. So a claim has to go exactly when one of
+/// its endpoints is wanted twice, and rejecting both rivals rather than picking
+/// one is what keeps input order out of the answer: given `a -> b` and `a -> c`,
+/// keeping the first would make the result depend on which flag came first.
+///
+/// The grouping decides only how this is *reported*, not what is rejected.
+/// Growing a connected component can never reach a claim that was not already
+/// contested, since reaching one means sharing an endpoint, and a shared
+/// endpoint is what being contested is. What it buys is one issue per set of
+/// rivals instead of one per claim: told that `a -> x`, `a -> y` and `b -> x`
+/// were dropped together, a reader can see they conflict with each other, which
+/// three separate lines would leave them to work out.
 fn contradictions(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<Vec<usize>> {
     let mut by_old: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut by_new: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -592,8 +599,9 @@ mod tests {
         let old = table! { "id" => [1], "a" => [1], "b" => [1] };
         let new = table! { "id" => [1], "x" => [1], "y" => [1] };
 
-        // Only "a" is doubly claimed, but rejecting its two edges alone would
-        // leave "b -> x" standing on an endpoint whose rival just vanished.
+        // Each of these is contested on its own account — "a" is wanted twice
+        // and so is "x" — so what the grouping decides is that they are reported
+        // as one set of rivals rather than as three separate disappointments.
         let hints = hint_for(
             &old,
             &new,
