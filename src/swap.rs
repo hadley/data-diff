@@ -4,9 +4,9 @@ use arrow_array::RecordBatch;
 
 use crate::agreement::Aligned;
 use crate::compare::ComparisonPlan;
-use crate::hint::Hints;
+
 use crate::rows::RowMatches;
-use crate::schema::{ColumnIdentity, SchemaMatches};
+use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
 
 /// Exchange the ends of two identities whose columns hold each other's values.
 ///
@@ -20,13 +20,13 @@ pub(crate) fn infer(
     new: &RecordBatch,
     schema: &mut SchemaMatches,
     rows: &RowMatches,
-    hints: &Hints,
+    hinted: &ColumnMap,
 ) {
     if rows.matched.is_empty() {
         return;
     }
     let mut values = Aligned::new(old, new, rows);
-    let eligible = eligible(old, new, schema, hints);
+    let eligible = eligible(old, new, schema, hinted);
 
     let mut candidates = Vec::new();
     for (position, &first) in eligible.iter().enumerate() {
@@ -69,7 +69,7 @@ fn eligible(
     old: &RecordBatch,
     new: &RecordBatch,
     schema: &SchemaMatches,
-    hints: &Hints,
+    hinted: &ColumnMap,
 ) -> Vec<usize> {
     let old_schema = old.schema();
     let new_schema = new.schema();
@@ -79,7 +79,7 @@ fn eligible(
         .enumerate()
         .filter(|(_, identity)| {
             !identity.is_key
-                && !hints.asserted(identity.old, identity.new)
+                && !hinted.hinted(identity.old, identity.new)
                 && old_schema.field(identity.old).name() == new_schema.field(identity.new).name()
         })
         .map(|(position, _)| position)
@@ -195,12 +195,12 @@ mod tests {
 
     use super::infer;
     use crate::DiffOptions;
-    use crate::hint::Hints;
+
     use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
     use crate::schema::testing::reconcile_schema;
-    use crate::schema::{ColumnIdentity, SchemaMatches};
+    use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
 
     fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
@@ -210,7 +210,7 @@ mod tests {
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key).unwrap();
-        infer(old, new, &mut schema, &rows, &Hints::default());
+        infer(old, new, &mut schema, &rows, &ColumnMap::default());
         schema
     }
 
@@ -398,7 +398,7 @@ mod tests {
         let mut schema = reconcile_schema(&old, &new, &key).unwrap();
         rename::infer(&old, &new, &mut schema, &rows);
         let inferred = schema.clone();
-        infer(&old, &new, &mut schema, &rows, &Hints::default());
+        infer(&old, &new, &mut schema, &rows, &ColumnMap::default());
 
         // "kept" was rewritten and "gone" became "fresh", and the two stages
         // do not interact: the inferred identity carries different names at
@@ -429,9 +429,10 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let hints = crate::hint::resolve(&old, &new, &options, &[]).unwrap();
-        let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints).unwrap();
-        infer(&old, &new, &mut schema, &rows, &hints);
+        let hints =
+            crate::hint::resolve(old.schema_ref(), new.schema_ref(), &options.hints, &[]).unwrap();
+        let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints.map).unwrap();
+        infer(&old, &new, &mut schema, &rows, &hints.map);
 
         // The values would read as an exchange, and a hint says otherwise. Every
         // other exclusion here is about a default reconciliation chose; this one

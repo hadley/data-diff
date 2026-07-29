@@ -533,7 +533,7 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
 }
 
 #[test]
-fn rejects_a_hint_that_is_not_a_hint() {
+fn rejects_a_hint_kind_that_is_not_supported_yet() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
@@ -548,9 +548,10 @@ fn rejects_a_hint_that_is_not_a_hint() {
         .output()
         .unwrap();
 
-    // Unlike a hint the data contradicts, one the tool cannot read at all is a
-    // mistyped command, so it fails rather than being worked around.
+    // col_drop parses: the grammar reads every kind that claims an endpoint.
+    // What it cannot do yet is act on one, and saying so beats quietly
+    // producing a diff that ignored half of what was asked.
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stderr).unwrap(), @r#"hint "col_drop(id)" names "col_drop", but only col_rename can be asserted"#);
+    insta::assert_snapshot!(String::from_utf8(output.stderr).unwrap(), @r#"hint "col_drop(id)" asks for "col_drop", which is not supported yet; only col_rename can be asserted"#);
 }

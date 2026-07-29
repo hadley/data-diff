@@ -4,7 +4,7 @@ title: Validated rename hints
 
 # Todo
 
-- [x] **Parse the hint vocabulary.** Add `src/hint.rs` with a parser for the subset hints occupy: `kind(name)` and `kind(name -> name)`, where a name is bare and trimmed or JSON-quoted and exact. An unrecognized kind, a malformed line, or the wrong shape of argument is a fatal `DiffError` naming what was supported. Only `col_rename` is accepted for now, but the grammar is kind-agnostic so the next step adds kinds rather than syntax.
+- [x] **Parse the hint vocabulary.** Add `src/hint.rs` with a parser for the subset hints occupy: `kind(name)` and `kind(name -> name)`, where a name is bare and trimmed or JSON-quoted and exact. Every kind that claims an endpoint of the bijection parses — `col_rename`, `col_add`, `col_drop` — so the next step adds what add and drop *do* rather than how they are spelled. Acting on one that is not implemented yet is a fatal `DiffError` distinct from the one an unrecognized kind raises. A malformed line or the wrong shape of argument is likewise fatal.
 - [x] **Add the issue channel.** `Diff` gains `issues: Vec<Issue>`, a non-fatal channel whose stable kinds are `hint_missing_target` and `contradictory_hints` for this step. An issue never changes the exit status: it says what reconciliation declined to do, not that it failed.
 - [x] **Resolve hint endpoints.** Look each named column up on its own side, reporting `hint_missing_target` for a hint naming a column that is absent, and `hint_incompatible_types` for one whose two columns cannot be compared, rather than failing the comparison in either case. Collapse hints that resolve to the same pair of endpoints.
 - [x] **Reject contradictory claims by group.** Build the claim graph over surviving hints, and reject every hint in any connected group that claims an old or new endpoint more than once, reporting `contradictory_hints` once for the group. Input order must not decide a winner.
@@ -47,10 +47,10 @@ That is the other half of the step, and the larger half in code: parsing, endpoi
 
 ## What changes
 
-* `src/hint.rs`: new — the grammar, endpoint resolution, deduplication, conflict grouping, and the accepted identities.
+* `src/hint.rs`: new — the grammar, endpoint resolution, deduplication, and conflict grouping, claiming into the shared bijection.
 * `src/model.rs`: `Issue` and its kinds, `Diff::issues`, and `DiffOptions::hints`.
 * `src/key.rs`: key components resolve through hint identities.
-* `src/schema.rs`: hint identities reserve their endpoints alongside key components.
+* `src/schema.rs`: `ColumnMap`, the partial bijection every stage claims through, and `reconcile_schema` continuing the one hints began.
 * `src/lib.rs`: hints resolve before the key, and their issues reach the `Diff`.
 * `src/human.rs`: issues rendered above the operations.
 * `src/main.rs`: `--hint` and `--hints`.
@@ -117,6 +117,14 @@ Rename claims form a bipartite graph, each hint an edge from an old endpoint to 
 The design rejects the whole connected group rather than picking a winner, and the reason bears restating because a smaller rule looks tempting. Given `col_rename(a -> b)` and `col_rename(a -> c)`, keeping the first decides by input order, making the result depend on which flag came first or how a file was written. Keeping neither is the only answer that treats two equally supported, mutually exclusive claims as what they are. Rejection follows connected components rather than single edges, because a chain of claims can be contradictory without any one endpoint looking wrong alone.
 
 Deduplication runs first, so two identical hints are one claim rather than a self-conflict, and identity is judged after endpoint resolution, so a quoted and a bare spelling of the same pair collapse.
+
+## One bijection, claimed in stages
+
+`design.md` describes column identity as a partial bijection with a settled order of precedence: paired key components and rename hints claim first, remaining same-named columns take what is left, and inference fills in from there. That is one object, and it is now one object in the code — `ColumnMap`, holding the pairs and refusing any claim on an endpoint already spent.
+
+The alternative, which this step started out with, was for hints to keep their own list of identities that `reconcile_schema` merged with the key's before matching names. That works, but it means the bijection exists in two places at once, with the invariant that no endpoint is used twice enforced separately in each. Claiming through one map instead makes the precedence order literally the order of the calls, and lets the drops and additions fall out of what the map has no pair for, which is exactly the definition.
+
+Hints run before the key, so they cannot be handed a `SchemaMatches` to add to — the schema is reconciled after row matching. What they are handed instead is nothing, and what they return is the seed. `ColumnMap` carries one bit of provenance beside each pair, whether a hint asserted it, because swap inference must not reconsider an instruction. Recording where an identity really came from, and rendering it, is its own queued step.
 
 ## Key components claim first
 

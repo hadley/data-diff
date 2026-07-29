@@ -70,6 +70,8 @@ pub enum DiffError {
     MalformedHint { hint: String },
     /// A hint named an operation that cannot be asserted.
     UnknownHintKind { hint: String, kind: String },
+    /// A hint named an operation that is understood but not yet applied.
+    UnsupportedHintKind { hint: String, kind: String },
     /// Same-name non-key columns cannot be compared.
     IncompatibleColumns {
         column: String,
@@ -155,9 +157,13 @@ impl std::fmt::Display for DiffError {
                 f,
                 "hint {hint:?} is not a line of the form col_rename(old -> new)"
             ),
-            DiffError::UnknownHintKind { hint, kind } => write!(
+            DiffError::UnknownHintKind { hint, kind } => {
+                write!(f, "hint {hint:?} names {kind:?}, which is not an operation")
+            }
+            DiffError::UnsupportedHintKind { hint, kind } => write!(
                 f,
-                "hint {hint:?} names {kind:?}, but only col_rename can be asserted"
+                "hint {hint:?} asks for {kind:?}, which is not supported yet; \
+                 only col_rename can be asserted"
             ),
             DiffError::IncompatibleColumns {
                 column,

@@ -39,14 +39,19 @@ pub fn diff_tables(
     // beside it, so a rename can be asserted in time to identify rows through a
     // key column the two files call different things.
     let components = key::declared_components(&options.key)?;
-    let hints = hint::resolve(old, new, options, &key::claims(old, new, &components))?;
-    let key = key::resolve_key(old, new, &components, &hints)?;
+    let hints = hint::resolve(
+        old.schema_ref(),
+        new.schema_ref(),
+        &options.hints,
+        &key::claims(old, new, &components),
+    )?;
+    let key = key::resolve_key(old, new, &components, &hints.map)?;
     let rows = rows::match_rows(&key);
-    let mut schema = schema::reconcile_schema(old, new, &key, &hints)?;
+    let mut schema = schema::reconcile_schema(old, new, &key, &hints.map)?;
 
     // Both resolve column identity, before ordering and cells go on to read it
     rename::infer(old, new, &mut schema, &rows);
-    swap::infer(old, new, &mut schema, &rows, &hints);
+    swap::infer(old, new, &mut schema, &rows, &hints.map);
 
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);

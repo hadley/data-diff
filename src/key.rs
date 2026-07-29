@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
-use crate::hint::Hints;
+use crate::schema::ColumnMap;
 use crate::{DiffError, KeyBasis, KeyOverlap, Side};
 use arrow_array::RecordBatch;
 
@@ -79,10 +79,10 @@ pub(crate) fn resolve_key(
     old: &RecordBatch,
     new: &RecordBatch,
     components: &[Component],
-    hints: &Hints,
+    hinted: &ColumnMap,
 ) -> Result<ResolvedKey, DiffError> {
     if components.is_empty() {
-        return guess_key(old, new, hints);
+        return guess_key(old, new, hinted);
     }
     let mut columns = Vec::with_capacity(components.len());
     let mut old_components = Vec::with_capacity(components.len());
@@ -91,7 +91,7 @@ pub(crate) fn resolve_key(
     for component in components {
         // Each endpoint is resolved on its own side, so a missing column is
         // reported as the half that is missing rather than as the whole pair.
-        let (old_index, new_index) = component_endpoints(old, new, component, hints)?;
+        let (old_index, new_index) = component_endpoints(old, new, component, hinted)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
         let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
@@ -161,7 +161,7 @@ pub(crate) fn claims(
 pub(crate) mod testing {
     use arrow_array::RecordBatch;
 
-    use super::{Hints, ResolvedKey, declared_components};
+    use super::{ColumnMap, ResolvedKey, declared_components};
     use crate::{DiffError, DiffOptions};
 
     /// Resolve a key from options alone, with no hints in play.
@@ -175,7 +175,7 @@ pub(crate) mod testing {
         options: &DiffOptions,
     ) -> Result<ResolvedKey, DiffError> {
         let components = declared_components(&options.key)?;
-        super::resolve_key(old, new, &components, &Hints::default())
+        super::resolve_key(old, new, &components, &ColumnMap::default())
     }
 }
 
@@ -189,20 +189,20 @@ fn component_endpoints(
     old: &RecordBatch,
     new: &RecordBatch,
     component: &Component,
-    hints: &Hints,
+    hinted: &ColumnMap,
 ) -> Result<(usize, usize), DiffError> {
     let old_found = position(old, &component.old);
     let new_found = position(new, &component.new);
     let old_index = match (old_found, new_found) {
         (Some(index), _) => index,
-        (None, Some(new_index)) => hints
+        (None, Some(new_index)) => hinted
             .old_for_new(new_index)
             .ok_or_else(|| missing_key_column(Side::Old, &component.old))?,
         (None, None) => return Err(missing_key_column(Side::Old, &component.old)),
     };
     let new_index = match new_found {
         Some(index) => index,
-        None => hints
+        None => hinted
             .new_for_old(old_index)
             .ok_or_else(|| missing_key_column(Side::New, &component.new))?,
     };
@@ -254,7 +254,7 @@ fn position(table: &RecordBatch, name: &str) -> Option<usize> {
 fn guess_key(
     old: &RecordBatch,
     new: &RecordBatch,
-    hints: &Hints,
+    hinted: &ColumnMap,
 ) -> Result<ResolvedKey, DiffError> {
     if old.num_rows() == 0 || new.num_rows() == 0 {
         return Err(DiffError::MissingKey);
@@ -285,11 +285,11 @@ fn guess_key(
             .iter()
             .position(|field| field.name() == old_field.name())
             .filter(|&index| {
-                hints
+                hinted
                     .old_for_new(index)
                     .is_none_or(|owner| owner == old_index)
             });
-        let Some(new_index) = hints.new_for_old(old_index).or(by_name) else {
+        let Some(new_index) = hinted.new_for_old(old_index).or(by_name) else {
             continue;
         };
         let old_column = old.column(old_index);
