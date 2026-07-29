@@ -9,8 +9,6 @@
 //! grammar honest: the next step adds what `col_add` and `col_drop` *do*, not
 //! how they are spelled.
 
-use std::collections::HashMap;
-
 use arrow_schema::Schema;
 
 use crate::compare::ComparisonPlan;
@@ -97,7 +95,8 @@ pub(crate) fn resolve(
         }
     }
 
-    let rejected = contradictions(&renames, &result.map);
+    let contested = contested(&renames, &result.map);
+    let rejected = rival_groups(&renames, &contested);
     for group in &rejected {
         result.issues.push(Issue {
             kind: IssueKind::ContradictoryHints,
@@ -156,74 +155,76 @@ fn position(schema: &Schema, name: &str) -> Option<usize> {
         .position(|field| field.name() == name)
 }
 
-/// Group the claims that cannot all hold, so that none of a group is applied.
+/// Which claims cannot stand.
 ///
-/// Claims form a bipartite graph, each an edge from an old endpoint to a new
-/// one, and a valid set is a matching. So a claim has to go exactly when one of
-/// its endpoints is wanted twice, and rejecting both rivals rather than picking
-/// one is what keeps input order out of the answer: given `a -> b` and `a -> c`,
-/// keeping the first would make the result depend on which flag came first.
+/// A valid set of claims uses each old and each new endpoint at most once, so a
+/// claim has to go exactly when an endpoint of it is wanted twice, or when the
+/// map already holds one of its endpoints for someone else. That is a uniqueness
+/// check and nothing more.
 ///
-/// The grouping decides only how this is *reported*, not what is rejected.
-/// Growing a connected component can never reach a claim that was not already
-/// contested, since reaching one means sharing an endpoint, and a shared
-/// endpoint is what being contested is. What it buys is one issue per set of
-/// rivals instead of one per claim: told that `a -> x`, `a -> y` and `b -> x`
-/// were dropped together, a reader can see they conflict with each other, which
-/// three separate lines would leave them to work out.
-fn contradictions(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<Vec<usize>> {
-    let mut by_old: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut by_new: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (index, (_, old, new)) in renames.iter().enumerate() {
-        by_old.entry(*old).or_default().push(index);
-        by_new.entry(*new).or_default().push(index);
-    }
+/// Rejecting both rivals rather than picking one is what keeps input order out
+/// of the answer: given `a -> b` and `a -> c`, keeping the first would make the
+/// result depend on which flag came first. A claim that merely agrees with what
+/// the map holds is redundant, not contested, and asking the map rather than
+/// comparing names means the key needs no rule of its own — an endpoint goes to
+/// whoever claimed it first, and the key claims before hints do.
+fn contested(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<bool> {
+    let taken = |held: Option<usize>, wanted: usize| held.is_some_and(|held| held != wanted);
+    renames
+        .iter()
+        .enumerate()
+        .map(|(index, (_, old, new))| {
+            let wanted_twice =
+                renames
+                    .iter()
+                    .enumerate()
+                    .any(|(other, (_, other_old, other_new))| {
+                        other != index && (other_old == old || other_new == new)
+                    });
+            wanted_twice
+                || taken(claimed.new_for_old(*old), *new)
+                || taken(claimed.old_for_new(*new), *old)
+        })
+        .collect()
+}
 
-    let mut contested = vec![false; renames.len()];
-    // A hint wanting a column that is already spoken for is contested on its
-    // own, no second hint required. Asking the map rather than comparing names
-    // means the rule is the same one every stage is held to: an endpoint goes
-    // to whoever claimed it first, and the key claims before hints do. A hint
-    // that merely agrees with what is held is redundant, not contested.
-    for (index, (_, old, new)) in renames.iter().enumerate() {
-        let taken = |held: Option<usize>, wanted: usize| held.is_some_and(|held| held != wanted);
-        if taken(claimed.new_for_old(*old), *new) || taken(claimed.old_for_new(*new), *old) {
-            contested[index] = true;
-        }
-    }
-    for shared in by_old.values().chain(by_new.values()) {
-        if shared.len() > 1 {
-            for &index in shared {
-                contested[index] = true;
+/// Gather the rejected claims into the sets that contest each other.
+///
+/// Reporting only: which claims go is already settled above, and no grouping
+/// could change it — two claims land together by sharing an endpoint, and a
+/// shared endpoint is what being contested is, so this can never reach a claim
+/// the uniqueness check missed. What it buys is one issue per set of rivals
+/// instead of one per claim. Told that `a -> x`, `a -> y` and `b -> x` were
+/// dropped together, a reader can see they conflict with each other; three
+/// separate lines would leave them to work that out.
+///
+/// Sets rather than one list of everything rejected, because two unrelated
+/// conflicts in one invocation are two separate things to know about.
+fn rival_groups(renames: &[(HintClaim, usize, usize)], contested: &[bool]) -> Vec<Vec<usize>> {
+    let shares_endpoint = |left: usize, right: usize| {
+        let (_, left_old, left_new) = &renames[left];
+        let (_, right_old, right_new) = &renames[right];
+        left_old == right_old || left_new == right_new
+    };
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in (0..renames.len()).filter(|&index| contested[index]) {
+        // Whatever this claim touches becomes one set with it, which is what
+        // makes the result a partition however the claims were ordered.
+        let mut joined = vec![index];
+        let mut separate = Vec::new();
+        for group in groups {
+            if group.iter().any(|&other| shares_endpoint(other, index)) {
+                joined.extend(group);
+            } else {
+                separate.push(group);
             }
         }
+        joined.sort_unstable();
+        groups = separate;
+        groups.push(joined);
     }
-
-    // Grow each contested claim into its connected component, so a group is
-    // rejected whole even where only one of its edges looked wrong.
-    let mut grouped = vec![false; renames.len()];
-    let mut groups = Vec::new();
-    for start in 0..renames.len() {
-        if !contested[start] || grouped[start] {
-            continue;
-        }
-        let mut group = vec![start];
-        grouped[start] = true;
-        let mut frontier = vec![start];
-        while let Some(index) = frontier.pop() {
-            let (_, old, new) = &renames[index];
-            let neighbours = by_old.get(old).into_iter().chain(by_new.get(new)).flatten();
-            for &neighbour in neighbours {
-                if !grouped[neighbour] {
-                    grouped[neighbour] = true;
-                    group.push(neighbour);
-                    frontier.push(neighbour);
-                }
-            }
-        }
-        group.sort_unstable();
-        groups.push(group);
-    }
+    groups.sort();
     groups
 }
 
