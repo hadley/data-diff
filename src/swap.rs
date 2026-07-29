@@ -199,7 +199,8 @@ mod tests {
     use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
-    use crate::schema::{ColumnIdentity, SchemaMatches, reconcile_schema};
+    use crate::schema::testing::reconcile_schema;
+    use crate::schema::{ColumnIdentity, SchemaMatches};
 
     fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
@@ -208,7 +209,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(old, new, &key, &Hints::default()).unwrap();
+        let mut schema = reconcile_schema(old, new, &key).unwrap();
         infer(old, new, &mut schema, &rows, &Hints::default());
         schema
     }
@@ -394,7 +395,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(&old, &new, &key, &Hints::default()).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key).unwrap();
         rename::infer(&old, &new, &mut schema, &rows);
         let inferred = schema.clone();
         infer(&old, &new, &mut schema, &rows, &Hints::default());
@@ -429,7 +430,7 @@ mod tests {
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
         let hints = crate::hint::resolve(&old, &new, &options, &[]).unwrap();
-        let mut schema = reconcile_schema(&old, &new, &key, &hints).unwrap();
+        let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints).unwrap();
         infer(&old, &new, &mut schema, &rows, &hints);
 
         // The values would read as an exchange, and a hint says otherwise. Every

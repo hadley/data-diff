@@ -136,10 +136,9 @@ mod tests {
 
     use super::{ChangedCell, ColumnChanges, FanoutChanges, compare_cells};
     use crate::DiffOptions;
-    use crate::hint::Hints;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
-    use crate::schema::reconcile_schema;
+    use crate::schema::testing::reconcile_schema;
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
@@ -154,7 +153,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let schema = reconcile_schema(old, new, &key, &Hints::default()).unwrap();
+        let schema = reconcile_schema(old, new, &key).unwrap();
         compare_cells(old, new, &schema, &rows)
     }
 

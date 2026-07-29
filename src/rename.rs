@@ -207,10 +207,10 @@ mod tests {
     use crate::DiffOptions;
     use crate::agreement::Aligned;
     use crate::compare::CanonicalValue;
-    use crate::hint::Hints;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
-    use crate::schema::{SchemaMatches, reconcile_schema};
+    use crate::schema::SchemaMatches;
+    use crate::schema::testing::reconcile_schema;
 
     fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
@@ -219,7 +219,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(old, new, &key, &Hints::default()).unwrap();
+        let mut schema = reconcile_schema(old, new, &key).unwrap();
         infer(old, new, &mut schema, &rows);
         schema
     }
@@ -397,7 +397,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(&old, &new, &key, &Hints::default()).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key).unwrap();
         let mut values = Aligned::with_digest(&old, &new, &rows, |_: &[CanonicalValue]| 0);
         infer_with(&old, &new, &mut schema, &rows, &mut values);
 

@@ -95,13 +95,37 @@ pub(crate) fn reconcile_schema(
     Ok(result)
 }
 
+/// Schema reconciliation as it looks to tests whose subject is not hints.
+#[cfg(test)]
+pub(crate) mod testing {
+    use arrow_array::RecordBatch;
+
+    use super::SchemaMatches;
+    use crate::DiffError;
+    use crate::hint::Hints;
+    use crate::key::ResolvedKey;
+
+    /// Reconcile the two schemas with no hints in play.
+    ///
+    /// Reconciliation resolves hints first and passes them in. Keeping this
+    /// under the same name spares every test that predates hints from
+    /// restating "and no hints" at each of its call sites.
+    pub(crate) fn reconcile_schema(
+        old: &RecordBatch,
+        new: &RecordBatch,
+        key: &ResolvedKey,
+    ) -> Result<SchemaMatches, DiffError> {
+        super::reconcile_schema(old, new, key, &Hints::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow_array::RecordBatch;
     use test_support::table;
 
-    use super::{ColumnIdentity, SchemaMatches, reconcile_schema};
-    use crate::hint::Hints;
+    use super::testing::reconcile_schema;
+    use super::{ColumnIdentity, SchemaMatches};
     use crate::key::testing::resolve_key;
     use crate::{DiffError, DiffOptions};
 
@@ -111,7 +135,7 @@ mod tests {
             hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options)?;
-        reconcile_schema(old, new, &key, &Hints::default())
+        reconcile_schema(old, new, &key)
     }
 
     #[test]
@@ -171,7 +195,7 @@ mod tests {
         // other side, but their endpoints are taken, so old "b" has nothing
         // left to match and new "a" is unclaimed.
         assert_eq!(
-            reconcile_schema(&old, &new, &key, &Hints::default()).unwrap(),
+            reconcile_schema(&old, &new, &key).unwrap(),
             SchemaMatches {
                 identities: vec![ColumnIdentity {
                     old: 0,
@@ -201,7 +225,7 @@ mod tests {
             hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
-        let schema = reconcile_schema(&old, &new, &key, &Hints::default()).unwrap();
+        let schema = reconcile_schema(&old, &new, &key).unwrap();
 
         assert_eq!(
             schema.identities,
