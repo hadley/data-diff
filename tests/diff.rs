@@ -804,3 +804,263 @@ fn a_rendered_rename_can_be_fed_back_as_a_hint() {
     assert!(hinted.issues.is_empty());
     assert_eq!(render(&hinted), render(&inferred));
 }
+
+#[test]
+fn a_drop_and_an_add_choose_replacement_over_an_inferred_rename() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "region" => ["north", "south", "east"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "zone" => ["north", "south", "east"],
+    };
+
+    // The values agree everywhere, so inference identifies the two columns.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(inferred.columns.identities.len(), 2);
+    assert!(inferred.columns.dropped.is_empty());
+
+    // Only the user knows they are unrelated. Reserving both endpoints keeps
+    // them out of inference, and neither hint needs the other to say so: each
+    // alone would leave its opposite number with nothing to pair with.
+    let replaced = diff_tables(
+        &old,
+        &new,
+        &hinted(&["id"], &["col_drop(region)", "col_add(zone)"]),
+    )
+    .unwrap();
+
+    assert!(replaced.issues.is_empty());
+    assert_eq!(replaced.columns.dropped, [2]);
+    assert_eq!(replaced.columns.added, [2]);
+    // An unmatched column has no cells, so nothing about the values survives.
+    assert!(replaced.cells.is_empty());
+    assert!(replaced.summary.columns.is_empty());
+}
+
+#[test]
+fn an_edit_hint_withdraws_a_swap() {
+    let old = table! {
+        "id" => [1, 2],
+        "price" => [10, 20],
+        "cost" => [30, 40],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "price" => [30, 40],
+        "cost" => [10, 20],
+    };
+
+    // Each column holds what the other used to, which reads as an exchange.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(
+        inferred.columns.identities,
+        [
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 1),
+        ]
+    );
+
+    // Naming one of the two columns is enough to withdraw it: an exchange takes
+    // two, and this one has lost an end. Both columns then keep their own names
+    // and report what actually happened to their values.
+    let edited = diff_tables(&old, &new, &hinted(&["id"], &["col_edit(price)"])).unwrap();
+
+    assert!(edited.issues.is_empty());
+    assert_eq!(
+        edited.columns.identities,
+        [
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+            Coordinate::from_zero_based(2, 2),
+        ]
+    );
+    assert_eq!(
+        edited.summary.columns,
+        [
+            ColumnEdit {
+                column: Coordinate::from_zero_based(1, 1),
+                type_changed: false,
+                values_changed: true,
+            },
+            ColumnEdit {
+                column: Coordinate::from_zero_based(2, 2),
+                type_changed: false,
+                values_changed: true,
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
+    let old = table! {
+        "id" => [1, 2],
+        "a" => [10, 20],
+        "b" => [30, 40],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "a" => [11, 21],
+        "b" => [31, 40],
+    };
+
+    // Column "a" changes in both rows and "b" in the first, so covering the
+    // two rows is the smaller description.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(
+        inferred.summary.rows,
+        [
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+        ]
+    );
+    assert!(inferred.summary.columns.is_empty());
+
+    // The hint says the change was to a column. Its cells leave the graph with
+    // it, and what is left — one cell in "b" — is covered by the row it sits in.
+    let edited = diff_tables(&old, &new, &hinted(&["id"], &["col_edit(a)"])).unwrap();
+
+    assert!(edited.issues.is_empty());
+    assert_eq!(
+        edited.summary.columns,
+        [ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: false,
+            values_changed: true,
+        }]
+    );
+    assert_eq!(edited.summary.rows, [Coordinate::from_zero_based(0, 0)]);
+    // The hint changed how the same cells are described, not which cells there
+    // are: the complete diff is untouched.
+    assert_eq!(edited.cells, inferred.cells);
+}
+
+#[test]
+fn an_edit_hint_on_an_unchanged_column_is_reported() {
+    let table = table! {
+        "id" => [1, 2],
+        "value" => [10, 20],
+    };
+
+    let diff = diff_tables(&table, &table, &hinted(&["id"], &["col_edit(value)"])).unwrap();
+
+    // A hint never manufactures a change. The identity is real and nothing
+    // about it changed, so the instruction is dropped and the diff still says
+    // the files are the same.
+    assert_eq!(diff.issues.len(), 1);
+    assert_eq!(diff.issues[0].kind, IssueKind::HintNoChange);
+    assert_eq!(diff.issues[0].hints[0].kind, HintKind::Edit);
+    assert!(diff.summary.columns.is_empty());
+    assert!(diff.summary.rows.is_empty());
+    assert!(diff.cells.is_empty());
+}
+
+#[test]
+fn an_edit_hint_on_a_column_with_no_identity_is_reported() {
+    let old = table! {
+        "id" => [1, 2],
+        "discount" => [10, 20],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "markdown" => [99, 98],
+    };
+
+    // Nothing connects these two columns, so "discount" is dropped and there is
+    // no identity for the edit to attach to.
+    let diff = diff_tables(&old, &new, &hinted(&["id"], &["col_edit(discount)"])).unwrap();
+
+    assert_eq!(diff.issues.len(), 1);
+    assert_eq!(diff.issues[0].kind, IssueKind::HintUnresolvedIdentity);
+    assert_eq!(diff.columns.dropped, [2]);
+    assert_eq!(diff.columns.added, [2]);
+}
+
+#[test]
+fn a_rendered_edit_can_be_fed_back_as_a_hint() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "amount" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "total" => [10, 20, 30, 40, 50, 60, 71, 80, 90, 100, 110],
+    };
+
+    // "amount" became "total" and one of its eleven values changed with it,
+    // which is close enough for inference to identify them. One changed cell
+    // can be described by its row or by its column, and the summary picks the
+    // row.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    let rendered = String::from_utf8(render(&inferred)).unwrap();
+    assert!(rendered.contains("col_rename(amount -> total)"));
+    assert!(rendered.contains("row_edit(7)"));
+
+    // A col_edit() line names its column as the new file does, so feeding one
+    // back means naming an identity by an end the old file does not have. It
+    // still attaches, which is what makes the printed line an instruction
+    // rather than merely a description.
+    let edited = diff_tables(&old, &new, &hinted(&["id"], &["col_edit(total)"])).unwrap();
+
+    assert!(edited.issues.is_empty());
+    assert_eq!(
+        edited.summary.columns,
+        [ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: false,
+            values_changed: true,
+        }]
+    );
+    assert!(edited.summary.rows.is_empty());
+}
+
+#[test]
+fn issues_report_in_the_order_the_hints_were_supplied() {
+    let old = table! {
+        "id" => [1, 2],
+        "value" => [10, 20],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "value" => [10, 20],
+    };
+
+    // These two fail on opposite sides of the comparison: a missing target is
+    // settled before the key is resolved, and an unchanged identity cannot be
+    // judged until the cells are compared. Neither ordering may leak that.
+    let first = ["col_rename(value -> absent)", "col_edit(value)"];
+    let second = ["col_edit(value)", "col_rename(value -> absent)"];
+
+    let kinds = |hints: &[&str]| {
+        diff_tables(&old, &new, &hinted(&["id"], hints))
+            .unwrap()
+            .issues
+            .iter()
+            .map(|issue| issue.kind.clone())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        kinds(&first),
+        [
+            IssueKind::HintMissingTarget {
+                side: Side::New,
+                column: "absent".into(),
+            },
+            IssueKind::HintNoChange,
+        ]
+    );
+    assert_eq!(
+        kinds(&second),
+        [
+            IssueKind::HintNoChange,
+            IssueKind::HintMissingTarget {
+                side: Side::New,
+                column: "absent".into(),
+            },
+        ]
+    );
+}

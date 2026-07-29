@@ -1,8 +1,8 @@
 use arrow_array::RecordBatch;
 
-use crate::DiffError;
 use crate::compare::ComparisonPlan;
 use crate::key::ResolvedKey;
+use crate::{DiffError, Side};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SchemaMatches {
@@ -26,11 +26,22 @@ pub(crate) struct ColumnIdentity {
 /// take what is left, and inference fills in from there. Every stage claims
 /// through this, so no endpoint can be spent twice and no stage has to be
 /// trusted to check that for itself.
+///
+/// An endpoint can also be spent on having no partner at all. `col_drop` and
+/// `col_add` reserve one that way, and holding the reservation here rather than
+/// filtering for it at each stage is what keeps reconciliation free of rules
+/// about hints: a reserved column is passed over by name matching because the
+/// map refuses to pair it, and becomes a drop or an addition because the map has
+/// no pair for it, which is how every drop and addition is already derived.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ColumnMap {
     /// Ascending by old position, which is what `detect_order` requires of the
     /// identities derived from it.
     pairs: Vec<ColumnPair>,
+    /// Old columns reserved as having no partner, ascending.
+    unmatched_old: Vec<usize>,
+    /// New columns reserved as having no partner, ascending.
+    unmatched_new: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,8 +61,13 @@ impl ColumnMap {
     /// Claim a pair, unless either endpoint is already spoken for.
     ///
     /// Returns whether the map now holds the pair, so a caller that cares can
-    /// tell a refusal from a claim it already had.
+    /// tell a refusal from a claim it already had. An endpoint reserved as
+    /// unmatched is spent like any other: it was claimed for having no partner,
+    /// and a pair would give it one.
     pub(crate) fn claim(&mut self, old: usize, new: usize, hinted: bool) -> bool {
+        if self.reserved(Side::Old, old) || self.reserved(Side::New, new) {
+            return false;
+        }
         match (self.new_for_old(old), self.old_for_new(new)) {
             // Both endpoints free.
             (None, None) => {
@@ -64,6 +80,41 @@ impl ColumnMap {
             (Some(held_new), Some(held_old)) => held_new == new && held_old == old,
             // One endpoint is spent on a different partner.
             _ => false,
+        }
+    }
+
+    /// Claim one endpoint as having no partner, unless it is already paired.
+    ///
+    /// Reserving twice is redundant rather than contested, two instructions
+    /// saying the same thing.
+    pub(crate) fn reserve(&mut self, side: Side, index: usize) -> bool {
+        let paired = match side {
+            Side::Old => self.new_for_old(index).is_some(),
+            Side::New => self.old_for_new(index).is_some(),
+        };
+        if paired {
+            return false;
+        }
+        let reserved = self.unmatched_mut(side);
+        if let Err(at) = reserved.binary_search(&index) {
+            reserved.insert(at, index);
+        }
+        true
+    }
+
+    /// Whether this endpoint is reserved as having no partner.
+    pub(crate) fn reserved(&self, side: Side, index: usize) -> bool {
+        let reserved = match side {
+            Side::Old => &self.unmatched_old,
+            Side::New => &self.unmatched_new,
+        };
+        reserved.binary_search(&index).is_ok()
+    }
+
+    fn unmatched_mut(&mut self, side: Side) -> &mut Vec<usize> {
+        match side {
+            Side::Old => &mut self.unmatched_old,
+            Side::New => &mut self.unmatched_new,
         }
     }
 

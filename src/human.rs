@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{ColumnSchema, Diff, HintClaim, Issue, IssueKind, KeyBasis};
+use crate::{ColumnSchema, Diff, HintClaim, HintNames, Issue, IssueKind, KeyBasis};
 
 /// Write a compact, operation-oriented description of a diff.
 ///
@@ -188,17 +188,23 @@ fn issue_context(issue: &Issue) -> String {
             value(old_type),
             value(new_type)
         ),
+        IssueKind::HintUnresolvedIdentity => {
+            format!("hint_ignored({}, unresolved)", hints.join(", "))
+        }
+        IssueKind::HintNoChange => format!("hint_ignored({}, unchanged)", hints.join(", ")),
     }
 }
 
 /// Render a hint the way the format prints the operation it asserts.
+///
+/// As written rather than as resolved: a hint reported back to its author should
+/// be the line they typed, so a one-name claim keeps its one name.
 fn hint_claim(claim: &HintClaim) -> String {
-    format!(
-        "{}({} -> {})",
-        claim.kind.name(),
-        value(&claim.old),
-        value(&claim.new)
-    )
+    let names = match &claim.names {
+        HintNames::Single(name) => value(name),
+        HintNames::Pair(old, new) => format!("{} -> {}", value(old), value(new)),
+    };
+    format!("{}({names})", claim.kind.name())
 }
 
 fn column_name(schema: &[ColumnSchema], one_based_position: usize) -> String {
@@ -367,15 +373,30 @@ mod tests {
             render(&renamed_old, &renamed_new),
             render(&fanned_old, &fanned_new),
             // Issue lines are part of the format too, and carry fields of
-            // their own, so a rendering that has them belongs here.
+            // their own, so a rendering that has them belongs here. Every reason
+            // the channel can give is rendered, since a new one is exactly where
+            // an ad-hoc field would arrive.
             render_hinted(
                 &renamed_old,
                 &hinted_new,
                 &["col_rename(amount -> renamed)"],
             ),
             render_hinted(&renamed_old, &hinted_new, &["col_rename(amount -> absent)"]),
+            render_hinted(
+                &renamed_old,
+                &hinted_new,
+                &["col_rename(amount -> renamed)", "col_drop(amount)"],
+            ),
+            render_hinted(&renamed_old, &renamed_old, &["col_edit(amount)"]),
+            render_hinted(&renamed_old, &hinted_new, &["col_edit(amount)"]),
         ]
         .join("\n");
+
+        // The fixtures are only a guard if they reach the lines they claim to,
+        // and an issue reason is easy to add a fixture for and never render.
+        for reason in ["missing:", "contradictory", "unchanged", "unresolved"] {
+            assert!(rendered.contains(reason), "{reason}");
+        }
 
         assert_eq!(
             field_names(&rendered),

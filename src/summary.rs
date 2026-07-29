@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use crate::cells::CellChanges;
+use crate::cells::{CellChanges, ColumnChanges};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SummaryChanges {
@@ -19,24 +19,33 @@ pub(crate) struct SummaryColumn {
     pub values_changed: bool,
 }
 
-pub(crate) fn summarize(changes: &CellChanges) -> SummaryChanges {
-    // Type changes must remain column edits, so only other columns participate
-    // in optimization.
+/// Reduce the changed cells, holding retyped and hinted columns out of it.
+///
+/// `forced` names identities a valid `col_edit()` hint attached to. They join
+/// the retyped columns in being column edits whatever the optimizer would have
+/// preferred, which is the whole of what the hint does here: a rectangular
+/// change can be described by its rows or by its columns, and the hint says
+/// which. Their cells leave the graph with them, so the row edits are minimal
+/// over what is left to cover rather than being computed and then overridden.
+pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> SummaryChanges {
+    let held_out =
+        |column: &&ColumnChanges| column.type_changed || forced.contains(&(column.old, column.new));
+
     let mut columns = changes
         .columns
         .iter()
-        .filter(|column| column.type_changed)
+        .filter(held_out)
         .map(|column| SummaryColumn {
             old: column.old,
             new: column.new,
-            type_changed: true,
+            type_changed: column.type_changed,
             values_changed: column.values_changed(),
         })
         .collect::<Vec<_>>();
     let residual_columns = changes
         .columns
         .iter()
-        .filter(|column| !column.type_changed && column.values_changed())
+        .filter(|column| !held_out(column) && column.values_changed())
         .collect::<Vec<_>>();
 
     // Each remaining cell is an edge between its matched-row identity and
@@ -281,8 +290,14 @@ impl Matching {
 
 #[cfg(test)]
 mod tests {
-    use super::{BipartiteGraph, SummaryColumn, VertexCover, summarize};
+    use super::{BipartiteGraph, SummaryChanges, SummaryColumn, VertexCover};
     use crate::cells::{CellChanges, ColumnChanges};
+
+    /// Summarize with nothing forced, which is every test whose subject is the
+    /// optimizer rather than a hint.
+    fn summarize(changes: &CellChanges) -> SummaryChanges {
+        super::summarize(changes, &[])
+    }
 
     fn graph(left: usize, right: usize, edges: &[(usize, usize)]) -> BipartiteGraph {
         BipartiteGraph::new(left, right, edges)
@@ -456,6 +471,42 @@ mod tests {
                 rows: vec![(0, 1)],
             }
         );
+    }
+
+    #[test]
+    fn a_forced_column_leaves_the_optimizer_and_takes_its_cells_with_it() {
+        // One column changing in both rows, and each row changing in a column
+        // of its own. Covering the two rows takes two vertices and covering the
+        // three columns takes three, so the answer is two row edits.
+        let changes = CellChanges {
+            columns: vec![
+                changed_column(1, 1, false, &[(0, 0), (1, 1)]),
+                changed_column(2, 2, false, &[(0, 0)]),
+                changed_column(3, 3, false, &[(1, 1)]),
+            ],
+            ..CellChanges::default()
+        };
+
+        let free = summarize(&changes);
+        assert_eq!(free.rows, [(0, 0), (1, 1)]);
+        assert!(free.columns.is_empty());
+
+        // Hint the two single-cell columns and they leave the graph, taking
+        // their cells with them. What is left to cover is one column spanning
+        // both rows, so the minimum is now that column and there is no row edit
+        // at all. The row summary changed because the graph did, not because
+        // anything overrode the answer it produced.
+        let forced = super::summarize(&changes, &[(2, 2), (3, 3)]);
+
+        assert_eq!(
+            forced.columns,
+            [
+                summary_column(1, 1, false, true),
+                summary_column(2, 2, false, true),
+                summary_column(3, 3, false, true),
+            ]
+        );
+        assert!(forced.rows.is_empty());
     }
 
     #[test]

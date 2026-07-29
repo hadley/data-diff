@@ -2,10 +2,11 @@
 
 use arrow_array::RecordBatch;
 
+use crate::Side;
 use crate::agreement::Aligned;
 use crate::compare::ComparisonPlan;
 use crate::rows::RowMatches;
-use crate::schema::{ColumnIdentity, SchemaMatches};
+use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
 
 /// Pair provisional drops with provisional adds that hold the same values.
 ///
@@ -13,13 +14,27 @@ use crate::schema::{ColumnIdentity, SchemaMatches};
 /// fanned-out rows are outside the alignment and take no part. With no matched
 /// rows there is nothing to compare, so every candidate keeps its provisional
 /// classification.
+///
+/// A `col_drop` or `col_add` hint reserves its endpoint in `hinted`, and a
+/// reserved endpoint is exactly a provisional drop or addition that must not be
+/// paired: the user has said the column has no partner. Excluding it here is
+/// both what the instruction means and the performance argument the design
+/// makes for these two kinds, candidates being compared pairwise.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
     schema: &mut SchemaMatches,
     rows: &RowMatches,
+    hinted: &ColumnMap,
 ) {
-    infer_with(old, new, schema, rows, &mut Aligned::new(old, new, rows));
+    infer_with(
+        old,
+        new,
+        schema,
+        rows,
+        hinted,
+        &mut Aligned::new(old, new, rows),
+    );
 }
 
 /// Exact pairs first, then approximate ones among what is left.
@@ -32,14 +47,15 @@ fn infer_with(
     new: &RecordBatch,
     schema: &mut SchemaMatches,
     rows: &RowMatches,
+    hinted: &ColumnMap,
     values: &mut Aligned,
 ) {
     if rows.matched.is_empty() {
         return;
     }
-    let exact = exact_pairs(old, new, schema, values);
+    let exact = exact_pairs(old, new, schema, hinted, values);
     apply(old, new, schema, exact);
-    let approximate = approximate_pairs(old, new, schema, values);
+    let approximate = approximate_pairs(old, new, schema, hinted, values);
     apply(old, new, schema, approximate);
     // Inferred identities are found in candidate order, while `detect_order`
     // requires the whole list to ascend by old position.
@@ -70,19 +86,19 @@ fn exact_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
     schema: &SchemaMatches,
+    hinted: &ColumnMap,
     values: &mut Aligned,
 ) -> Vec<(usize, usize)> {
     // Every exactly agreeing pair, collected before any of them is taken, so
-    // that ambiguity is judged against the whole candidate set.
+    // that ambiguity is judged against the whole candidate set. A reserved
+    // endpoint contributes no candidates, keeping the outer list aligned with
+    // `schema.dropped` while offering it nothing.
     let matching = schema
         .dropped
         .iter()
         .map(|&old_index| {
-            schema
-                .added
-                .iter()
-                .enumerate()
-                .filter(|&(_, &new_index)| {
+            eligible(schema, hinted, old_index)
+                .filter(|&(_, new_index)| {
                     plan_for(old, new, old_index, new_index)
                         .is_some_and(|plan| values.agree(plan, old_index, new_index))
                 })
@@ -119,6 +135,25 @@ fn exact_pairs(
     accepted
 }
 
+/// The additions one dropped column may be paired with, by position in `added`.
+///
+/// Empty for a reserved old column, so a hint that says a column has no partner
+/// keeps it from acquiring one, and neither of the two stages that draw from
+/// these lists needs a rule about hints of its own.
+fn eligible<'a>(
+    schema: &'a SchemaMatches,
+    hinted: &'a ColumnMap,
+    old_index: usize,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let reserved = hinted.reserved(Side::Old, old_index);
+    schema
+        .added
+        .iter()
+        .enumerate()
+        .filter(move |&(_, &new_index)| !reserved && !hinted.reserved(Side::New, new_index))
+        .map(|(position, &new_index)| (position, new_index))
+}
+
 /// Pair candidates that agree closely enough, and by more than chance.
 ///
 /// Acceptance is mutual uniqueness rather than first match. Ambiguous *exact*
@@ -131,17 +166,15 @@ fn approximate_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
     schema: &SchemaMatches,
+    hinted: &ColumnMap,
     values: &mut Aligned,
 ) -> Vec<(usize, usize)> {
     let qualifying = schema
         .dropped
         .iter()
         .map(|&old_index| {
-            schema
-                .added
-                .iter()
-                .enumerate()
-                .filter(|&(_, &new_index)| {
+            eligible(schema, hinted, old_index)
+                .filter(|&(_, new_index)| {
                     plan_for(old, new, old_index, new_index)
                         .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
                 })
@@ -209,8 +242,8 @@ mod tests {
     use crate::compare::CanonicalValue;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
-    use crate::schema::SchemaMatches;
     use crate::schema::testing::reconcile_schema;
+    use crate::schema::{ColumnMap, SchemaMatches};
 
     fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
@@ -220,7 +253,7 @@ mod tests {
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key).unwrap();
-        infer(old, new, &mut schema, &rows);
+        infer(old, new, &mut schema, &rows, &ColumnMap::default());
         schema
     }
 
@@ -399,7 +432,14 @@ mod tests {
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key).unwrap();
         let mut values = Aligned::with_digest(&old, &new, &rows, |_: &[CanonicalValue]| 0);
-        infer_with(&old, &new, &mut schema, &rows, &mut values);
+        infer_with(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &ColumnMap::default(),
+            &mut values,
+        );
 
         // Every column now digests alike, so only the elementwise comparison
         // separates the real rename from the unrelated pair.

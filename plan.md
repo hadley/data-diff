@@ -4,19 +4,19 @@ title: The remaining hint kinds
 
 # Todo
 
-- [ ] **Give a hint a shape that fits all four kinds.** `HintClaim` carries the names as written — one name, or an old-to-new pair — rather than always two, so `col_drop(a)` reports as `col_drop(a)`. `HintKind` gains `Add`, `Drop`, and `Edit`. `DiffError::UnsupportedHintKind` goes: with the vocabulary complete there is nothing left for it to name.
-- [ ] **Teach `ColumnMap` that an endpoint can be reserved unmatched.** A pair is not the only thing a hint can assert. `col_drop` and `col_add` reserve one endpoint as having no partner, which the map must hold and must refuse to pair, exactly as it refuses an endpoint already paired.
-- [ ] **Generalise the contest to claims rather than renames.** Each hint asserts something about each endpoint it names — paired with a particular partner, paired with an unknown one, or unmatched. Two hints conflict when they assert different things about one endpoint, which subsumes the rename-versus-rename rule the code has now and adds every cross-kind shape at once.
-- [ ] **Resolve `col_edit` to the identity it attaches to.** An edit reserves nothing; it names an identity by one or both of its ends, and the identity may not exist until inference has run. Resolution records the endpoints, and attachment waits.
-- [ ] **Keep reserved endpoints out of rename inference.** `rename::infer` draws its candidates from the provisional drops and additions, which is exactly where a reserved endpoint sits. It gains the map and filters both candidate lists, which is the performance argument the design makes for these two kinds as well as the correctness one.
-- [ ] **Protect an edited identity from swap inference too.** `swap::eligible` already excludes a pair the map records as hinted, and that exclusion stays exactly as it is. An edit hint protects an identity it does not own and so is not in the map, so eligibility gains a second question beside the first: a pair is ineligible when the map has it hinted *or* a resolved edit attaches to it.
-- [ ] **Validate and apply edits after the cells are known.** Attach each edit to its final identity, reporting `hint_unresolved_identity` where there is none and `hint_no_change` where the identity changed in neither type nor value. Surviving edits force their column into the edit set, taking their cells out of the row summary.
-- [ ] **Order the issues by the hints they concern.** Issues now arise in two phases either side of the whole comparison. A reader scanning the hints they supplied should find the complaints in that order, not in phase order.
-- [ ] **Render the new lines.** `hint_ignored()` gains `unchanged` and `unresolved` as reasons, and a single-name claim renders with one name.
-- [ ] **Accept the kinds on the command line.** No new flags: `--hint` and `--hints` already carry whatever the parser accepts, so this is the acceptance test that they do.
-- [ ] **Cover the machinery.** Unit tests in `src/hint.rs` for each kind's resolution and for every cross-kind conflict shape; in `src/summary.rs` for a forced column; integration coverage in `tests/diff.rs` for replacement chosen over rename, an edit overriding a swap, an edit overriding the row summary, and both new issues; CLI snapshots in `tests/cli.rs`.
-- [ ] **Refresh the demo datasets and documentation.** Add a `demo/replace-*.parquet` pair whose columns inference would otherwise identify as a rename, describe it and the two `col_edit()` uses in `demo/README.md`, and document all four kinds in `README.md`.
-- [ ] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
+- [x] **Give a hint a shape that fits all four kinds.** `HintClaim` carries the names as written — one name, or an old-to-new pair — rather than always two, so `col_drop(a)` reports as `col_drop(a)`. `HintKind` gains `Add`, `Drop`, and `Edit`. `DiffError::UnsupportedHintKind` goes: with the vocabulary complete there is nothing left for it to name.
+- [x] **Teach `ColumnMap` that an endpoint can be reserved unmatched.** A pair is not the only thing a hint can assert. `col_drop` and `col_add` reserve one endpoint as having no partner, which the map must hold and must refuse to pair, exactly as it refuses an endpoint already paired.
+- [x] **Generalise the contest to claims rather than renames.** Each hint asserts something about each endpoint it names — paired with a particular partner, paired with an unknown one, or unmatched. Two hints conflict when they assert different things about one endpoint, which subsumes the rename-versus-rename rule the code has now and adds every cross-kind shape at once.
+- [x] **Resolve `col_edit` to the identity it attaches to.** An edit reserves nothing; it names an identity by one or both of its ends, and the identity may not exist until inference has run. Resolution records the endpoints, and attachment waits.
+- [x] **Keep reserved endpoints out of rename inference.** `rename::infer` draws its candidates from the provisional drops and additions, which is exactly where a reserved endpoint sits. It gains the map and filters both candidate lists, which is the performance argument the design makes for these two kinds as well as the correctness one.
+- [x] **Protect an edited identity from swap inference too.** `swap::eligible` already excludes a pair the map records as hinted, and that exclusion stays exactly as it is. An edit hint protects an identity it does not own and so is not in the map, so eligibility gains a second question beside the first: a pair is ineligible when the map has it hinted *or* a resolved edit attaches to it.
+- [x] **Validate and apply edits after the cells are known.** Attach each edit to its final identity, reporting `hint_unresolved_identity` where there is none and `hint_no_change` where the identity changed in neither type nor value. Surviving edits force their column into the edit set, taking their cells out of the row summary.
+- [x] **Order the issues by the hints they concern.** Issues now arise in two phases either side of the whole comparison. A reader scanning the hints they supplied should find the complaints in that order, not in phase order.
+- [x] **Render the new lines.** `hint_ignored()` gains `unchanged` and `unresolved` as reasons, and a single-name claim renders with one name.
+- [x] **Accept the kinds on the command line.** No new flags: `--hint` and `--hints` already carry whatever the parser accepts, so this is the acceptance test that they do.
+- [x] **Cover the machinery.** Unit tests in `src/hint.rs` for each kind's resolution and for every cross-kind conflict shape; in `src/summary.rs` for a forced column; integration coverage in `tests/diff.rs` for replacement chosen over rename, an edit overriding a swap, an edit overriding the row summary, and both new issues; CLI snapshots in `tests/cli.rs`.
+- [x] **Refresh the demo datasets and documentation.** Add a `demo/replace-*.parquet` pair whose columns inference would otherwise identify as a rename, describe it and the two `col_edit()` uses in `demo/README.md`, and document all four kinds in `README.md`.
+- [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
@@ -43,16 +43,18 @@ Two hints rather than one, and deliberately so. Either alone would produce both 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id --hint 'col_edit(price)'
 col_key([id], basis: declared)
-col_edit(cost, values)
 col_edit(price, values)
+col_edit(cost, values)
 ```
 
 And a rectangular change can be summarized by rows or by columns; where the tool chose rows and the user knows the change was to a column, the hint says which:
 
 ```console
-$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id --hint 'col_edit(a)'
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
+    --hint 'col_edit(a)' --hint 'col_edit(b)'
 col_key([id], basis: declared)
 col_edit(a, values)
+col_edit(b, values)
 col_edit(c, values)
 ```
 
