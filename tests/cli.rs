@@ -53,10 +53,10 @@ fn compares_two_identical_parquet_files() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
     no_changes()
-    "#);
+    ");
 }
 
 #[test]
@@ -82,12 +82,12 @@ fn guesses_a_key_when_the_flag_is_omitted() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: guessed, overlap: 0.67)
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: guessed, overlap: 0.67)
     row_drop(3)
     row_add(3)
     row_edit(2)
-    "#);
+    ");
 }
 
 #[test]
@@ -158,16 +158,16 @@ fn reports_mixed_changes_in_human_format() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_drop("drop")
-    col_add("add")
-    col_order("value", 2 -> 1)
-    col_edit("value", values)
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_drop(drop)
+    col_add(add)
+    col_order(value, 2 -> 1)
+    col_edit(value, values)
     row_drop(3)
     row_add(3)
     row_order(2 -> 1)
-    "#);
+    ");
 }
 
 #[test]
@@ -194,10 +194,10 @@ fn reports_a_bounded_fanout() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
     row_fanout(4 -> [4, 5], values)
-    "#);
+    ");
 }
 
 #[test]
@@ -228,11 +228,11 @@ fn infers_a_rename_from_the_values() {
     assert!(output.stderr.is_empty());
     // No new rendering was needed: the rename falls out of an identity whose
     // two ends carry different names.
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_rename("amount" -> "total")
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_rename(amount -> total)
     row_edit(2)
-    "#);
+    ");
 }
 
 #[test]
@@ -261,11 +261,11 @@ fn infers_a_rename_that_carried_an_edit() {
     assert!(output.stderr.is_empty());
     // The columns disagree in one row, which exact inference read as proof
     // that they were unrelated. The rename now absorbs the row it explains.
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_rename("amount" -> "total")
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_rename(amount -> total)
     row_edit(7)
-    "#);
+    ");
 }
 
 #[test]
@@ -296,12 +296,12 @@ fn infers_a_swap_between_two_rewritten_columns() {
     assert!(output.stderr.is_empty());
     // Two columns that each changed in every row become one exchange, and the
     // move falls out of it: the column holding the prices is now second.
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_rename("price" -> "cost")
-    col_rename("cost" -> "price")
-    col_order("price", 3 -> 2)
-    "#);
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_rename(price -> cost)
+    col_rename(cost -> price)
+    col_order(price, 3 -> 2)
+    ");
 }
 
 #[test]
@@ -328,11 +328,11 @@ fn accepts_a_paired_key_component() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["customer_id" -> "id"], basis: declared)
-    col_rename("customer_id" -> "id")
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([customer_id -> id], basis: declared)
+    col_rename(customer_id -> id)
     row_edit(2)
-    "#);
+    ");
 }
 
 #[test]
@@ -358,10 +358,10 @@ fn guesses_a_key_that_fans_out() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: guessed, overlap: 1.00)
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: guessed, overlap: 1.00)
     row_fanout(4 -> [4, 5], values)
-    "#);
+    ");
 }
 
 #[test]
@@ -410,11 +410,11 @@ fn empty_files_still_report_type_only_schema_changes() {
         .unwrap();
 
     assert!(output.status.success());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_edit("id", type: "Int32" -> "Int64")
-    col_edit("value", type: "Int32" -> "Int64")
-    "#);
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_edit(id, type: Int32 -> Int64)
+    col_edit(value, type: Int32 -> Int64)
+    ");
 }
 
 #[test]
@@ -444,11 +444,11 @@ fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
     assert!(output.stderr.is_empty());
     // The hint is written the way this very output prints it, and asserts
     // identity only: the values that changed are still reported.
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_rename("discount" -> "markdown")
-    col_edit("markdown", values)
-    "#);
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_rename(discount -> markdown)
+    col_edit(markdown, values)
+    ");
 }
 
 #[test]
@@ -483,13 +483,13 @@ fn reads_hints_from_a_file_with_comments_and_blank_lines() {
         .unwrap();
 
     assert!(output.status.success());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    col_rename("discount" -> "markdown")
-    col_rename("note" -> "comment")
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_rename(discount -> markdown)
+    col_rename(note -> comment)
     row_edit(1)
     row_edit(2)
-    "#);
+    ");
 }
 
 #[test]
@@ -522,14 +522,14 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
     // so the status stays zero and the rest of the run stands.
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
-    col_key(["id"], basis: declared)
-    hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
-    col_rename("note" -> "comment")
-    col_drop("discount")
-    col_add("markdown")
-    col_edit("comment", values)
-    "#);
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    hint_ignored(col_rename(discount -> mrkdown), missing: mrkdown)
+    col_rename(note -> comment)
+    col_drop(discount)
+    col_add(markdown)
+    col_edit(comment, values)
+    ");
 }
 
 #[test]

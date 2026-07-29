@@ -20,7 +20,7 @@ The commands below use that installed `data-diff` binary.
 data-diff demo/basic-old.parquet demo/basic-new.parquet
 ```
 
-With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key(["id"], basis: guessed, overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
+With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key([id], basis: guessed, overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
 
 ## Declaring the key explicitly
 
@@ -28,7 +28,7 @@ With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and s
 data-diff demo/basic-old.parquet demo/basic-new.parquet --key id
 ```
 
-The same comparison with a declared key produces the same operations behind a `col_key(["id"], basis: declared)` line. An explicit `--key` always overrides guessing, which matters when the strongest same-name overlap is not the real row identity.
+The same comparison with a declared key produces the same operations behind a `col_key([id], basis: declared)` line. An explicit `--key` always overrides guessing, which matters when the strongest same-name overlap is not the real row identity.
 
 ## Scattered value edits
 
@@ -38,7 +38,7 @@ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 
 Row 1 changes in columns `a` and `b`, while column `c` changes in rows 2 and 3.
 The minimum summary therefore contains both `row_edit(1)` and
-`col_edit("c", values)`.
+`col_edit(c, values)`.
 
 ## Mixed structural changes
 
@@ -48,7 +48,7 @@ data-diff demo/mixed-old.parquet demo/mixed-new.parquet --key id
 
 This pair reorders columns and rows, drops `product` and row `102`, adds `stock`
 and row `104`, and changes the prices of the two matched rows. The human format
-summarizes the two price cells as one `col_edit("price", values)`.
+summarizes the two price cells as one `col_edit(price, values)`.
 
 ## Type-only changes
 
@@ -88,10 +88,10 @@ Both `price` and `cost` change in every row, which read alone would be two colum
 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
-col_key(["id"], basis: declared)
-col_rename("price" -> "cost")
-col_rename("cost" -> "price")
-col_order("price", 3 -> 2)
+col_key([id], basis: declared)
+col_rename(price -> cost)
+col_rename(cost -> price)
+col_order(price, 3 -> 2)
 ```
 
 The `col_order()` line is not a separate claim. Identifying old `cost` with new `price` puts that column second where it used to be third, and column ordering reads positions off the identities like any other operation.
@@ -108,8 +108,8 @@ Without the pair the rows no longer line up. Inference does still identify the t
 
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
-col_key(["amount"], basis: guessed, overlap: 0.67)
-col_rename("customer_id" -> "id")
+col_key([amount], basis: guessed, overlap: 0.67)
+col_rename(customer_id -> id)
 row_drop(2)
 row_add(2)
 ```
@@ -126,19 +126,19 @@ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id
 
 ```console
 $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id
-col_key(["id"], basis: declared)
-col_drop("discount")
-col_add("markdown")
+col_key([id], basis: declared)
+col_drop(discount)
+col_add(markdown)
 ```
 
 A hint supplies what the data cannot. It is written the way the output prints it, so the operation you want is the one you type:
 
 ```console
 $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
-    --hint 'col_rename("discount" -> "markdown")'
-col_key(["id"], basis: declared)
-col_rename("discount" -> "markdown")
-col_edit("markdown", values)
+    --hint 'col_rename(discount -> markdown)'
+col_key([id], basis: declared)
+col_rename(discount -> markdown)
+col_edit(markdown, values)
 ```
 
 Note what the hint did *not* do. It asserted that the two columns are one, and nothing about their values, so the change it made visible is reported as an edit. Being unmatched is what had been hiding it: a dropped column has no cells to compare.
@@ -147,11 +147,11 @@ A hint you get wrong is reported rather than obeyed, and the comparison still ru
 
 ```console
 $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
-    --hint 'col_rename("discount" -> "mrkdown")'
-col_key(["id"], basis: declared)
-hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
-col_drop("discount")
-col_add("markdown")
+    --hint 'col_rename(discount -> mrkdown)'
+col_key([id], basis: declared)
+hint_ignored(col_rename(discount -> mrkdown), missing: mrkdown)
+col_drop(discount)
+col_add(markdown)
 ```
 
 For several hints, or for hints generated alongside a change, `--hints hints.txt` reads one per line and skips blank lines and `#` comments.

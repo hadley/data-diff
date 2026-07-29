@@ -794,7 +794,7 @@ fn a_rendered_rename_can_be_fed_back_as_a_hint() {
         .lines()
         .find(|line| line.starts_with("col_rename("))
         .expect("the rename is reported");
-    assert_eq!(line, r#"col_rename("amount" -> "total")"#);
+    assert_eq!(line, "col_rename(amount -> total)");
 
     // The claim of the format being an input language is that this line, taken
     // exactly as printed, is a hint asserting what it describes.

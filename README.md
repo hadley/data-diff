@@ -7,17 +7,17 @@ operation-oriented summary.
 
 ```console
 data-diff old.parquet new.parquet
-> col_key(["id"], basis: guessed, overlap: 1.00)
-> col_drop("product")
-> col_add("stock")
-> col_edit("price", values)
+> col_key([id], basis: guessed, overlap: 1.00)
+> col_drop(product)
+> col_add(stock)
+> col_edit(price, values)
 ```
 
 If you know what the primary key is (i.e. the set of variables that uniquely identifies each row) you should supply it:
 
 ```console
 data-diff old.parquet new.parquet --key customer_id,date
-> col_key(["customer_id", "date"], basis: declared)
+> col_key([customer_id, date], basis: declared)
 > row_drop(4)
 > row_add(9)
 > row_edit(2)
@@ -29,8 +29,8 @@ Use a pair when the key column itself was renamed:
 
 ```console
 data-diff old.parquet new.parquet --key customer_id/id
-> col_key(["customer_id" -> "id"], basis: declared)
-> col_rename("customer_id" -> "id")
+> col_key([customer_id -> id], basis: declared)
+> col_rename(customer_id -> id)
 > row_edit(2)
 ```
 
@@ -39,13 +39,13 @@ data-diff old.parquet new.parquet --key customer_id/id
 When a change can't be worked out from the data --- e.g. a column renamed and rewritten at the same time --- you can say what happened. A hint is written the way the output prints it, so the operation you want is the one you type:
 
 ```console
-data-diff old.parquet new.parquet --key id --hint 'col_rename("discount" -> "markdown")'
-> col_key(["id"], basis: declared)
-> col_rename("discount" -> "markdown")
-> col_edit("markdown", values)
+data-diff old.parquet new.parquet --key id --hint 'col_rename(discount -> markdown)'
+> col_key([id], basis: declared)
+> col_rename(discount -> markdown)
+> col_edit(markdown, values)
 ```
 
-The quotes are optional, and needed only for a name holding a comma, a bracket, an arrow, or spaces at either end. `--hint` repeats, and `--hints hints.txt` reads one per line, skipping blank lines and `#` comments.
+Quotes are optional, and needed only for a name holding a comma, a bracket, an arrow, or spaces at either end. The output quotes a little more readily than that, so any line you read back is one you can type straight in. `--hint` repeats, and `--hints hints.txt` reads one per line, skipping blank lines and `#` comments.
 
 A hint asserts identity and nothing more: what changed inside the column it identified is still reported. One you get wrong is reported rather than obeyed, on a `hint_ignored()` line, and the comparison still runs.
 
@@ -64,7 +64,7 @@ Output goes to stdout, one operation per line:
 | `row_fanout(old_idx -> [new_idx, ...])` | one old row that several new rows share a key with |
 | `row_order(old_idx -> new_idx)` | the fewest rows that must move to explain the new order |
 
-Names are quoted and coordinates are one-based, counting positions in the original files. A column is named as the new file names it, except where only the old file has it. When nothing changed, `no_changes()` follows the key line.
+A name is quoted only when it has to be: an ordinary one --- letters, digits and underscores, not starting with a digit --- is written bare, so quotes mark a name with something in it worth noticing. Coordinates are one-based, counting positions in the original files. A column is named as the new file names it, except where only the old file has it. When nothing changed, `no_changes()` follows the key line.
 
 Problems with the input --- duplicate column names, an unsupported type, a key that cannot identify rows --- go to stderr, and the exit status is non-zero.
 

@@ -176,7 +176,7 @@ fn issue_context(issue: &Issue) -> String {
             format!(
                 "hint_ignored({}, missing: {})",
                 hints.join(", "),
-                quote(column)
+                value(column)
             )
         }
         IssueKind::ContradictoryHints => {
@@ -185,8 +185,8 @@ fn issue_context(issue: &Issue) -> String {
         IssueKind::HintIncompatibleTypes { old_type, new_type } => format!(
             "hint_ignored({}, incompatible: {} -> {})",
             hints.join(", "),
-            quote(old_type),
-            quote(new_type)
+            value(old_type),
+            value(new_type)
         ),
     }
 }
@@ -196,14 +196,14 @@ fn hint_claim(claim: &HintClaim) -> String {
     format!(
         "{}({} -> {})",
         claim.kind.name(),
-        quote(&claim.old),
-        quote(&claim.new)
+        value(&claim.old),
+        value(&claim.new)
     )
 }
 
 fn column_name(schema: &[ColumnSchema], one_based_position: usize) -> String {
     raw_name(schema, one_based_position)
-        .map(quote)
+        .map(value)
         .unwrap_or_else(|| format!("#{one_based_position}"))
 }
 
@@ -216,12 +216,43 @@ fn raw_name(schema: &[ColumnSchema], one_based_position: usize) -> Option<&str> 
 fn column_type(schema: &[ColumnSchema], one_based_position: usize) -> String {
     schema
         .get(one_based_position.saturating_sub(1))
-        .map(|column| quote(&column.source_type))
+        .map(|column| value(&column.source_type))
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).expect("strings always serialize")
+/// Write a string as the grammar's `word` where that reads back as itself.
+///
+/// Quoting everything is never wrong and always noisy: `col_key([id], basis:
+/// declared)` says exactly what `col_key(["id"], basis: declared)` says, and
+/// most column names are ordinary identifiers. So a name is left bare when it
+/// is unmistakably one, and quoted otherwise.
+///
+/// The rule is deliberately narrower than what the hint parser accepts bare. It
+/// has to be one a reader can apply in their head — and it is the rule they
+/// need, because quotes are now a signal that a name has something in it worth
+/// noticing rather than punctuation they must read past everywhere. "An
+/// identifier" is such a rule; "anything without the grammar's punctuation in
+/// it" is not. A leading digit is excluded because `value` also admits numbers,
+/// and a column named `2024` should not arrive looking like one.
+///
+/// The cost of being narrow is a quoted name that did not have to be, which
+/// costs two characters. The cost of being wide is a name the grammar cannot
+/// read back.
+fn value(text: &str) -> String {
+    let identifier = !text.starts_with(|character: char| character.is_ascii_digit())
+        && !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if identifier {
+        text.to_owned()
+    } else {
+        quote(text)
+    }
+}
+
+fn quote(text: &str) -> String {
+    serde_json::to_string(text).expect("strings always serialize")
 }
 
 #[cfg(test)]
@@ -365,16 +396,16 @@ mod tests {
             "add" => ["a", "b", "c"],
         };
 
-        insta::assert_snapshot!(render(&old, &new), @r#"
-        col_key(["id"], basis: declared)
-        col_drop("drop")
-        col_add("add")
-        col_order("value", 3 -> 1)
-        col_edit("value", type: "Int32" -> "Int64", values)
+        insta::assert_snapshot!(render(&old, &new), @"
+        col_key([id], basis: declared)
+        col_drop(drop)
+        col_add(add)
+        col_order(value, 3 -> 1)
+        col_edit(value, type: Int32 -> Int64, values)
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
-        "#);
+        ");
     }
 
     #[test]
@@ -386,7 +417,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &["group", "id"]),
-            "col_key([\"group\", \"id\"], basis: declared)\nno_changes()"
+            "col_key([group, id], basis: declared)\nno_changes()"
         );
     }
 
@@ -401,13 +432,13 @@ mod tests {
             "value" => [31, 10, 40],
         };
 
-        insta::assert_snapshot!(render_with(&old, &new, &[]), @r#"
-        col_key(["id"], basis: guessed, overlap: 0.67)
+        insta::assert_snapshot!(render_with(&old, &new, &[]), @"
+        col_key([id], basis: guessed, overlap: 0.67)
         row_drop(2)
         row_add(3)
         row_order(3 -> 1)
         row_edit(3 -> 1)
-        "#);
+        ");
     }
 
     #[test]
@@ -431,14 +462,14 @@ mod tests {
             "value" => [0, 0, 0, 0, 7, 0, 0, 5, 0, 0, 0, 0],
         };
 
-        insta::assert_snapshot!(render(&old, &new), @r#"
-        col_key(["id"], basis: declared)
+        insta::assert_snapshot!(render(&old, &new), @"
+        col_key([id], basis: declared)
         row_drop(11)
         row_add(12)
         row_fanout(4 -> [4, 5], values)
         row_order(2 -> 1)
         row_edit(7 -> 8)
-        "#);
+        ");
     }
 
     #[test]
@@ -454,7 +485,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([\"id\"], basis: declared)\nrow_fanout(4 -> [4, 5])"
+            "col_key([id], basis: declared)\nrow_fanout(4 -> [4, 5])"
         );
     }
 
@@ -474,14 +505,14 @@ mod tests {
         // The key pair is renamed, and "value" is edited and reordered. Every
         // operation about a surviving column names it as "new" does; only the
         // dropped column keeps its old name, having no other.
-        insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @r#"
-        col_key(["customer_id" -> "id"], basis: declared)
-        col_rename("customer_id" -> "id")
-        col_drop("gone")
-        col_add("fresh")
-        col_order("value", 3 -> 1)
-        col_edit("value", type: "Int32" -> "Int64", values)
-        "#);
+        insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @"
+        col_key([customer_id -> id], basis: declared)
+        col_rename(customer_id -> id)
+        col_drop(gone)
+        col_add(fresh)
+        col_order(value, 3 -> 1)
+        col_edit(value, type: Int32 -> Int64, values)
+        ");
     }
 
     #[test]
@@ -499,7 +530,7 @@ mod tests {
         // compound key over two, so the two must not render alike.
         assert_eq!(
             render_with(&old, &new, &["a/b"]),
-            "col_key([\"a\" -> \"b\"], basis: declared)\ncol_rename(\"a\" -> \"b\")\ncol_drop(\"b\")\ncol_add(\"a\")"
+            "col_key([a -> b], basis: declared)\ncol_rename(a -> b)\ncol_drop(b)\ncol_add(a)"
         );
     }
 
@@ -518,7 +549,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([\"id\"], basis: declared)\nrow_edit(2)"
+            "col_key([id], basis: declared)\nrow_edit(2)"
         );
     }
 
@@ -533,8 +564,8 @@ mod tests {
         // have nothing to report, however many instructions were dropped.
         assert_eq!(
             render_hinted(&table, &table, &["col_rename(value -> absent)"]),
-            "col_key([\"id\"], basis: declared)\n\
-             hint_ignored(col_rename(\"value\" -> \"absent\"), missing: \"absent\")\n\
+            "col_key([id], basis: declared)\n\
+             hint_ignored(col_rename(value -> absent), missing: absent)\n\
              no_changes()"
         );
     }
@@ -548,7 +579,7 @@ mod tests {
 
         assert_eq!(
             render(&table, &table),
-            "col_key([\"id\"], basis: declared)\nno_changes()"
+            "col_key([id], basis: declared)\nno_changes()"
         );
     }
 
@@ -562,7 +593,41 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([\"id\"], basis: declared)\ncol_drop(\"line\\n\\\"quoted\\\"\")"
+            "col_key([id], basis: declared)\ncol_drop(\"line\\n\\\"quoted\\\"\")"
         );
+    }
+
+    #[test]
+    fn leaves_an_ordinary_name_bare_and_quotes_the_rest() {
+        let old = table! {
+            "id" => [1],
+            "snake_case" => [1],
+            "CamelCase" => [1],
+            "_private" => [1],
+            "x2" => [1],
+            "2024" => [1],
+            "total sales" => [1],
+            "a,b" => [1],
+            "a->b" => [1],
+            "café" => [1],
+        };
+        let new = table! { "id" => [1] };
+
+        // Quotes are a signal that a name holds something worth noticing, so
+        // they are spent only where a bare name would not read back as itself:
+        // a leading digit could be a number, and everything below it carries
+        // the grammar's own punctuation, a space, or a character outside it.
+        insta::assert_snapshot!(render(&old, &new), @r#"
+        col_key([id], basis: declared)
+        col_drop(snake_case)
+        col_drop(CamelCase)
+        col_drop(_private)
+        col_drop(x2)
+        col_drop("2024")
+        col_drop("total sales")
+        col_drop("a,b")
+        col_drop("a->b")
+        col_drop("café")
+        "#);
     }
 }
