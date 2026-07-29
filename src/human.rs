@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{ColumnSchema, Diff, KeyBasis};
+use crate::{ColumnSchema, Diff, HintClaim, Issue, IssueKind, KeyBasis};
 
 /// Write a compact, operation-oriented description of a diff.
 ///
@@ -11,6 +11,17 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     let mut operations = Vec::new();
 
     operations.push(key_context(diff));
+
+    // Issues sit with the key line rather than among the operations: like the
+    // key, they are context for reading what follows, saying what the diff was
+    // told to do and did not.
+    for issue in &diff.issues {
+        operations.push(issue_context(issue));
+    }
+    // Where the operations start, so that "nothing changed" stays a statement
+    // about the data. A declined hint is context, not a change, and a diff of
+    // two identical files still has to say so however many hints were dropped.
+    let context = operations.len();
 
     // Renames come first: every operation below names its column as the new
     // file does, which needs explaining when the old file called it something
@@ -103,7 +114,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         }
     }
 
-    if operations.len() == 1 {
+    if operations.len() == context {
         operations.push("no_changes()".to_owned());
     }
     writer.write_all(operations.join("\n").as_bytes())
@@ -145,6 +156,49 @@ fn key_context(diff: &Diff) -> String {
             format!("col_key([{components}], basis: guessed, overlap: {overlap:.2})")
         }
     }
+}
+
+/// Render one declined instruction and the reason it was declined.
+///
+/// The head is `hint_ignored()` rather than the issue's own kind, which is
+/// carried as the reason field instead. That keeps the grammar's field names
+/// fixed, and puts the thing a reader most needs — that an instruction was
+/// dropped — at the front of the line. `Diff::issues` keeps the stable kinds
+/// for anything matching on them.
+///
+/// The subject is whatever the reason applies to: one hint for a target that is
+/// not there, and the whole group for a contradiction, which reports each group
+/// once rather than repeating every hint's rivals beside it.
+fn issue_context(issue: &Issue) -> String {
+    let hints = issue.hints.iter().map(hint_claim).collect::<Vec<_>>();
+    match &issue.kind {
+        IssueKind::HintMissingTarget { column, .. } => {
+            format!(
+                "hint_ignored({}, missing: {})",
+                hints.join(", "),
+                quote(column)
+            )
+        }
+        IssueKind::ContradictoryHints => {
+            format!("hint_ignored([{}], contradictory)", hints.join(", "))
+        }
+        IssueKind::HintIncompatibleTypes { old_type, new_type } => format!(
+            "hint_ignored({}, incompatible: {} -> {})",
+            hints.join(", "),
+            quote(old_type),
+            quote(new_type)
+        ),
+    }
+}
+
+/// Render a hint the way the format prints the operation it asserts.
+fn hint_claim(claim: &HintClaim) -> String {
+    format!(
+        "{}({} -> {})",
+        claim.kind.name(),
+        quote(&claim.old),
+        quote(&claim.new)
+    )
 }
 
 fn column_name(schema: &[ColumnSchema], one_based_position: usize) -> String {
@@ -189,6 +243,7 @@ mod tests {
                     .iter()
                     .map(|component| (*component).to_owned())
                     .collect(),
+                hints: Vec::new(),
             },
         )
         .unwrap();
@@ -199,6 +254,21 @@ mod tests {
 
     fn render(old: &RecordBatch, new: &RecordBatch) -> String {
         render_with(old, new, &["id"])
+    }
+
+    fn render_hinted(old: &RecordBatch, new: &RecordBatch, hints: &[&str]) -> String {
+        let diff = diff_tables(
+            old,
+            new,
+            &DiffOptions {
+                key: vec!["id".to_owned()],
+                hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        write_human(&mut output, &diff).unwrap();
+        String::from_utf8(output).unwrap()
     }
 
     /// The `name` of every `name: value` field in some rendered output.
@@ -252,6 +322,10 @@ mod tests {
             "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
             "value" => [0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0],
         };
+        let hinted_new = table! {
+            "id" => [1, 2, 3],
+            "renamed" => [9, 8, 7],
+        };
 
         // Every line kind the renderer can write, so a field introduced
         // anywhere in the format has to show up in this set.
@@ -261,12 +335,20 @@ mod tests {
             render(&key_only, &key_only),
             render(&renamed_old, &renamed_new),
             render(&fanned_old, &fanned_new),
+            // Issue lines are part of the format too, and carry fields of
+            // their own, so a rendering that has them belongs here.
+            render_hinted(
+                &renamed_old,
+                &hinted_new,
+                &["col_rename(amount -> renamed)"],
+            ),
+            render_hinted(&renamed_old, &hinted_new, &["col_rename(amount -> absent)"]),
         ]
         .join("\n");
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from(["basis", "overlap", "type"])
+            BTreeSet::from(["basis", "missing", "overlap", "type"])
         );
     }
 
@@ -437,6 +519,23 @@ mod tests {
         assert_eq!(
             render(&old, &new),
             "col_key([\"id\"], basis: declared)\nrow_edit(2)"
+        );
+    }
+
+    #[test]
+    fn a_declined_hint_does_not_count_as_a_change() {
+        let table = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+
+        // An issue is context, like the key line. Two identical files still
+        // have nothing to report, however many instructions were dropped.
+        assert_eq!(
+            render_hinted(&table, &table, &["col_rename(value -> absent)"]),
+            "col_key([\"id\"], basis: declared)\n\
+             hint_ignored(col_rename(\"value\" -> \"absent\"), missing: \"absent\")\n\
+             no_changes()"
         );
     }
 

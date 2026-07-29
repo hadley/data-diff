@@ -116,6 +116,46 @@ row_add(2)
 
 So the pair earns its keep even where inference would have found the rename anyway: naming both sides is what makes the identity available early enough to match rows with.
 
+## A rename only you could know about
+
+```console
+data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id
+```
+
+`discount` became `markdown` and every one of its values changed at the same time. No evidence connects the two columns, so the diff reports exactly what it can see:
+
+```console
+$ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id
+col_key(["id"], basis: declared)
+col_drop("discount")
+col_add("markdown")
+```
+
+A hint supplies what the data cannot. It is written the way the output prints it, so the operation you want is the one you type:
+
+```console
+$ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
+    --hint 'col_rename("discount" -> "markdown")'
+col_key(["id"], basis: declared)
+col_rename("discount" -> "markdown")
+col_edit("markdown", values)
+```
+
+Note what the hint did *not* do. It asserted that the two columns are one, and nothing about their values, so the change it made visible is reported as an edit. Being unmatched is what had been hiding it: a dropped column has no cells to compare.
+
+A hint you get wrong is reported rather than obeyed, and the comparison still runs:
+
+```console
+$ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
+    --hint 'col_rename("discount" -> "mrkdown")'
+col_key(["id"], basis: declared)
+hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
+col_drop("discount")
+col_add("markdown")
+```
+
+For several hints, or for hints generated alongside a change, `--hints hints.txt` reads one per line and skips blank lines and `#` comments.
+
 ## Bounded fanout
 
 ```console

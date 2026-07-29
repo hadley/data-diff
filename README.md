@@ -34,6 +34,21 @@ data-diff old.parquet new.parquet --key customer_id/id
 > row_edit(2)
 ```
 
+## Hints
+
+When a change can't be worked out from the data --- e.g. a column renamed and rewritten at the same time --- you can say what happened. A hint is written the way the output prints it, so the operation you want is the one you type:
+
+```console
+data-diff old.parquet new.parquet --key id --hint 'col_rename("discount" -> "markdown")'
+> col_key(["id"], basis: declared)
+> col_rename("discount" -> "markdown")
+> col_edit("markdown", values)
+```
+
+The quotes are optional, and needed only for a name holding a comma, a bracket, an arrow, or spaces at either end. `--hint` repeats, and `--hints hints.txt` reads one per line, skipping blank lines and `#` comments.
+
+A hint asserts identity and nothing more: what changed inside the column it identified is still reported. One you get wrong is reported rather than obeyed, on a `hint_ignored()` line, and the comparison still runs.
+
 ## Output
 
 Output goes to stdout, one operation per line:

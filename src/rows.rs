@@ -57,11 +57,12 @@ mod tests {
 
     use super::{FanoutGroup, RowMatches, match_rows};
     use crate::DiffOptions;
-    use crate::key::resolve_key;
+    use crate::key::testing::resolve_key;
 
     fn rows(old: RecordBatch, new: RecordBatch, key: &[&str]) -> RowMatches {
         let options = DiffOptions {
             key: key.iter().map(|value| (*value).to_owned()).collect(),
+            hints: Vec::new(),
         };
         match_rows(&resolve_key(&old, &new, &options).unwrap())
     }

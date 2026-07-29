@@ -15,7 +15,7 @@ fn help_describes_the_initial_interface() {
     let stdout = String::from_utf8(output.stdout)
         .expect("stdout is UTF-8")
         .replace("data-diff.exe", "data-diff");
-    insta::assert_snapshot!(stdout, @r"
+    insta::assert_snapshot!(stdout, @"
     Compare two tabular data files
 
     Usage: data-diff [OPTIONS] <OLD> <NEW>
@@ -25,9 +25,11 @@ fn help_describes_the_initial_interface() {
       <NEW>  Modified Parquet file
 
     Options:
-          --key <KEY>  Comma-separated key columns, each a shared name or an old/new pair; when omitted, a single-column key is guessed
-      -h, --help       Print help
-      -V, --version    Print version
+          --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; when omitted, a single-column key is guessed
+          --hint <HINT>    A hint, written as the output prints it, such as 'col_rename(old -> new)'; repeatable
+          --hints <HINTS>  A file of hints, one per line, skipping blank lines and those starting with #
+      -h, --help           Print help
+      -V, --version        Print version
     ");
 }
 
@@ -413,4 +415,143 @@ fn empty_files_still_report_type_only_schema_changes() {
     col_edit("id", type: "Int32" -> "Int64")
     col_edit("value", type: "Int32" -> "Int64")
     "#);
+}
+
+#[test]
+fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "discount" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "markdown" => [99, 98, 97],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", r#"col_rename("discount" -> "markdown")"#])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    // The hint is written the way this very output prints it, and asserts
+    // identity only: the values that changed are still reported.
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(["id"], basis: declared)
+    col_rename("discount" -> "markdown")
+    col_edit("markdown", values)
+    "#);
+}
+
+#[test]
+fn reads_hints_from_a_file_with_comments_and_blank_lines() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let hints_path = dir.path().join("hints.txt");
+    let old = table! {
+        "id" => [1, 2],
+        "discount" => [10, 20],
+        "note" => ["a", "b"],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "markdown" => [99, 98],
+        "comment" => ["x", "y"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+    std::fs::write(
+        &hints_path,
+        "# renamed when the discount scheme changed\ncol_rename(discount -> markdown)\n\ncol_rename(note -> comment)\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args([std::ffi::OsStr::new("--hints"), hints_path.as_os_str()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(["id"], basis: declared)
+    col_rename("discount" -> "markdown")
+    col_rename("note" -> "comment")
+    row_edit(1)
+    row_edit(2)
+    "#);
+}
+
+#[test]
+fn reports_an_ignored_hint_beside_one_that_applied() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "discount" => [10, 20],
+        "note" => ["a", "b"],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "markdown" => [99, 98],
+        "comment" => ["x", "y"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", "col_rename(discount -> mrkdown)"])
+        .args(["--hint", "col_rename(note -> comment)"])
+        .output()
+        .unwrap();
+
+    // A hint the data contradicts is reported and skipped; it is not a failure,
+    // so the status stays zero and the rest of the run stands.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r#"
+    col_key(["id"], basis: declared)
+    hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
+    col_rename("note" -> "comment")
+    col_drop("discount")
+    col_add("markdown")
+    col_edit("comment", values)
+    "#);
+}
+
+#[test]
+fn rejects_a_hint_kind_that_is_not_supported_yet() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let table = table! { "id" => [1, 2] };
+    common::write_parquet(&old_path, &table);
+    common::write_parquet(&new_path, &table);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", "col_drop(id)"])
+        .output()
+        .unwrap();
+
+    // col_drop parses: the grammar reads every kind that claims an endpoint.
+    // What it cannot do yet is act on one, and saying so beats quietly
+    // producing a diff that ignored half of what was asked.
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stderr).unwrap(), @r#"hint "col_drop(id)" asks for "col_drop", which is not supported yet; only col_rename can be asserted"#);
 }

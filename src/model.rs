@@ -10,6 +10,11 @@ pub struct DiffOptions {
     /// A component is one column name used on both sides, or an `old/new` pair
     /// naming a column that differs between them.
     pub key: Vec<String>,
+    /// Hints, each written in the human format's own line grammar.
+    ///
+    /// Raw spellings rather than parsed hints, so that parsing, and the errors
+    /// it can raise, belong to the library rather than to each caller.
+    pub hints: Vec<String>,
 }
 
 /// An error that prevents a complete diff.
@@ -61,6 +66,12 @@ pub enum DiffError {
     NonUniqueOldKey { first_row: usize, row: usize },
     /// New-side duplication is too broad to be read as fanout.
     ExcessiveFanout { affected: usize, shared: usize },
+    /// A hint could not be read as a line of the format's grammar.
+    MalformedHint { hint: String },
+    /// A hint named an operation that cannot be asserted.
+    UnknownHintKind { hint: String, kind: String },
+    /// A hint named an operation that is understood but not yet applied.
+    UnsupportedHintKind { hint: String, kind: String },
     /// Same-name non-key columns cannot be compared.
     IncompatibleColumns {
         column: String,
@@ -141,6 +152,18 @@ impl std::fmt::Display for DiffError {
                 f,
                 "declared key fans out for {affected} of {shared} shared key values, \
                  above the {MAX_FANOUT_PERCENT}% limit; supply a different --key"
+            ),
+            DiffError::MalformedHint { hint } => write!(
+                f,
+                "hint {hint:?} is not a line of the form col_rename(old -> new)"
+            ),
+            DiffError::UnknownHintKind { hint, kind } => {
+                write!(f, "hint {hint:?} names {kind:?}, which is not an operation")
+            }
+            DiffError::UnsupportedHintKind { hint, kind } => write!(
+                f,
+                "hint {hint:?} asks for {kind:?}, which is not supported yet; \
+                 only col_rename can be asserted"
             ),
             DiffError::IncompatibleColumns {
                 column,
@@ -358,6 +381,56 @@ impl Default for EditSummary {
     }
 }
 
+/// What a hint claimed, by name rather than by position.
+///
+/// Names rather than coordinates because a hint may name a column that does not
+/// exist, which is one of the things an issue has to be able to report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HintClaim {
+    pub kind: HintKind,
+    pub old: String,
+    pub new: String,
+}
+
+/// The kind of claim a hint makes against column identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintKind {
+    /// Both endpoints are one column.
+    Rename,
+}
+
+impl HintKind {
+    /// The operation name this kind is written and printed as.
+    pub fn name(&self) -> &'static str {
+        match self {
+            HintKind::Rename => "col_rename",
+        }
+    }
+}
+
+/// Something reconciliation declined to do, and why.
+///
+/// An issue is not a failure. It reports an instruction that could not be
+/// followed, or an ambiguity left for the user, while the comparison itself
+/// completed; the exit status is unaffected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Issue {
+    pub kind: IssueKind,
+    /// The hints the issue concerns, in the order they were supplied.
+    pub hints: Vec<HintClaim>,
+}
+
+/// A stable identifier for what went wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IssueKind {
+    /// A hint named a column that is absent from the side it named it on.
+    HintMissingTarget { side: Side, column: String },
+    /// Hints made claims that cannot all hold, so none of them was applied.
+    ContradictoryHints,
+    /// A hint claimed two columns are one, but their values cannot be compared.
+    HintIncompatibleTypes { old_type: String, new_type: String },
+}
+
 /// An inspectable, coordinate-only table diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diff {
@@ -368,6 +441,8 @@ pub struct Diff {
     pub order: OrderDiff,
     pub cells: Vec<CellCoordinate>,
     pub summary: EditSummary,
+    /// Instructions declined and ambiguities left unresolved.
+    pub issues: Vec<Issue>,
 }
 
 #[cfg(test)]

@@ -207,13 +207,15 @@ mod tests {
     use crate::DiffOptions;
     use crate::agreement::Aligned;
     use crate::compare::CanonicalValue;
-    use crate::key::resolve_key;
+    use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
-    use crate::schema::{SchemaMatches, reconcile_schema};
+    use crate::schema::SchemaMatches;
+    use crate::schema::testing::reconcile_schema;
 
     fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
@@ -391,6 +393,7 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["id".into()],
+            hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);

@@ -136,9 +136,9 @@ mod tests {
 
     use super::{ChangedCell, ColumnChanges, FanoutChanges, compare_cells};
     use crate::DiffOptions;
-    use crate::key::resolve_key;
+    use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
-    use crate::schema::reconcile_schema;
+    use crate::schema::testing::reconcile_schema;
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
@@ -149,6 +149,7 @@ mod tests {
     fn changes_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> super::CellChanges {
         let options = DiffOptions {
             key: key.iter().map(|name| (*name).to_owned()).collect(),
+            hints: Vec::new(),
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
