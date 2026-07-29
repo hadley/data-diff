@@ -21,8 +21,9 @@ pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind, Issue,
-    IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas, Side,
+    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind, HintNames,
+    Issue, IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas,
+    Side,
 };
 
 /// Compare two in-memory tables.
@@ -50,13 +51,27 @@ pub fn diff_tables(
     let mut schema = schema::reconcile_schema(old, new, &key, &hints.map)?;
 
     // Both resolve column identity, before ordering and cells go on to read it
-    rename::infer(old, new, &mut schema, &rows);
-    swap::infer(old, new, &mut schema, &rows, &hints.map);
+    rename::infer(old, new, &mut schema, &rows, &hints.map);
+    swap::infer(old, new, &mut schema, &rows, &hints);
 
     let order = order::detect_order(&schema, &rows);
     let cells = cells::compare_cells(old, new, &schema, &rows);
-    let summary = summary::summarize(&cells);
+    // Edit hints are judged here rather than with the rest: whether the identity
+    // they name exists needs inference, and whether it changed needs the cells.
+    let (edit_issues, forced) = hint::validate_edits(&hints, &schema, &cells);
+    let summary = summary::summarize(&cells, &forced);
     let changed_cells = cells.changed_cells();
+
+    // Issues arise on both sides of the comparison, and the seam is nothing a
+    // reader should have to see. Ordering by the hint each one concerns puts
+    // them in the order the instructions were written.
+    let mut issues = hints.issues;
+    issues.extend(edit_issues);
+    issues.sort_by_key(|pending| pending.at);
+    let issues = issues
+        .into_iter()
+        .map(|pending| pending.issue)
+        .collect::<Vec<_>>();
 
     Ok(Diff {
         schemas,
@@ -139,7 +154,7 @@ pub fn diff_tables(
                 )
             })
             .collect(),
-        issues: hints.issues,
+        issues,
         summary: EditSummary {
             optimal: summary.optimal,
             columns: summary

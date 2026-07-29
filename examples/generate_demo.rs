@@ -186,6 +186,28 @@ fn main() {
         },
     );
 
+    // "region" went and "zone" arrived, and their values happen to agree in
+    // every shared row, so inference identifies them. Only the user knows the
+    // two columns have nothing to do with each other.
+    write(
+        &output,
+        "replace-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "region" => ["north", "south", "east"],
+            "note" => ["ok", "ok", "ok"],
+        },
+    );
+    write(
+        &output,
+        "replace-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "zone" => ["north", "south", "east"],
+            "note" => ["ok", "ok", "ok"],
+        },
+    );
+
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(

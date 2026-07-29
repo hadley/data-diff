@@ -70,8 +70,6 @@ pub enum DiffError {
     MalformedHint { hint: String },
     /// A hint named an operation that cannot be asserted.
     UnknownHintKind { hint: String, kind: String },
-    /// A hint named an operation that is understood but not yet applied.
-    UnsupportedHintKind { hint: String, kind: String },
     /// Same-name non-key columns cannot be compared.
     IncompatibleColumns {
         column: String,
@@ -155,16 +153,12 @@ impl std::fmt::Display for DiffError {
             ),
             DiffError::MalformedHint { hint } => write!(
                 f,
-                "hint {hint:?} is not a line of the form col_rename(old -> new)"
+                "hint {hint:?} is not a line of the form col_drop(old), col_add(new), \
+                 col_edit(column), or col_rename(old -> new)"
             ),
             DiffError::UnknownHintKind { hint, kind } => {
                 write!(f, "hint {hint:?} names {kind:?}, which is not an operation")
             }
-            DiffError::UnsupportedHintKind { hint, kind } => write!(
-                f,
-                "hint {hint:?} asks for {kind:?}, which is not supported yet; \
-                 only col_rename can be asserted"
-            ),
             DiffError::IncompatibleColumns {
                 column,
                 old_type,
@@ -388,8 +382,21 @@ impl Default for EditSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HintClaim {
     pub kind: HintKind,
-    pub old: String,
-    pub new: String,
+    pub names: HintNames,
+}
+
+/// The names a hint was written with.
+///
+/// As written rather than as resolved, so that reporting a hint back to its
+/// author shows them what they typed. `col_drop(a)` has one name and
+/// `col_rename(a -> b)` has two, and `col_edit` takes either form, so the shape
+/// is the hint's own rather than something its kind determines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HintNames {
+    /// One name, whose side the kind settles.
+    Single(String),
+    /// An old-to-new pair.
+    Pair(String, String),
 }
 
 /// The kind of claim a hint makes against column identity.
@@ -397,6 +404,12 @@ pub struct HintClaim {
 pub enum HintKind {
     /// Both endpoints are one column.
     Rename,
+    /// The new endpoint has no partner.
+    Add,
+    /// The old endpoint has no partner.
+    Drop,
+    /// An identity changed, claiming no endpoint of its own.
+    Edit,
 }
 
 impl HintKind {
@@ -404,6 +417,9 @@ impl HintKind {
     pub fn name(&self) -> &'static str {
         match self {
             HintKind::Rename => "col_rename",
+            HintKind::Add => "col_add",
+            HintKind::Drop => "col_drop",
+            HintKind::Edit => "col_edit",
         }
     }
 }
@@ -429,6 +445,10 @@ pub enum IssueKind {
     ContradictoryHints,
     /// A hint claimed two columns are one, but their values cannot be compared.
     HintIncompatibleTypes { old_type: String, new_type: String },
+    /// An edit hint named an identity that reconciliation did not establish.
+    HintUnresolvedIdentity,
+    /// An edit hint named an identity that changed in neither type nor value.
+    HintNoChange,
 }
 
 /// An inspectable, coordinate-only table diff.

@@ -1,173 +1,178 @@
 ---
-title: Validated rename hints
+title: The remaining hint kinds
 ---
 
 # Todo
 
-- [x] **Parse the hint vocabulary.** Add `src/hint.rs` with a parser for the subset hints occupy: `kind(name)` and `kind(name -> name)`, where a name is bare and trimmed or JSON-quoted and exact. Every kind that claims an endpoint of the bijection parses — `col_rename`, `col_add`, `col_drop` — so the next step adds what add and drop *do* rather than how they are spelled. Acting on one that is not implemented yet is a fatal `DiffError` distinct from the one an unrecognized kind raises. A malformed line or the wrong shape of argument is likewise fatal.
-- [x] **Add the issue channel.** `Diff` gains `issues: Vec<Issue>`, a non-fatal channel whose stable kinds are `hint_missing_target` and `contradictory_hints` for this step. An issue never changes the exit status: it says what reconciliation declined to do, not that it failed.
-- [x] **Resolve hint endpoints.** Look each named column up on its own side, reporting `hint_missing_target` for a hint naming a column that is absent, and `hint_incompatible_types` for one whose two columns cannot be compared, rather than failing the comparison in either case. Collapse hints that resolve to the same pair of endpoints.
-- [x] **Reject contradictory claims by group.** Build the claim graph over surviving hints, and reject every hint in any connected group that claims an old or new endpoint more than once, reporting `contradictory_hints` once for the group. Input order must not decide a winner.
-- [x] **Reserve hint identities first.** Apply accepted identities before key resolution, so a key component can name a renamed key column from either side and key guessing can select one, and pass them into `reconcile_schema` so they reserve their endpoints before names are matched. Validate key uniqueness on resolved coordinates, and keep hinted identities out of swap inference.
-- [x] **Accept hints on the command line.** `--hint` takes one hint and repeats; `--hints` takes a file of one hint per line, skipping blank lines and `#` comments. Both feed the same parser, and `DiffOptions` carries the raw spellings so the library owns parsing.
-- [x] **Render issues.** Issues follow the `col_key()` line and precede the operations, being context for what the diff does not say. Each renders as `hint_ignored()` applied to what was ignored, with the reason as a field.
-- [x] **Cover the machinery.** Unit tests in `src/hint.rs` for the grammar, quoting, trimming, unknown kinds, duplicate collapsing, missing targets, and each conflict shape. Integration coverage in `tests/diff.rs` for a hint that inference could not have found, a hint contradicted by a key component, and a rejected group leaving independent hints standing; CLI snapshots in `tests/cli.rs` for `--hint`, `--hints`, and an ignored hint.
-- [x] **Refresh the demo datasets and documentation.** Add a `demo/hint-rename-*.parquet` pair whose renamed column changed too much to be inferred, describe it in `demo/README.md`, and document `--hint` and `--hints` in `README.md`.
+- [x] **Give a hint a shape that fits all four kinds.** `HintClaim` carries the names as written — one name, or an old-to-new pair — rather than always two, so `col_drop(a)` reports as `col_drop(a)`. `HintKind` gains `Add`, `Drop`, and `Edit`. `DiffError::UnsupportedHintKind` goes: with the vocabulary complete there is nothing left for it to name.
+- [x] **Teach `ColumnMap` that an endpoint can be reserved unmatched.** A pair is not the only thing a hint can assert. `col_drop` and `col_add` reserve one endpoint as having no partner, which the map must hold and must refuse to pair, exactly as it refuses an endpoint already paired.
+- [x] **Generalise the contest to claims rather than renames.** Each hint asserts something about each endpoint it names — paired with a particular partner, paired with an unknown one, or unmatched. Two hints conflict when they assert different things about one endpoint, which subsumes the rename-versus-rename rule the code has now and adds every cross-kind shape at once.
+- [x] **Resolve `col_edit` to the identity it attaches to.** An edit reserves nothing; it names an identity by one or both of its ends, and the identity may not exist until inference has run. Resolution records the endpoints, and attachment waits.
+- [x] **Keep reserved endpoints out of rename inference.** `rename::infer` draws its candidates from the provisional drops and additions, which is exactly where a reserved endpoint sits. It gains the map and filters both candidate lists, which is the performance argument the design makes for these two kinds as well as the correctness one.
+- [x] **Protect an edited identity from swap inference too.** `swap::eligible` already excludes a pair the map records as hinted, and that exclusion stays exactly as it is. An edit hint protects an identity it does not own and so is not in the map, so eligibility gains a second question beside the first: a pair is ineligible when the map has it hinted *or* a resolved edit attaches to it.
+- [x] **Validate and apply edits after the cells are known.** Attach each edit to its final identity, reporting `hint_unresolved_identity` where there is none and `hint_no_change` where the identity changed in neither type nor value. Surviving edits force their column into the edit set, taking their cells out of the row summary.
+- [x] **Order the issues by the hints they concern.** Issues now arise in two phases either side of the whole comparison. A reader scanning the hints they supplied should find the complaints in that order, not in phase order.
+- [x] **Render the new lines.** `hint_ignored()` gains `unchanged` and `unresolved` as reasons, and a single-name claim renders with one name.
+- [x] **Accept the kinds on the command line.** No new flags: `--hint` and `--hints` already carry whatever the parser accepts, so this is the acceptance test that they do.
+- [x] **Cover the machinery.** Unit tests in `src/hint.rs` for each kind's resolution and for every cross-kind conflict shape; in `src/summary.rs` for a forced column; integration coverage in `tests/diff.rs` for replacement chosen over rename, an edit overriding a swap, an edit overriding the row summary, and both new issues; CLI snapshots in `tests/cli.rs`.
+- [x] **Refresh the demo datasets and documentation.** Add a `demo/replace-*.parquet` pair whose columns inference would otherwise identify as a rename, describe it and the two `col_edit()` uses in `demo/README.md`, and document all four kinds in `README.md`.
 - [x] **Complete the acceptance pass.** Run `cargo build --workspace --all-targets`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`, and confirm repeated runs still produce byte-identical output.
 
 # Goal
 
-Inference now finds a renamed column when its values survived, mostly survived, or were exchanged with another column's. It cannot find one that was renamed and rewritten, and it never will: at that point the values are evidence of nothing, and the only thing that knows the two columns are the same is the person who changed them. This step lets them say so, in the notation the tool already uses to say it back:
+`col_rename` was the hint kind that could not be done without: no evidence connects a column renamed and rewritten at the same time, so without an instruction that identity is unreachable. The other three are different. Each of them contradicts a conclusion the tool reached on its own, and reaches it wrongly.
+
+Inference identifies a dropped column with an added one whenever their values agree. Usually that is right, and sometimes it is a coincidence about two columns that have nothing to do with each other:
 
 ```console
-$ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
-    --hint 'col_rename("discount" -> "markdown")'
-col_key(["id"], basis: declared)
-col_rename("discount" -> "markdown")
-col_edit("markdown", values)
+$ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id
+col_key([id], basis: declared)
+col_rename(region -> zone)
+
+$ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id \
+    --hint 'col_drop(region)' --hint 'col_add(zone)'
+col_key([id], basis: declared)
+col_drop(region)
+col_add(zone)
 ```
 
-Without the hint that pair is a `col_drop()` and a `col_add()`, and the values that changed are invisible, unmatched columns having no cells. With it the column keeps its identity, and what happened to its values becomes an edit. A hint asserts identity, not correctness, so the `col_edit()` is not suppressed by the hint that made it visible.
+Two hints rather than one, and deliberately so. Either alone would produce both lines, the unreserved endpoint having nothing left to pair with, but a replacement is two assertions and the design reads them as one deliberate pair rather than as a contradiction.
 
-The hint is spelled the way the output spells it, deliberately. A user resolving an ambiguity is looking at the answer they want on their screen, and an LLM generating hints has the same one grammar to target.
-
-Hints are also the first thing a user can get wrong, so the tool has to be honest about ignoring one:
+`col_edit` overrides the other two ambiguities the design names. A swap is inferred when two same-named columns each hold what the other used to; that is usually the better account, and where it is not, saying one of the columns was edited is enough to withdraw it:
 
 ```console
-$ data-diff old.parquet new.parquet --key id --hint 'col_rename("discount" -> "mrkdown")'
-col_key(["id"], basis: declared)
-hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
-col_drop("discount")
-col_add("markdown")
+$ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id --hint 'col_edit(price)'
+col_key([id], basis: declared)
+col_edit(price, values)
+col_edit(cost, values)
 ```
 
-That is the other half of the step, and the larger half in code: parsing, endpoint resolution, deduplication, conflict rejection, and a channel to report all of it. Every later hint kind reuses it, so this step builds it once for a single kind.
+And a rectangular change can be summarized by rows or by columns; where the tool chose rows and the user knows the change was to a column, the hint says which:
+
+```console
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
+    --hint 'col_edit(a)' --hint 'col_edit(b)'
+col_key([id], basis: declared)
+col_edit(a, values)
+col_edit(b, values)
+col_edit(c, values)
+```
+
+Each of these is an instruction that withdraws an inference, which is why all three wait until the inferences existed to be withdrawn. What they share with `col_rename` is everything else: the grammar, endpoint resolution, deduplication, conflict rejection, and the issue channel, all built in the previous step to be extended here rather than rebuilt.
 
 # Scope
 
 ## What changes
 
-* `src/hint.rs`: new — the grammar, endpoint resolution, deduplication, and conflict grouping, claiming into the shared bijection.
-* `src/model.rs`: `Issue` and its kinds, `Diff::issues`, and `DiffOptions::hints`.
-* `src/key.rs`: key components resolve through hint identities.
-* `src/schema.rs`: `ColumnMap`, the partial bijection every stage claims through, and `reconcile_schema` continuing the one hints began.
-* `src/lib.rs`: hints resolve before the key, and their issues reach the `Diff`.
-* `src/human.rs`: issues rendered above the operations.
-* `src/main.rs`: `--hint` and `--hints`.
+* `src/hint.rs`: three more kinds acted on, endpoint claims generalised beyond renames, and `col_edit` resolution and later validation.
+* `src/schema.rs`: `ColumnMap` holds reservations as well as pairs, and `reconcile_schema` leaves a reserved endpoint unmatched.
+* `src/rename.rs`: reserved endpoints leave the candidate lists.
+* `src/swap.rs`: an edited identity joins the hinted one in being ineligible.
+* `src/summary.rs`: a hinted column is forced into the edit set beside a retyped one.
+* `src/model.rs`: `HintClaim`'s names, `HintKind`'s three new kinds, two new `IssueKind`s, and one `DiffError` removed.
+* `src/human.rs`: single-name claims and two new reasons.
+* `src/lib.rs`: edit validation after cells, and issue ordering.
 * `tests/diff.rs` and `tests/cli.rs`.
 * `examples/generate_demo.rs`, `demo/README.md`, and `README.md`.
 
 ## What stays and why
 
-`design.md` needs no amendment. Its "Initial hint processing" section is implemented here for one kind, and the ordering constraint in its reconciliation overview — that `col_rename()` is applied before resolving keys, so rows can be matched even when key column names changed — is what this step wires up. The line grammar it now states, and the two lines regularised to obey it, landed first in their own change, on the argument that a format about to become an input language should not have an irregular verb in it.
+`design.md` needs no amendment. Its "Initial hint processing" section describes this step almost line for line, including the conflict shapes, the reading of `col_add` beside `col_drop` as replacement, and the two issue kinds added here; the same is true of the sentence in edit summarization that forces a hinted column into the edit set. The one thing worth checking against it at the end is that all five hint issue kinds it names now exist.
 
-Nothing about inference changes. A hint identity is an identity like any other, so it is not a rename candidate, and it is not swap-eligible because its ends carry different names. Both fall out of what those stages already ask for, and the tests assert them rather than new code enforcing them.
+`--hint` and `--hints` do not change. The library owns parsing, the CLI passes spellings through, and a kind the parser learns is a kind the flags accept.
+
+No threshold moves. A hint withdraws an inference; it does not retune the one that made it.
 
 ## Explicitly deferred
 
-* **The other three hint kinds.** `col_add`, `col_drop`, and `col_edit`, their conflict shapes against renames, and the `hint_no_change` and `hint_unresolved_identity` issues are the next queue entry. The grammar and the issue channel are built here to be extended, not rebuilt.
-* **`invalid_key` as an issue.** The design describes a rejected declared key as an issue that falls back to guessing; it is a fatal error today. Moving it into this channel belongs with the row-number fallback entry, which owns the surrounding rework.
-* **Hints from the UI.** The design expects hints from an interactive session as well as the command line. `DiffOptions` carrying raw spellings is what makes that possible later; nothing interactive is built here.
-* **A parser for the whole grammar.** Only the subset hints occupy is parsed. `col_key()`, `col_order()`, and the row operations are output-only, and writing a reader for lines nothing can supply would be inventing a requirement.
+* **Folding `SchemaMatches` into `ColumnMap`.** The next queue entry owns that merge, along with recording where each identity came from. This step passes the map into `rename::infer` the way `swap::infer` already takes it, which is the shape that merge will remove — worth doing twice rather than doing the merge early and mixing two changes.
+* **`invalid_key` as an issue.** Still fatal, still the row-number fallback entry's business.
+* **The incompatible same-name pair.** A `col_drop` on such a column would happen to route around the fatal error, since a reserved endpoint is never compared. That is a side effect, not a fix, and the queue entry that settles the reading stands.
+* **Budgets and sampling.** Reserved endpoints shrink the candidate lists rename inference walks, which is a real cost saving and not a bound.
 
 # Design
 
-## What hints need from the grammar
+## What each kind asserts
 
-`design.md` now states the grammar the human format obeys, and the two lines that broke it were regularised before this step began, so what follows can assume a format with no exceptions in it:
+The four kinds make three different kinds of claim against the bijection, and the differences matter more than the count:
 
-```
-line      := kind "(" [ argument { ", " argument } ] ")"
-argument  := value | field
-field     := name ": " value
-value     := quoted | number | word | pair | list | line
-pair      := value " -> " value
-list      := "[" [ value { ", " value } ] "]"
-```
+* `col_rename(old -> new)` claims both endpoints, as a pair. This is the previous step's work and does not change.
+* `col_drop(old)` and `col_add(new)` claim one endpoint each, as having no partner. This is new: the map has held only pairs so far, and "reserved unmatched" is a second thing an endpoint can be.
+* `col_edit(...)` claims no endpoint at all. It attaches to an identity that something else established, and its whole effect is on stages that run later.
 
-Hints occupy a small subset: `kind(name)` and `kind(name -> name)`. That is the whole of it, because a hint asserts identity and nothing else — the details a `col_edit()` prints are conclusions, not instructions. So the parser is small, and it is written against the grammar rather than against `col_rename` so the next step adds kinds without touching syntax.
+A reservation has to be held in the map rather than applied as a filter at each stage, for the same reason the previous step moved hint identities into the map: an endpoint that two stages must agree about is one the map should own. Reconciliation then needs no rule about hints — a reserved old column is skipped by name matching because the map refuses to pair it, and falls out as a drop because the map has no pair for it, which is already how every drop is derived.
 
-An argument is bare or quoted. Bare is trimmed, so `col_rename(discount -> markdown)` means what it looks like rather than naming a column ` markdown`. Quoted is exact, decoded by the same JSON rules the output encodes with, so a name containing a comma, a bracket, an arrow, a newline, or its own leading space can be named. Column names are exact and case-sensitive everywhere else in this tool; quoting is what keeps that true here without making the common case unreadable.
+## The contest, generalised
 
-This is deliberately better than `--key`, whose `/` and `,` separators leave a column named `a/b` unreachable. That wart is not worth propagating, and fixing it is not this step's business either.
+The current conflict rule is about renames: an endpoint wanted twice, or wanted by a claim when the map holds it for someone else. Adding three kinds could mean adding the design's list of cross-kind shapes one at a time — an old endpoint both renamed and dropped, a new endpoint both renamed and added, an edit contradicted by an add or a drop. It should not, because they are all one shape.
 
-## Fatal, or reported
+Read every claim as a statement about each endpoint it names:
 
-Two failure modes look alike and are not:
+| Claim | About its old endpoint | About its new endpoint |
+|---|---|---|
+| `col_rename(a -> b)` | paired with new `b` | paired with old `a` |
+| `col_drop(a)` | unmatched | — |
+| `col_add(b)` | — | unmatched |
+| `col_edit(a -> b)` | paired with new `b` | paired with old `a` |
+| `col_edit(a)` | paired with new `a` | paired with old `a` |
 
-* The hint is not a hint. An unknown kind, an unclosed bracket, an argument that is not a name or a pair: nothing can be done with the string, and the user has mistyped a command. That is a `DiffError`, like `MalformedKeyComponent`, and the comparison does not run.
-* The hint is well formed and wrong about the data. It names a column that is not there, it names two columns whose values cannot be compared, or it contradicts another hint. Reconciliation proceeds perfectly well without it, so it is dropped, reported, and the exit status stays zero.
+Two hints conflict when they say different things about one endpoint: paired with two different partners, or paired against unmatched. Two hints that say the same thing about the same endpoints are duplicates and collapse. Nothing else is a conflict, which is why `col_drop(a)` beside `col_add(b)` is fine — they name endpoints in different halves of the bijection and never meet.
 
-The line between them is whether the tool can tell what was meant.
+That rule subsumes the rename-versus-rename check rather than sitting beside it, and it produces every shape the design lists without any of them being written down. It extends to the map the same way it does today: a claim conflicts with what the map already holds when the map says something different about one of its endpoints, which is how a key component keeps beating a hint without either knowing about the other.
 
-The incompatible-types case is the one worth spelling out, because it is the only reason a hint has to be checked against types at all. An accepted identity goes on to be compared cell by cell, and a boolean against an integer has no comparison; left unchecked, the hint would sail through resolution and conflict detection and then abort the entire diff from inside cell comparison. Declining it there instead costs one instruction and keeps everything else.
+Group rejection is unchanged. Claims that share an endpoint are reported as one set of rivals, and the whole group goes rather than input order choosing a winner.
 
-## What a hinted identity is safe from
+## What a `col_edit` names
 
-Two invariants follow from a hint being an instruction rather than a default.
+An edit hint has to name an identity, and an identity has two ends that may carry different names. `col_edit(a)` names the identity with `a` at both ends; `col_edit(a -> b)` names the one from old `a` to new `b`. Both spellings are the ones the format prints for the corresponding rename, so the single form is what a user types for the ordinary case and the pair form covers a renamed column.
 
-A key's components must resolve to distinct columns, and that has to be checked on the resolved coordinates rather than the names. `--key id,customer_id` beside a `customer_id -> id` hint resolves both components through that one identity, so two differently spelled components land on the same column while the existing duplicate-name check sees nothing wrong.
+Where only one side has the name, the hint still resolves: `col_edit(a)` with no new `a` names an identity whose old end is `a`, whatever the other end turns out to be. That is what lets a `col_edit()` line printed about an inferred rename be fed back in, since such a line carries only the new name. Both sides missing is `hint_missing_target` like any other.
 
-Swap inference does not reconsider a hinted identity. Every other exclusion from swap candidacy — a key component, an inferred rename — is about a default that better evidence may override. A hint is not a default. This only bites for a hint whose two ends carry the same name, since every other hinted identity is already ineligible for having different ones, and it is what makes `col_rename(a -> a)` mean something: it pins `a` against being read as half of an exchange.
+This is the one place the strict reading might annoy. `col_edit(a)` alongside `col_rename(a -> c)`, with a new `a` also present, is a conflict: the edit says old `a` pairs with new `a` and the rename says it pairs with new `c`. The user meant the renamed column and must write `col_edit(a -> c)`. The alternative — letting a single name mean "whatever this end pairs with" even when the other side has that name too — would make `col_edit(price)` ambiguous in exactly the swap case the kind exists for, which is a worse trade than an occasional rejected spelling.
 
-## Conflicts, and why the group loses
+Attachment happens after everything else. The hint matches the final identity that agrees with every endpoint it resolved: both, if it resolved both, and otherwise the one identity holding the end it knows. No such identity is `hint_unresolved_identity` — the column was dropped, or added, or ended up paired with something else.
 
-Rename claims form a bipartite graph, each hint an edge from an old endpoint to a new one, and a valid set is a matching. Any endpoint with two edges is a contradiction: one old column renamed to two new ones, or two old columns to one new one.
+## When an edit takes effect
 
-The design rejects the whole connected group rather than picking a winner, and the reason bears restating because a smaller rule looks tempting. Given `col_rename(a -> b)` and `col_rename(a -> c)`, keeping the first decides by input order, making the result depend on which flag came first or how a file was written. Keeping neither is the only answer that treats two equally supported, mutually exclusive claims as what they are. Which claims go is settled endpoint by endpoint: one is rejected exactly when a rival wants an endpoint of it. Grouping them into connected components changes only the reporting — it cannot reach a claim that was not already contested, since reaching one means sharing an endpoint — and what it buys is one issue naming a whole set of rivals rather than one per claim, so a reader can see that they conflict with each other.
+The three things a `col_edit` does happen at three different times, and it cannot be otherwise:
 
-Deduplication runs first, so two identical hints are one claim rather than a self-conflict, and identity is judged after endpoint resolution, so a quoted and a bare spelling of the same pair collapse.
+1. **Conflict detection**, with the other hints, before anything is resolved. It claims no endpoint but it does assert an identity, and an assertion can contradict one.
+2. **Swap protection**, before `swap::infer`. This is the design's stated purpose for the kind and it must be in place before the inference it withdraws. It is added to the protection already there rather than substituted for it: `design.md` requires every hinted identity to be safe from swaps, and a rename hint's identity is protected because the map records it as hinted. An edit is never in the map, having claimed no endpoint, so it needs a second question — but the first one is still load-bearing, and dropping it would let a swap overrule an accepted `col_rename`, which is the one thing that section of the design forbids by name.
+3. **Validation and forcing**, after cells are compared. Whether the identity exists, and whether anything about it changed, are not knowable earlier.
 
-## One bijection, claimed in stages
+Only the third can report, which is why `hint_no_change` and `hint_unresolved_identity` arrive after the comparison has finished while every other issue arrives before it starts. The output must not show that seam: issues render in the order of the hints that caused them, so a user reads their complaints in the order they wrote their instructions. `Diff::issues` is ordered the same way, since a consumer has the same expectation and there is no second ordering worth having.
 
-`design.md` describes column identity as a partial bijection with a settled order of precedence: paired key components and rename hints claim first, remaining same-named columns take what is left, and inference fills in from there. That is one object, and it is now one object in the code — `ColumnMap`, holding the pairs and refusing any claim on an endpoint already spent.
+Forcing is a small change to summarization and not a new mechanism. `summarize` already holds retyped columns out of the optimization and emits them as column edits; a hinted identity joins them on the same terms, its cells leaving the row graph so the row edits recompute around it. That is what makes the `scatter` fixture's `row_edit(1)` become a second `col_edit()`: the minimum cover is minimum over what is left to cover.
 
-The alternative, which this step started out with, was for hints to keep their own list of identities that `reconcile_schema` merged with the key's before matching names. That works, but it means the bijection exists in two places at once, with the invariant that no endpoint is used twice enforced separately in each. Claiming through one map instead makes the precedence order literally the order of the calls, and lets the drops and additions fall out of what the map has no pair for, which is exactly the definition.
+## What is not reported
 
-Hints run before the key, so they cannot be handed a `SchemaMatches` to add to — the schema is reconciled after row matching. What they are handed instead is nothing, and what they return is the seed. `ColumnMap` carries one bit of provenance beside each pair, whether a hint asserted it, because swap inference must not reconsider an instruction. Recording where an identity really came from, and rendering it, is its own queued step.
+A `col_drop` that changed nothing is not an issue. `col_drop(a)` where old `a` had no partner anyway looks redundant, and is not: it kept the column out of rename inference, which is a decision even when the outcome matches. Redundancy is also not knowable at the point the other issues are raised, and inventing a fourth reporting phase to say "that hint agreed with me" would be noise.
 
-## Key components claim first
-
-Rename identities apply before key resolution, which is what lets `--key id` work when the old file calls that column `customer_id`. A key component naming a single column therefore resolves through the hint identities: it looks for that name on both sides, and where one side lacks it, an identity whose other end carries it supplies the missing endpoint.
-
-That leaves a key component and a hint claiming the same endpoint differently — `--key a/b` beside `col_rename(a -> c)`. The key wins and the hint is reported. Key components are not hints: they are load-bearing for row matching, and the design already has them establishing identity before validation. Making them peers in the conflict graph would let a mistyped hint invalidate the key and change every row event, a far worse failure than an ignored hint. So key claims are reserved before the graph is built, and hints conflict against them rather than with them.
-
-## How an issue renders
-
-An issue is not an operation. It says what reconciliation declined to do, which makes it the same sort of thing as the `col_key()` line: context for reading what follows. So issues render immediately after the key line and before the first operation.
-
-The head is `hint_ignored()` rather than the issue kind, with the kind carried as the reason field — `missing:` for an absent target, `contradictory` for a rejected group. One head keeps the line grammar's field names fixed and makes the important thing, that an instruction was dropped, the first thing read. The stable kinds stay in the model, where `Diff::issues` is what a consumer matches on.
-
-The subject is whatever the reason applies to: a single hint for a missing target, and the whole group for a contradiction, which is one line per group rather than one per hint repeating its rivals.
-
-```
-hint_ignored(col_rename("discount" -> "mrkdown"), missing: "mrkdown")
-hint_ignored([col_rename("a" -> "b"), col_rename("a" -> "c")], contradictory)
-```
-
-Issues go to stdout and leave the exit status alone. Stderr and a non-zero status mean the comparison did not happen; an ignored hint means it happened without one instruction, which a user piping the output needs to see because it changes what the operations mean.
+Nor is a `col_drop(a)` beside a surviving new `a`. Reserving the old endpoint leaves the new column with nothing to match, so the output carries a drop and an addition of the same name — which is the assertion, spelled exactly: these two columns are not the same column. `hint_no_change` belongs to `col_edit`, where the design defines it, and means the identity did not change rather than that the hint did not.
 
 # Verification
 
-* `src/hint.rs` unit tests cover: a bare and a quoted spelling resolving to one identity and collapsing; names needing quotes, including a comma, a bracket, an arrow, and a newline; whitespace trimmed around bare arguments and kept inside quoted ones; an unknown kind, an unclosed bracket, and a malformed argument each rejected as errors; a missing old target and a missing new target each reported; and the three conflict shapes — one old to two new, two old to one new, and a connected chain — each rejecting their whole group.
-* One test asserts an independent valid hint survives beside a rejected group, group rejection being meant as local rather than a reason to drop everything.
-* `tests/diff.rs` asserts a complete `Diff` for a hint inference could not have found, with the identity established, `added` and `dropped` empty, and the changed values reported as an edit — which is also the check that a hint asserts identity without asserting equality. A second test pins a hint contradicted by a key component, showing the key intact, the hint reported, and the columns left unmatched.
-* `tests/cli.rs` snapshots `--hint`, `--hints` reading a file with a comment and a blank line, and an ignored hint beside a successful one, confirming the exit status stays zero.
-* One test feeds a rendered `col_rename()` line straight back in as a hint and asserts the diff is unchanged, which is the claim that the format is an input language rather than merely resembling one.
-* Separate tests pin what the fixes above are for: an incompatible claim declined rather than aborting, two key components resolving through one hint rejected, a hinted identity surviving swap inference, a hint identity selected by key guessing, and a diff of two identical files still reporting `no_changes()` beneath a declined hint.
-* Two tests defend the ordering. One renames a key column and supplies only `--key id`, which can resolve only through the hint. One supplies a hint whose endpoints inference would otherwise have paired differently, showing the hint reserved them first.
-* The `hint_ignored()` line joins the field-name guard's fixtures, so `missing:` is checked against the fixed set like every other field, and the guard keeps covering every line kind the format can write.
+* `src/hint.rs` unit tests: each of the four kinds resolving; a single-name and a pair `col_edit` naming the same identity; a `col_edit` naming a column present on only one side; a drop and an add reserving their endpoints; and identical claims of each kind collapsing.
+* One test per cross-kind conflict shape, driven from the table above: renamed and dropped, renamed and added, edited and dropped, edited and added, and an edit contradicting a rename. Each rejects its whole group, and one test confirms `col_drop(a)` beside `col_add(b)` is not among them.
+* `src/swap.rs`'s existing `a_hinted_identity_is_not_reinterpreted_as_a_swap` keeps passing unaltered, which is the check that edit protection was added to the map exclusion rather than put in its place. A second test beside it covers an edit hint protecting an identity the map knows nothing about.
+* `src/summary.rs` gains a test that a forced column is emitted as a column edit and that the row summary recomputes around it, which is the claim that forcing goes through the optimizer rather than around it.
+* `tests/diff.rs` asserts a complete `Diff` for: a replacement chosen over an inferred rename, with the columns unmatched and no cells; an edit hint withdrawing a swap, with both identities same-named and both edited; an edit hint turning a row summary into a column one; a `col_edit` on an unchanged column reporting `hint_no_change` while the diff still reports `no_changes()`; and a `col_edit` on a column that ended up dropped reporting `hint_unresolved_identity`.
+* One test supplies a well-formed hint of each kind together in one invocation and asserts they do not interfere, group rejection being local.
+* One test pins the issue ordering: two hints that fail in different phases, supplied in each order, report in supply order both times.
+* `tests/cli.rs` snapshots a replacement, an edit overriding a swap, and an ignored edit, confirming the exit status stays zero.
+* A rendered `col_edit()` line about an inferred rename is fed back in as a hint and accepted, extending the previous step's round-trip claim to the kind whose printed line carries one name for a two-named identity.
+* The `hint_ignored()` fixtures in the field-name guard grow to cover the new reasons, so the fixed field-name set keeps its hold on every line the format can write.
 * Repeated runs of every new fixture are structurally and byte-identical.
 
 # Definition of done
 
 This step is complete when:
 
-* a `col_rename` hint establishes column identity, spelled as the output spells it, supplied inline with `--hint` or from a file with `--hints`;
-* a quoted argument can name any legal column name and a bare one is trimmed;
-* a malformed hint is a fatal error while a well-formed hint the data contradicts is reported and ignored, with the exit status unchanged;
-* identical hints collapse, and contradictory claims reject their whole connected group without input order deciding anything;
-* hint identities are reserved before key resolution and before name matching, so a key component can name a renamed key column;
-* `hint_missing_target` and `contradictory_hints` reach the `Diff` through an issue channel built for the kinds that follow, and render as `hint_ignored()` above the operations;
-* the demo datasets and both READMEs describe hinting a rename; and
+* `col_add` and `col_drop` reserve an endpoint as unmatched, keeping it out of name matching, rename inference, and swap inference, and a pair of them reads as replacement rather than as a contradiction;
+* `col_edit` attaches to an identity without reserving anything, withdraws a swap, and forces its column into the edit set;
+* conflicts are detected across all four kinds by one rule about what a claim asserts of an endpoint, rather than by a list of shapes, and still reject their whole connected group;
+* `hint_no_change` and `hint_unresolved_identity` reach the `Diff`, completing the five kinds `design.md` names, and render as `hint_ignored()` reasons;
+* issues report in the order the hints were supplied, whichever side of the comparison they were raised on;
+* `DiffError::UnsupportedHintKind` is gone, every kind the parser reads now being one the tool acts on;
+* the demo datasets and both READMEs describe replacement and both uses of `col_edit`; and
 * the full test suite, strict Clippy, formatting, and diff checks pass across the workspace, and repeated runs still produce byte-identical output.

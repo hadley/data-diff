@@ -533,25 +533,109 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
 }
 
 #[test]
-fn rejects_a_hint_kind_that_is_not_supported_yet() {
+fn chooses_replacement_over_a_rename_when_told_to() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let table = table! { "id" => [1, 2] };
-    common::write_parquet(&old_path, &table);
-    common::write_parquet(&new_path, &table);
+    let old = table! {
+        "id" => [1, 2, 3],
+        "region" => ["north", "south", "east"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "zone" => ["north", "south", "east"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
         .args(["--key", "id"])
-        .args(["--hint", "col_drop(id)"])
+        .args(["--hint", "col_drop(region)"])
+        .args(["--hint", "col_add(zone)"])
         .output()
         .unwrap();
 
-    // col_drop parses: the grammar reads every kind that claims an endpoint.
-    // What it cannot do yet is act on one, and saying so beats quietly
-    // producing a diff that ignored half of what was asked.
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    insta::assert_snapshot!(String::from_utf8(output.stderr).unwrap(), @r#"hint "col_drop(id)" asks for "col_drop", which is not supported yet; only col_rename can be asserted"#);
+    // The values agree everywhere, so inference would call this one renamed
+    // column. Reserving both endpoints says it is two.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_drop(region)
+    col_add(zone)
+    ");
+}
+
+#[test]
+fn withdraws_a_swap_when_told_the_column_was_edited() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "price" => [10, 20],
+        "cost" => [30, 40],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "price" => [30, 40],
+        "cost" => [10, 20],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", "col_edit(price)"])
+        .output()
+        .unwrap();
+
+    // Without the hint each column holds what the other used to, which reads
+    // as an exchange and prints two col_rename() lines.
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_edit(price, values)
+    col_edit(cost, values)
+    ");
+}
+
+#[test]
+fn reports_an_edit_hint_the_data_does_not_bear_out() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "value" => [10, 20],
+        "note" => ["a", "b"],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "value" => [10, 20],
+        "note" => ["a", "z"],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", "col_edit(value)"])
+        .args(["--hint", "col_edit(note)"])
+        .output()
+        .unwrap();
+
+    // Nothing about "value" changed, so that instruction is dropped and
+    // reported while the one beside it applies. Both are judged after the
+    // comparison, and the exit status is unaffected either way.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    hint_ignored(col_edit(value), unchanged)
+    col_edit(note, values)
+    ");
 }

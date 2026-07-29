@@ -156,6 +156,75 @@ col_add(markdown)
 
 For several hints, or for hints generated alongside a change, `--hints hints.txt` reads one per line and skips blank lines and `#` comments.
 
+## A replacement that looks like a rename
+
+```console
+data-diff demo/replace-old.parquet demo/replace-new.parquet --key id
+```
+
+`region` went and `zone` arrived, and their values agree in every row. That is the strongest evidence there is that two columns are the same column, so inference identifies them:
+
+```console
+$ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id
+col_key([id], basis: declared)
+col_rename(region -> zone)
+```
+
+Only you know the two have nothing to do with each other. `col_drop()` and `col_add()` reserve their columns as having no partner, which keeps them out of rename inference:
+
+```console
+$ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id \
+    --hint 'col_drop(region)' --hint 'col_add(zone)'
+col_key([id], basis: declared)
+col_drop(region)
+col_add(zone)
+```
+
+Either hint alone produces the same two lines here, the column left over having nothing else to pair with. That is a fact about this pair of files rather than about the hints: give `zone` a second candidate in the old file and `col_drop(region)` alone would identify it with that one instead, since reserving a column says that column has no partner and nothing about any other. Supplying both is how you say the whole of what you mean.
+
+## Saying which change it was
+
+Where a change can be read two ways, `col_edit()` says which. The swap above is the first case: two columns each holding what the other used to is usually an exchange, and where it is not, saying one of them was edited withdraws the reading.
+
+```console
+$ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id --hint 'col_edit(price)'
+col_key([id], basis: declared)
+col_edit(price, values)
+col_edit(cost, values)
+```
+
+Naming one column is enough. An exchange takes two, so withdrawing either end leaves both columns to be described under their own names.
+
+The second case is a rectangular change, which can be summarized by its rows or by its columns. The scatter fixture changes columns `a` and `b` in row 1, and column `c` in rows 2 and 3, and the smallest description mixes the two:
+
+```console
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
+col_key([id], basis: declared)
+col_edit(c, values)
+row_edit(1)
+```
+
+Hinting the two columns that row 1 accounts for takes their cells out of the reckoning, and what is left has no row worth naming:
+
+```console
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
+    --hint 'col_edit(a)' --hint 'col_edit(b)'
+col_key([id], basis: declared)
+col_edit(a, values)
+col_edit(b, values)
+col_edit(c, values)
+```
+
+An edit hint asserts that something changed, so one naming a column that did not is ignored and reported like any other hint the data contradicts:
+
+```console
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id --hint 'col_edit(id)'
+col_key([id], basis: declared)
+hint_ignored(col_edit(id), unchanged)
+col_edit(c, values)
+row_edit(1)
+```
+
 ## Bounded fanout
 
 ```console

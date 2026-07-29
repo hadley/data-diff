@@ -4,43 +4,192 @@
 //! operation a user wants to see is the one they type. Only the subset hints
 //! occupy is read here — a kind applied to a name, or to a pair of names.
 //!
-//! Every kind that claims an endpoint of the column bijection is parsed, though
-//! only `col_rename` is acted on so far. Reading them all now is what keeps the
-//! grammar honest: the next step adds what `col_add` and `col_drop` *do*, not
-//! how they are spelled.
+//! The four kinds make three different kinds of claim. `col_rename` claims two
+//! endpoints as one column; `col_drop` and `col_add` claim one endpoint as
+//! having no partner; `col_edit` claims no endpoint at all, attaching instead to
+//! an identity that something else established. What they share is everything
+//! else: the grammar, endpoint resolution, deduplication, and the contest.
 
 use arrow_schema::Schema;
 
+use crate::cells::CellChanges;
 use crate::compare::ComparisonPlan;
-use crate::schema::ColumnMap;
-use crate::{DiffError, HintClaim, HintKind, Issue, IssueKind, Side};
+use crate::schema::{ColumnMap, SchemaMatches};
+use crate::{DiffError, HintClaim, HintKind, HintNames, Issue, IssueKind, Side};
 
 /// What hints established, and what had to be declined to establish it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Hints {
     /// The bijection so far, which reconciliation goes on to complete.
     pub map: ColumnMap,
-    pub issues: Vec<Issue>,
+    /// Edit hints, which attach to identities that do not exist yet.
+    pub edits: Vec<EditHint>,
+    pub issues: Vec<PendingIssue>,
 }
 
-/// One parsed hint, before its names are known to name anything.
+/// An issue and the hint it belongs beside.
+///
+/// Issues arise on both sides of the comparison: everything but an edit is
+/// settled before the key is resolved, while an edit cannot be judged until the
+/// cells have been compared. A reader should not have to see that seam, so the
+/// supplied position travels with the issue and orders the lot at the end.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Hint {
-    /// Both endpoints are one column.
-    Rename { old: String, new: String },
-    /// The new endpoint is unmatched by instruction.
-    Add { new: String },
-    /// The old endpoint is unmatched by instruction.
-    Drop { old: String },
+pub(crate) struct PendingIssue {
+    pub at: usize,
+    pub issue: Issue,
 }
 
-impl Hint {
-    fn kind(&self) -> &'static str {
-        match self {
-            Hint::Rename { .. } => "col_rename",
-            Hint::Add { .. } => "col_add",
-            Hint::Drop { .. } => "col_drop",
+/// An edit hint, resolved to whichever of its endpoints exist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EditHint {
+    pub at: usize,
+    pub claim: HintClaim,
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
+impl EditHint {
+    /// Whether this hint is about the identity between these two columns.
+    ///
+    /// An endpoint the hint did not resolve constrains nothing: `col_edit(total)`
+    /// where only the new file has that name is about whichever old column ends
+    /// up paired with it, which is what lets a `col_edit()` line printed about
+    /// an inferred rename be handed straight back.
+    pub(crate) fn attaches_to(&self, old: usize, new: usize) -> bool {
+        self.old.is_none_or(|index| index == old) && self.new.is_none_or(|index| index == new)
+    }
+}
+
+impl Hints {
+    /// Whether an edit hint protects this identity from being reinterpreted.
+    pub(crate) fn edit_protects(&self, old: usize, new: usize) -> bool {
+        self.edits.iter().any(|edit| edit.attaches_to(old, new))
+    }
+}
+
+/// What a resolved hint asserts against the bijection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Claim {
+    /// Both endpoints are one column.
+    Identity { old: usize, new: usize },
+    /// This endpoint has no partner.
+    Unmatched { side: Side, index: usize },
+    /// The identity holding these endpoints, claiming neither exclusively.
+    Edit {
+        old: Option<usize>,
+        new: Option<usize>,
+    },
+}
+
+/// What a claim says about one endpoint.
+///
+/// Reducing every kind to this is what makes one rule cover the conflicts the
+/// design lists separately — an endpoint renamed twice, an endpoint both renamed
+/// and dropped, an edit contradicted by an add or a drop. They are all two
+/// claims saying different things about one endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Assertion {
+    /// Paired, with a named partner where the claim knows one.
+    Partner(Option<usize>),
+    /// Not paired with anything.
+    Unmatched,
+}
+
+impl Assertion {
+    /// Whether two assertions about one endpoint can both hold.
+    fn agrees_with(self, other: Self) -> bool {
+        match (self, other) {
+            (Assertion::Unmatched, Assertion::Unmatched) => true,
+            // An unspecified partner agrees with any partner: an edit that
+            // resolved only one of its ends says the endpoint is paired without
+            // saying to what, which no pairing contradicts.
+            (Assertion::Partner(left), Assertion::Partner(right)) => {
+                left.is_none() || right.is_none() || left == right
+            }
+            _ => false,
         }
+    }
+}
+
+impl Claim {
+    /// Every endpoint this claim says something about.
+    fn endpoints(&self) -> Vec<(Side, usize)> {
+        match *self {
+            Claim::Identity { old, new } => vec![(Side::Old, old), (Side::New, new)],
+            Claim::Unmatched { side, index } => vec![(side, index)],
+            Claim::Edit { old, new } => old
+                .map(|index| (Side::Old, index))
+                .into_iter()
+                .chain(new.map(|index| (Side::New, index)))
+                .collect(),
+        }
+    }
+
+    /// What this claim says about one endpoint, if it says anything.
+    fn assertion(&self, side: Side, index: usize) -> Option<Assertion> {
+        let (old, new, unmatched) = match *self {
+            Claim::Identity { old, new } => (Some(old), Some(new), false),
+            Claim::Unmatched { side, index } => match side {
+                Side::Old => (Some(index), None, true),
+                Side::New => (None, Some(index), true),
+            },
+            Claim::Edit { old, new } => (old, new, false),
+        };
+        match side {
+            Side::Old if old == Some(index) => Some(if unmatched {
+                Assertion::Unmatched
+            } else {
+                Assertion::Partner(new)
+            }),
+            Side::New if new == Some(index) => Some(if unmatched {
+                Assertion::Unmatched
+            } else {
+                Assertion::Partner(old)
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether two claims cannot both hold.
+    fn conflicts_with(&self, other: &Claim) -> bool {
+        self.endpoints().into_iter().any(|(side, index)| {
+            match (self.assertion(side, index), other.assertion(side, index)) {
+                (Some(mine), Some(theirs)) => !mine.agrees_with(theirs),
+                _ => false,
+            }
+        })
+    }
+
+    /// Whether the map already says something different about an endpoint.
+    ///
+    /// This is how a key component beats a hint without either knowing about the
+    /// other: the key claimed its identities into the map before hints were
+    /// read, so a hint that wants one of them differently is simply contradicted
+    /// by what is already there.
+    fn contradicts(&self, map: &ColumnMap) -> bool {
+        self.endpoints().into_iter().any(|(side, index)| {
+            let held = if map.reserved(side, index) {
+                Some(Assertion::Unmatched)
+            } else {
+                match side {
+                    Side::Old => map.new_for_old(index),
+                    Side::New => map.old_for_new(index),
+                }
+                .map(|partner| Assertion::Partner(Some(partner)))
+            };
+            match (self.assertion(side, index), held) {
+                (Some(mine), Some(held)) => !mine.agrees_with(held),
+                _ => false,
+            }
+        })
+    }
+
+    /// Whether two claims touch a common endpoint, and so are reported together.
+    fn shares_endpoint(&self, other: &Claim) -> bool {
+        let theirs = other.endpoints();
+        self.endpoints()
+            .into_iter()
+            .any(|endpoint| theirs.contains(&endpoint))
     }
 }
 
@@ -59,74 +208,119 @@ pub(crate) fn resolve(
 ) -> Result<Hints, DiffError> {
     let parsed = spellings
         .iter()
-        .map(|spelling| Ok((spelling.clone(), parse(spelling)?)))
+        .map(|spelling| parse(spelling))
         .collect::<Result<Vec<_>, DiffError>>()?;
 
     let mut result = Hints {
         map: claimed,
-        issues: Vec::new(),
+        ..Hints::default()
     };
-    let mut renames: Vec<(HintClaim, usize, usize)> = Vec::new();
-    for (spelling, hint) in parsed {
-        let Hint::Rename {
-            old: old_name,
-            new: new_name,
-        } = hint
-        else {
-            // Parsed, understood, and not yet implemented. Silently ignoring an
-            // instruction would be worse than saying so before any output is
-            // read, so this is an error rather than an issue.
-            return Err(DiffError::UnsupportedHintKind {
-                hint: spelling,
-                kind: hint.kind().to_owned(),
-            });
-        };
-        let claim = HintClaim {
-            kind: HintKind::Rename,
-            old: old_name,
-            new: new_name,
-        };
-        match endpoints(old, new, &claim) {
+    let mut claims: Vec<(usize, HintClaim, Claim)> = Vec::new();
+    for (at, hint) in parsed.into_iter().enumerate() {
+        match endpoints(old, new, &hint) {
             // Identity is judged after resolution, so a quoted and a bare
             // spelling of one claim collapse rather than contradicting.
-            Ok(pair) if renames.iter().any(|(_, old, new)| (*old, *new) == pair) => {}
-            Ok((old_index, new_index)) => renames.push((claim, old_index, new_index)),
-            Err(issue) => result.issues.push(issue),
+            Ok(claim) if claims.iter().any(|(_, _, held)| *held == claim) => {}
+            Ok(claim) => claims.push((at, hint, claim)),
+            Err(issue) => result.issues.push(PendingIssue { at, issue }),
         }
     }
 
-    let contested = contested(&renames, &result.map);
-    let rejected = rival_groups(&renames, &contested);
-    for group in &rejected {
-        result.issues.push(Issue {
-            kind: IssueKind::ContradictoryHints,
-            hints: group
-                .iter()
-                .map(|&index| renames[index].0.clone())
-                .collect(),
+    let contested = contested(&claims, &result.map);
+    for group in rival_groups(&claims, &contested) {
+        result.issues.push(PendingIssue {
+            at: claims[group[0]].0,
+            issue: Issue {
+                kind: IssueKind::ContradictoryHints,
+                hints: group.iter().map(|&index| claims[index].1.clone()).collect(),
+            },
         });
     }
-    let rejected = rejected.concat();
 
-    for (index, (_, old_index, new_index)) in renames.iter().enumerate() {
-        if !rejected.contains(&index) {
-            result.map.claim(*old_index, *new_index, true);
+    for (index, (at, hint, claim)) in claims.into_iter().enumerate() {
+        if contested[index] {
+            continue;
+        }
+        match claim {
+            Claim::Identity { old, new } => {
+                result.map.claim(old, new, true);
+            }
+            Claim::Unmatched { side, index } => {
+                result.map.reserve(side, index);
+            }
+            // An edit reserves nothing. Everything it does happens later: it
+            // withdraws a swap before that inference runs, and it is judged
+            // once the cells are known.
+            Claim::Edit { old, new } => result.edits.push(EditHint {
+                at,
+                claim: hint,
+                old,
+                new,
+            }),
         }
     }
     Ok(result)
 }
 
-/// Resolve a claim's two names to column positions.
+/// Judge every edit hint against the identity it named, once there is one.
 ///
-/// Both columns must exist, and their values must be comparable. An identity
-/// between a boolean and an integer would be accepted by everything up to cell
-/// comparison and rejected there, taking the whole diff with it; a hint the data
-/// cannot support is declined like any other, and the rest of the comparison
-/// stands.
-fn endpoints(old: &Schema, new: &Schema, claim: &HintClaim) -> Result<(usize, usize), Issue> {
+/// Returns the identities to force into the edit set. Both of the things this
+/// can report need the finished comparison: whether the identity exists at all
+/// is settled by inference, and whether anything about it changed by the cells.
+pub(crate) fn validate_edits(
+    hints: &Hints,
+    schema: &SchemaMatches,
+    cells: &CellChanges,
+) -> (Vec<PendingIssue>, Vec<(usize, usize)>) {
+    let mut issues = Vec::new();
+    let mut forced = Vec::new();
+    for edit in &hints.edits {
+        let issue = |kind: IssueKind| PendingIssue {
+            at: edit.at,
+            issue: Issue {
+                kind,
+                hints: vec![edit.claim.clone()],
+            },
+        };
+        // At most one identity can match: each endpoint the hint resolved
+        // belongs to one identity at most, and an unresolved one constrains
+        // nothing.
+        let identity = schema
+            .identities
+            .iter()
+            .find(|identity| edit.attaches_to(identity.old, identity.new));
+        let Some(identity) = identity else {
+            issues.push(issue(IssueKind::HintUnresolvedIdentity));
+            continue;
+        };
+        // `cells.columns` holds an entry only where something changed, so its
+        // absence is the whole of the no-change test.
+        if !cells
+            .columns
+            .iter()
+            .any(|column| (column.old, column.new) == (identity.old, identity.new))
+        {
+            issues.push(issue(IssueKind::HintNoChange));
+            continue;
+        }
+        forced.push((identity.old, identity.new));
+    }
+    (issues, forced)
+}
+
+/// Resolve a hint's names to the endpoints they claim.
+///
+/// A rename's two columns must exist and their values must be comparable. An
+/// identity between a boolean and an integer would be accepted by everything up
+/// to cell comparison and rejected there, taking the whole diff with it; a hint
+/// the data cannot support is declined like any other, and the rest of the
+/// comparison stands. Nothing else needs the check: a reserved endpoint is never
+/// compared with anything, and an edit attaches to an identity that reconciled
+/// on its own account.
+fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issue> {
     let issue = |kind: IssueKind| Issue {
         kind,
-        hints: vec![claim.clone()],
+        hints: vec![hint.clone()],
     };
     let missing = |side: Side, column: &str| {
         issue(IssueKind::HintMissingTarget {
@@ -134,18 +328,57 @@ fn endpoints(old: &Schema, new: &Schema, claim: &HintClaim) -> Result<(usize, us
             column: column.to_owned(),
         })
     };
-    let old_index = position(old, &claim.old).ok_or_else(|| missing(Side::Old, &claim.old))?;
-    let new_index = position(new, &claim.new).ok_or_else(|| missing(Side::New, &claim.new))?;
 
-    let old_type = old.field(old_index).data_type();
-    let new_type = new.field(new_index).data_type();
-    if ComparisonPlan::new(old_type, new_type).is_none() {
-        return Err(issue(IssueKind::HintIncompatibleTypes {
-            old_type: format!("{old_type:?}"),
-            new_type: format!("{new_type:?}"),
-        }));
+    match (hint.kind, &hint.names) {
+        (HintKind::Rename, HintNames::Pair(old_name, new_name)) => {
+            let old_index = position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?;
+            let new_index = position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?;
+            let old_type = old.field(old_index).data_type();
+            let new_type = new.field(new_index).data_type();
+            if ComparisonPlan::new(old_type, new_type).is_none() {
+                return Err(issue(IssueKind::HintIncompatibleTypes {
+                    old_type: format!("{old_type:?}"),
+                    new_type: format!("{new_type:?}"),
+                }));
+            }
+            Ok(Claim::Identity {
+                old: old_index,
+                new: new_index,
+            })
+        }
+        (HintKind::Drop, HintNames::Single(name)) => Ok(Claim::Unmatched {
+            side: Side::Old,
+            index: position(old, name).ok_or_else(|| missing(Side::Old, name))?,
+        }),
+        (HintKind::Add, HintNames::Single(name)) => Ok(Claim::Unmatched {
+            side: Side::New,
+            index: position(new, name).ok_or_else(|| missing(Side::New, name))?,
+        }),
+        (HintKind::Edit, HintNames::Pair(old_name, new_name)) => Ok(Claim::Edit {
+            old: Some(position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?),
+            new: Some(position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?),
+        }),
+        (HintKind::Edit, HintNames::Single(name)) => {
+            let claim = Claim::Edit {
+                old: position(old, name),
+                new: position(new, name),
+            };
+            // One end is enough, the other being whatever it pairs with. Absent
+            // from both sides is reported against the new file, which is where a
+            // reader took the name from: every operation about a surviving
+            // column names it as the new file does.
+            match claim {
+                Claim::Edit {
+                    old: None,
+                    new: None,
+                } => Err(missing(Side::New, name)),
+                claim => Ok(claim),
+            }
+        }
+        // Every remaining pairing of kind and shape is rejected while parsing,
+        // where the spelling is still at hand to report.
+        _ => unreachable!("parsing accepts only the shapes each kind takes"),
     }
-    Ok((old_index, new_index))
 }
 
 fn position(schema: &Schema, name: &str) -> Option<usize> {
@@ -157,10 +390,10 @@ fn position(schema: &Schema, name: &str) -> Option<usize> {
 
 /// Which claims cannot stand.
 ///
-/// A valid set of claims uses each old and each new endpoint at most once, so a
-/// claim has to go exactly when an endpoint of it is wanted twice, or when the
-/// map already holds one of its endpoints for someone else. That is a uniqueness
-/// check and nothing more.
+/// A claim has to go exactly when another claim says something different about
+/// an endpoint of it, or when the map already does. That is one rule for all
+/// four kinds, and it produces every conflict shape the design lists without any
+/// of them being written down here.
 ///
 /// Rejecting both rivals rather than picking one is what keeps input order out
 /// of the answer: given `a -> b` and `a -> c`, keeping the first would make the
@@ -168,22 +401,16 @@ fn position(schema: &Schema, name: &str) -> Option<usize> {
 /// the map holds is redundant, not contested, and asking the map rather than
 /// comparing names means the key needs no rule of its own — an endpoint goes to
 /// whoever claimed it first, and the key claims before hints do.
-fn contested(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<bool> {
-    let taken = |held: Option<usize>, wanted: usize| held.is_some_and(|held| held != wanted);
-    renames
+fn contested(claims: &[(usize, HintClaim, Claim)], map: &ColumnMap) -> Vec<bool> {
+    claims
         .iter()
         .enumerate()
-        .map(|(index, (_, old, new))| {
-            let wanted_twice =
-                renames
+        .map(|(index, (_, _, claim))| {
+            claim.contradicts(map)
+                || claims
                     .iter()
                     .enumerate()
-                    .any(|(other, (_, other_old, other_new))| {
-                        other != index && (other_old == old || other_new == new)
-                    });
-            wanted_twice
-                || taken(claimed.new_for_old(*old), *new)
-                || taken(claimed.old_for_new(*new), *old)
+                    .any(|(other, (_, _, rival))| other != index && claim.conflicts_with(rival))
         })
         .collect()
 }
@@ -193,28 +420,25 @@ fn contested(renames: &[(HintClaim, usize, usize)], claimed: &ColumnMap) -> Vec<
 /// Reporting only: which claims go is already settled above, and no grouping
 /// could change it — two claims land together by sharing an endpoint, and a
 /// shared endpoint is what being contested is, so this can never reach a claim
-/// the uniqueness check missed. What it buys is one issue per set of rivals
-/// instead of one per claim. Told that `a -> x`, `a -> y` and `b -> x` were
-/// dropped together, a reader can see they conflict with each other; three
-/// separate lines would leave them to work that out.
+/// the conflict rule missed. What it buys is one issue per set of rivals instead
+/// of one per claim. Told that `a -> x`, `a -> y` and `b -> x` were dropped
+/// together, a reader can see they conflict with each other; three separate
+/// lines would leave them to work that out.
 ///
 /// Sets rather than one list of everything rejected, because two unrelated
 /// conflicts in one invocation are two separate things to know about.
-fn rival_groups(renames: &[(HintClaim, usize, usize)], contested: &[bool]) -> Vec<Vec<usize>> {
-    let shares_endpoint = |left: usize, right: usize| {
-        let (_, left_old, left_new) = &renames[left];
-        let (_, right_old, right_new) = &renames[right];
-        left_old == right_old || left_new == right_new
-    };
-
+fn rival_groups(claims: &[(usize, HintClaim, Claim)], contested: &[bool]) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    for index in (0..renames.len()).filter(|&index| contested[index]) {
+    for index in (0..claims.len()).filter(|&index| contested[index]) {
         // Whatever this claim touches becomes one set with it, which is what
         // makes the result a partition however the claims were ordered.
         let mut joined = vec![index];
         let mut separate = Vec::new();
         for group in groups {
-            if group.iter().any(|&other| shares_endpoint(other, index)) {
+            let shared = group
+                .iter()
+                .any(|&other| claims[other].2.shares_endpoint(&claims[index].2));
+            if shared {
                 joined.extend(group);
             } else {
                 separate.push(group);
@@ -229,7 +453,7 @@ fn rival_groups(renames: &[(HintClaim, usize, usize)], contested: &[bool]) -> Ve
 }
 
 /// Read one line of the grammar as the claim it makes.
-fn parse(spelling: &str) -> Result<Hint, DiffError> {
+fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
     let malformed = || DiffError::MalformedHint {
         hint: spelling.to_owned(),
     };
@@ -238,32 +462,39 @@ fn parse(spelling: &str) -> Result<Hint, DiffError> {
     if !trimmed.ends_with(')') {
         return Err(malformed());
     }
-    let arguments = &trimmed[open + 1..trimmed.len() - 1];
+    let names = names(&trimmed[open + 1..trimmed.len() - 1]).ok_or_else(malformed)?;
 
-    match trimmed[..open].trim() {
-        "col_rename" => {
-            let (old, new) = split_pair(arguments).ok_or_else(malformed)?;
-            Ok(Hint::Rename {
-                old: name(old).ok_or_else(malformed)?,
-                new: name(new).ok_or_else(malformed)?,
-            })
+    let kind = match trimmed[..open].trim() {
+        "col_rename" => HintKind::Rename,
+        "col_add" => HintKind::Add,
+        "col_drop" => HintKind::Drop,
+        "col_edit" => HintKind::Edit,
+        kind => {
+            return Err(DiffError::UnknownHintKind {
+                hint: spelling.to_owned(),
+                kind: kind.to_owned(),
+            });
         }
-        "col_add" => Ok(Hint::Add {
-            new: single(arguments).ok_or_else(malformed)?,
-        }),
-        "col_drop" => Ok(Hint::Drop {
-            old: single(arguments).ok_or_else(malformed)?,
-        }),
-        kind => Err(DiffError::UnknownHintKind {
-            hint: spelling.to_owned(),
-            kind: kind.to_owned(),
-        }),
-    }
+    };
+    // A rename needs two names and a reservation one; only an edit takes either,
+    // naming an identity whose ends may or may not agree.
+    let takes = matches!(
+        (kind, &names),
+        (HintKind::Rename, HintNames::Pair(..))
+            | (HintKind::Add | HintKind::Drop, HintNames::Single(_))
+            | (HintKind::Edit, _)
+    );
+    takes
+        .then_some(HintClaim { kind, names })
+        .ok_or_else(malformed)
 }
 
-/// Read an argument list that must hold exactly one name.
-fn single(arguments: &str) -> Option<String> {
-    split_pair(arguments).is_none().then(|| name(arguments))?
+/// Read an argument list as the one or two names a hint is written with.
+fn names(arguments: &str) -> Option<HintNames> {
+    match split_pair(arguments) {
+        Some((old, new)) => Some(HintNames::Pair(name(old)?, name(new)?)),
+        None => Some(HintNames::Single(name(arguments)?)),
+    }
 }
 
 /// Split an argument list on the grammar's `old -> new` arrow.
@@ -318,8 +549,8 @@ mod tests {
     use arrow_schema::Schema;
     use test_support::table;
 
-    use super::{Hint, Hints, parse, resolve};
-    use crate::{DiffError, HintKind, IssueKind, Side};
+    use super::{Hints, parse, resolve};
+    use crate::{DiffError, HintKind, HintNames, IssueKind, Side};
 
     fn hint_for(old: &RecordBatch, new: &RecordBatch, hints: &[&str]) -> Hints {
         try_hints(old, new, hints, &[]).unwrap()
@@ -366,37 +597,42 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn every_endpoint_claiming_kind_parses() {
-        // Only renames are applied yet, but all three are read, so the next
-        // step adds what add and drop do rather than how they are written.
-        assert_eq!(
-            parse("col_rename(a -> b)").unwrap(),
-            Hint::Rename {
-                old: "a".into(),
-                new: "b".into(),
-            }
-        );
-        assert_eq!(parse("col_add(b)").unwrap(), Hint::Add { new: "b".into() });
-        assert_eq!(
-            parse("col_drop(a)").unwrap(),
-            Hint::Drop { old: "a".into() }
-        );
+    /// The endpoints reserved as having no partner, by side.
+    fn reserved(hints: &Hints, side: Side, count: usize) -> Vec<usize> {
+        (0..count)
+            .filter(|&index| hints.map.reserved(side, index))
+            .collect()
+    }
+
+    /// The `(old, new)` endpoints each surviving edit hint resolved.
+    fn edits(hints: &Hints) -> Vec<(Option<usize>, Option<usize>)> {
+        hints
+            .edits
+            .iter()
+            .map(|edit| (edit.old, edit.new))
+            .collect()
     }
 
     #[test]
-    fn a_kind_that_parses_but_is_not_implemented_says_so() {
-        let (old, new) = tables();
-
-        // Distinct from an unknown kind: this one was understood, and silently
-        // ignoring an instruction would be worse than refusing it.
-        assert_eq!(
-            try_hints(&old, &new, &["col_drop(gone)"], &[]).unwrap_err(),
-            DiffError::UnsupportedHintKind {
-                hint: "col_drop(gone)".into(),
-                kind: "col_drop".into(),
-            }
-        );
+    fn every_kind_parses_to_the_names_it_was_written_with() {
+        for (spelling, kind, names) in [
+            (
+                "col_rename(a -> b)",
+                HintKind::Rename,
+                HintNames::Pair("a".into(), "b".into()),
+            ),
+            ("col_add(b)", HintKind::Add, HintNames::Single("b".into())),
+            ("col_drop(a)", HintKind::Drop, HintNames::Single("a".into())),
+            ("col_edit(a)", HintKind::Edit, HintNames::Single("a".into())),
+            (
+                "col_edit(a -> b)",
+                HintKind::Edit,
+                HintNames::Pair("a".into(), "b".into()),
+            ),
+        ] {
+            let claim = parse(spelling).unwrap();
+            assert_eq!((claim.kind, claim.names), (kind, names), "{spelling}");
+        }
     }
 
     #[test]
@@ -431,18 +667,21 @@ mod tests {
         let (old, new) = tables();
 
         // Two spellings of one claim are one claim; treating them as two would
-        // make a duplicate contradict itself.
-        let hints = hint_for(
-            &old,
-            &new,
-            &[
+        // make a duplicate contradict itself. That holds for every kind, since
+        // identity is judged on what a claim resolved to.
+        for spellings in [
+            [
                 "col_rename(gone -> fresh)",
                 r#"col_rename("gone" -> "fresh")"#,
             ],
-        );
+            ["col_drop(gone)", r#"col_drop("gone")"#],
+            ["col_add(fresh)", r#"col_add("fresh")"#],
+            ["col_edit(id)", r#"col_edit("id")"#],
+        ] {
+            let hints = hint_for(&old, &new, &spellings);
 
-        assert_eq!(pairs(&hints), [(1, 1)]);
-        assert!(hints.issues.is_empty());
+            assert!(hints.issues.is_empty(), "{spellings:?}");
+        }
     }
 
     #[test]
@@ -510,8 +749,10 @@ mod tests {
             // meant; quoting is how such a name is written.
             "col_rename(gone -> fresh -> other)",
             "col_rename(gone, fresh)",
-            // A one-name kind given a pair is equally unreadable.
+            // A one-name kind given a pair is equally unreadable. Only an edit
+            // takes either shape, naming an identity whose ends may differ.
             "col_drop(gone -> fresh)",
+            "col_add(fresh -> extra)",
         ] {
             assert!(
                 try_hints(&old, &new, &[spelling], &[]).is_err(),
@@ -529,18 +770,44 @@ mod tests {
 
         assert!(missing_new.map.pairs().is_empty());
         assert_eq!(
-            missing_new.issues[0].kind,
+            missing_new.issues[0].issue.kind,
             IssueKind::HintMissingTarget {
                 side: Side::New,
                 column: "absent".into(),
             }
         );
-        assert_eq!(missing_new.issues[0].hints[0].kind, HintKind::Rename);
+        assert_eq!(missing_new.issues[0].issue.hints[0].kind, HintKind::Rename);
         assert_eq!(
-            missing_old.issues[0].kind,
+            missing_old.issues[0].issue.kind,
             IssueKind::HintMissingTarget {
                 side: Side::Old,
                 column: "absent".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_reservation_names_its_column_on_its_own_side() {
+        let (old, new) = tables();
+
+        // A drop reads the old file and an add the new one, so each reports the
+        // side it could not find its column on.
+        assert_eq!(
+            hint_for(&old, &new, &["col_drop(fresh)"]).issues[0]
+                .issue
+                .kind,
+            IssueKind::HintMissingTarget {
+                side: Side::Old,
+                column: "fresh".into(),
+            }
+        );
+        assert_eq!(
+            hint_for(&old, &new, &["col_add(gone)"]).issues[0]
+                .issue
+                .kind,
+            IssueKind::HintMissingTarget {
+                side: Side::New,
+                column: "gone".into(),
             }
         );
     }
@@ -557,12 +824,94 @@ mod tests {
 
         assert!(hints.map.pairs().is_empty());
         assert_eq!(
-            hints.issues[0].kind,
+            hints.issues[0].issue.kind,
             IssueKind::HintIncompatibleTypes {
                 old_type: "Boolean".into(),
                 new_type: "Int64".into(),
             }
         );
+    }
+
+    #[test]
+    fn a_drop_and_an_add_reserve_their_endpoints() {
+        let (old, new) = tables();
+
+        let hints = hint_for(&old, &new, &["col_drop(gone)", "col_add(extra)"]);
+
+        assert_eq!(reserved(&hints, Side::Old, 3), [1]);
+        assert_eq!(reserved(&hints, Side::New, 3), [2]);
+        assert!(hints.issues.is_empty());
+    }
+
+    #[test]
+    fn a_drop_beside_an_add_chooses_replacement_rather_than_conflicting() {
+        let (old, new) = tables();
+
+        // The design reads these two together as a deliberate choice of
+        // replacement over rename. They name endpoints in different halves of
+        // the bijection and so can never meet, which is why one rule about
+        // endpoints gets this right without a case for it.
+        let hints = hint_for(&old, &new, &["col_drop(gone)", "col_add(fresh)"]);
+
+        assert!(hints.issues.is_empty());
+        assert_eq!(reserved(&hints, Side::Old, 3), [1]);
+        assert_eq!(reserved(&hints, Side::New, 3), [1]);
+    }
+
+    #[test]
+    fn an_edit_resolves_whichever_of_its_ends_exist() {
+        let (old, new) = tables();
+
+        // A name on both sides pins both endpoints; a name on one side leaves
+        // the other to whatever reconciliation pairs it with, which is what
+        // lets a col_edit() line about an inferred rename be handed back.
+        assert_eq!(
+            edits(&hint_for(&old, &new, &["col_edit(id)"])),
+            [(Some(0), Some(0))]
+        );
+        assert_eq!(
+            edits(&hint_for(&old, &new, &["col_edit(gone)"])),
+            [(Some(1), None)]
+        );
+        assert_eq!(
+            edits(&hint_for(&old, &new, &["col_edit(fresh)"])),
+            [(None, Some(1))]
+        );
+        assert_eq!(
+            edits(&hint_for(&old, &new, &["col_edit(gone -> fresh)"])),
+            [(Some(1), Some(1))]
+        );
+    }
+
+    #[test]
+    fn an_edit_naming_nothing_at_all_is_reported_against_the_new_file() {
+        let (old, new) = tables();
+
+        // Every operation about a surviving column names it as the new file
+        // does, so that is where a reader took the name from.
+        let hints = hint_for(&old, &new, &["col_edit(absent)"]);
+
+        assert!(hints.edits.is_empty());
+        assert_eq!(
+            hints.issues[0].issue.kind,
+            IssueKind::HintMissingTarget {
+                side: Side::New,
+                column: "absent".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_edit_claims_no_endpoint_of_its_own() {
+        let (old, new) = tables();
+
+        // Two edits naming the two ends of one prospective identity do not
+        // contest it, an edit asserting nothing exclusive about an endpoint.
+        let hints = hint_for(&old, &new, &["col_edit(gone)", "col_edit(fresh)"]);
+
+        assert!(hints.issues.is_empty());
+        assert!(hints.map.pairs().is_empty());
+        assert_eq!(edits(&hints), [(Some(1), None), (None, Some(1))]);
     }
 
     #[test]
@@ -577,8 +926,8 @@ mod tests {
 
         assert!(hints.map.pairs().is_empty());
         assert_eq!(hints.issues.len(), 1);
-        assert_eq!(hints.issues[0].kind, IssueKind::ContradictoryHints);
-        assert_eq!(hints.issues[0].hints.len(), 2);
+        assert_eq!(hints.issues[0].issue.kind, IssueKind::ContradictoryHints);
+        assert_eq!(hints.issues[0].issue.hints.len(), 2);
     }
 
     #[test]
@@ -592,7 +941,58 @@ mod tests {
         );
 
         assert!(hints.map.pairs().is_empty());
-        assert_eq!(hints.issues[0].hints.len(), 2);
+        assert_eq!(hints.issues[0].issue.hints.len(), 2);
+    }
+
+    #[test]
+    fn every_cross_kind_contradiction_rejects_its_group() {
+        let (old, new) = tables();
+
+        // One rule about what a claim says of an endpoint, and the design's
+        // whole list of conflict shapes falls out of it.
+        for spellings in [
+            // An old endpoint both renamed and dropped.
+            ["col_rename(gone -> fresh)", "col_drop(gone)"],
+            // A new endpoint both renamed and added.
+            ["col_rename(gone -> fresh)", "col_add(fresh)"],
+            // An edit whose identity an add or a drop says cannot exist.
+            ["col_edit(gone)", "col_drop(gone)"],
+            ["col_edit(fresh)", "col_add(fresh)"],
+            // An edit and a rename that disagree about a column's partner.
+            ["col_edit(gone -> extra)", "col_rename(gone -> fresh)"],
+        ] {
+            let hints = hint_for(&old, &new, &spellings);
+
+            assert_eq!(hints.issues.len(), 1, "{spellings:?}");
+            assert_eq!(
+                hints.issues[0].issue.kind,
+                IssueKind::ContradictoryHints,
+                "{spellings:?}"
+            );
+            assert_eq!(hints.issues[0].issue.hints.len(), 2, "{spellings:?}");
+            assert!(hints.map.pairs().is_empty(), "{spellings:?}");
+            assert!(hints.edits.is_empty(), "{spellings:?}");
+            assert!(reserved(&hints, Side::Old, 3).is_empty(), "{spellings:?}");
+            assert!(reserved(&hints, Side::New, 3).is_empty(), "{spellings:?}");
+        }
+    }
+
+    #[test]
+    fn an_edit_agreeing_with_a_rename_is_left_alone() {
+        let (old, new) = tables();
+
+        // The rename says old "gone" pairs with new "fresh" and the edit says
+        // the same, so they are two statements about one identity rather than
+        // rivals for it.
+        let hints = hint_for(
+            &old,
+            &new,
+            &["col_rename(gone -> fresh)", "col_edit(gone -> fresh)"],
+        );
+
+        assert!(hints.issues.is_empty());
+        assert_eq!(pairs(&hints), [(1, 1)]);
+        assert_eq!(edits(&hints), [(Some(1), Some(1))]);
     }
 
     #[test]
@@ -615,7 +1015,7 @@ mod tests {
 
         assert!(hints.map.pairs().is_empty());
         assert_eq!(hints.issues.len(), 1);
-        assert_eq!(hints.issues[0].hints.len(), 3);
+        assert_eq!(hints.issues[0].issue.hints.len(), 3);
     }
 
     #[test]
@@ -640,6 +1040,29 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_can_apply_in_one_invocation() {
+        let old = table! { "id" => [1], "gone" => [1], "stale" => [1], "same" => [1] };
+        let new = table! { "id" => [1], "fresh" => [1], "brand" => [1], "same" => [1] };
+
+        let hints = hint_for(
+            &old,
+            &new,
+            &[
+                "col_rename(gone -> fresh)",
+                "col_drop(stale)",
+                "col_add(brand)",
+                "col_edit(same)",
+            ],
+        );
+
+        assert!(hints.issues.is_empty());
+        assert_eq!(pairs(&hints), [(1, 1)]);
+        assert_eq!(reserved(&hints, Side::Old, 4), [2]);
+        assert_eq!(reserved(&hints, Side::New, 4), [2]);
+        assert_eq!(edits(&hints), [(Some(3), Some(3))]);
+    }
+
+    #[test]
     fn a_key_component_beats_a_hint_that_contradicts_it() {
         let old = table! { "id" => [1], "gone" => [1] };
         let new = table! { "code" => [1], "fresh" => [1] };
@@ -651,7 +1074,20 @@ mod tests {
 
         assert_eq!(pairs(&hints), [(0, 0)]);
         assert!(!hints.map.hinted(0, 0));
-        assert_eq!(hints.issues[0].kind, IssueKind::ContradictoryHints);
+        assert_eq!(hints.issues[0].issue.kind, IssueKind::ContradictoryHints);
+    }
+
+    #[test]
+    fn a_key_component_beats_a_reservation_too() {
+        let old = table! { "id" => [1], "gone" => [1] };
+        let new = table! { "id" => [1], "fresh" => [1] };
+
+        // Saying a key column has no partner contradicts the key that pairs it,
+        // which the map settles the same way it settles a rename.
+        let hints = try_hints(&old, &new, &["col_drop(id)"], &["id"]).unwrap();
+
+        assert!(reserved(&hints, Side::Old, 2).is_empty());
+        assert_eq!(hints.issues[0].issue.kind, IssueKind::ContradictoryHints);
     }
 
     #[test]
