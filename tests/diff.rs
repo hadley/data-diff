@@ -1064,3 +1064,42 @@ fn issues_report_in_the_order_the_hints_were_supplied() {
         ]
     );
 }
+
+#[test]
+fn a_reservation_frees_the_other_endpoint_for_another_candidate() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "region" => ["north", "south", "east"],
+        "spare" => ["north", "south", "east"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "zone" => ["north", "south", "east"],
+    };
+
+    // Two old columns match the new one, and column order settles it.
+    let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(inferred.columns.identities.len(), 2);
+    assert_eq!(inferred.columns.dropped, [3]);
+
+    // Reserving "region" does not stop "zone" being identified: it says one
+    // column has no partner, not that the other has none either. Where there is
+    // only one candidate the two amount to the same thing, which is why a
+    // replacement is spelled with both halves rather than left to that.
+    let dropped = diff_tables(&old, &new, &hinted(&["id"], &["col_drop(region)"])).unwrap();
+
+    assert!(dropped.issues.is_empty());
+    assert_eq!(dropped.columns.dropped, [2]);
+    assert!(dropped.columns.added.is_empty());
+
+    // Saying so of both leaves nothing for it to pair with.
+    let replaced = diff_tables(
+        &old,
+        &new,
+        &hinted(&["id"], &["col_drop(region)", "col_drop(spare)"]),
+    )
+    .unwrap();
+
+    assert_eq!(replaced.columns.dropped, [2, 3]);
+    assert_eq!(replaced.columns.added, [2]);
+}

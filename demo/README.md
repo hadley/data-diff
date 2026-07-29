@@ -180,7 +180,7 @@ col_drop(region)
 col_add(zone)
 ```
 
-Two hints rather than one, and the pair is deliberate. Either alone would produce both lines, since the column left over would have nothing to pair with, but a replacement is two assertions and this is how you make both.
+Either hint alone produces the same two lines here, the column left over having nothing else to pair with. That is a fact about this pair of files rather than about the hints: give `zone` a second candidate in the old file and `col_drop(region)` alone would identify it with that one instead, since reserving a column says that column has no partner and nothing about any other. Supplying both is how you say the whole of what you mean.
 
 ## Saying which change it was
 
