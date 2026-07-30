@@ -1,5 +1,5 @@
 use crate::rows::RowMatches;
-use crate::schema::SchemaMatches;
+use crate::schema::ColumnMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrderMatches {
@@ -7,11 +7,11 @@ pub(crate) struct OrderMatches {
     pub rows: Vec<(usize, usize)>,
 }
 
-pub(crate) fn detect_order(schema: &SchemaMatches, rows: &RowMatches) -> OrderMatches {
-    let columns = schema
-        .identities
+pub(crate) fn detect_order(map: &ColumnMap, rows: &RowMatches) -> OrderMatches {
+    let columns = map
+        .pairs()
         .iter()
-        .map(|identity| (identity.old, identity.new))
+        .map(|pair| (pair.old, pair.new))
         .collect::<Vec<_>>();
     OrderMatches {
         columns: minimal_moves(&columns),

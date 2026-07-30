@@ -30,7 +30,7 @@ Use a pair when the key column itself was renamed:
 ```console
 data-diff old.parquet new.parquet --key customer_id/id
 > col_key([customer_id -> id], basis: declared)
-> col_rename(customer_id -> id)
+> col_rename(customer_id -> id, basis: declared)
 > row_edit(2)
 ```
 
@@ -41,7 +41,7 @@ When a change can't be worked out from the data --- e.g. a column renamed and re
 ```console
 data-diff old.parquet new.parquet --key id --hint 'col_rename(discount -> markdown)'
 > col_key([id], basis: declared)
-> col_rename(discount -> markdown)
+> col_rename(discount -> markdown, basis: hinted)
 > col_edit(markdown, values)
 ```
 
@@ -64,13 +64,15 @@ Output goes to stdout, one operation per line:
 | Operation | Meaning |
 |---|---|
 | `col_add(new)`, `col_drop(old)` | a column that only exists on one side |
-| `col_rename(old -> new)` | one column, named differently in each file |
+| `col_rename(old -> new, basis: how)` | one column, named differently in each file, and how that was established |
 | `col_edit(new, ...)` | a column whose type or values changed |
 | `col_order(new, old_idx -> new_idx)` | the fewest columns that must move to explain the new order |
 | `row_add(new_idx)`, `row_drop(old_idx)` | a row that only exists on one side |
 | `row_edit(idx)`, `row_edit(old_idx -> new_idx)` | a row whose non-key values changed |
 | `row_fanout(old_idx -> [new_idx, ...])` | one old row that several new rows share a key with |
 | `row_order(old_idx -> new_idx)` | the fewest rows that must move to explain the new order |
+
+A rename's `basis` is one of five: `declared` for a paired `--key` component, `hinted` for a `col_rename()` you supplied, `exact` where the values agree in every shared row, `approximate` where they agree closely enough and by more than chance, and `swapped` where two columns hold each other's values, which prints as two renames each saying it is half of one exchange. The first two are certainties and the rest are judgements, which is the difference the field exists to show.
 
 A name is quoted only when it has to be: an ordinary one --- letters, digits and underscores, not starting with a digit --- is written bare, so quotes mark a name with something in it worth noticing. Coordinates are one-based, counting positions in the original files. A column is named as the new file names it, except where only the old file has it. When nothing changed, `no_changes()` follows the key line.
 

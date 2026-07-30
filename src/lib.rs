@@ -20,10 +20,10 @@ use arrow_array::RecordBatch;
 pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
 pub use model::{
-    CellCoordinate, ColumnEdit, ColumnSchema, ColumnsDiff, Coordinate, Diff, DiffError,
-    DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind, HintNames,
-    Issue, IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType, OrderDiff, RowsDiff, Schemas,
-    Side,
+    CellCoordinate, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff, Coordinate, Diff,
+    DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind,
+    HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,
+    OrderDiff, RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -48,24 +48,33 @@ pub fn diff_tables(
     )?;
     let key = key::resolve_key(old, new, &components, &hints.map)?;
     let rows = rows::match_rows(&key);
-    let mut schema = schema::reconcile_schema(old, new, &key, &hints.map)?;
+    // The map leaves the hints here and does not go back: from now on it is
+    // reconciliation's account of column identity, which every stage below both
+    // reads and adds to. What remains of the hints is the edits, which are
+    // waiting for an identity to attach to, and the issues raised so far.
+    let hint::Hints {
+        mut map,
+        edits,
+        issues: hint_issues,
+    } = hints;
+    schema::reconcile_schema(old, new, &key, &mut map)?;
 
     // Both resolve column identity, before ordering and cells go on to read it
-    rename::infer(old, new, &mut schema, &rows, &hints.map);
-    swap::infer(old, new, &mut schema, &rows, &hints);
+    rename::infer(old, new, &mut map, &rows);
+    swap::infer(old, new, &mut map, &rows, &edits);
 
-    let order = order::detect_order(&schema, &rows);
-    let cells = cells::compare_cells(old, new, &schema, &rows);
+    let order = order::detect_order(&map, &rows);
+    let cells = cells::compare_cells(old, new, &map, &rows);
     // Edit hints are judged here rather than with the rest: whether the identity
     // they name exists needs inference, and whether it changed needs the cells.
-    let (edit_issues, forced) = hint::validate_edits(&hints, &schema, &cells);
+    let (edit_issues, forced) = hint::validate_edits(&edits, &map, &cells);
     let summary = summary::summarize(&cells, &forced);
     let changed_cells = cells.changed_cells();
 
     // Issues arise on both sides of the comparison, and the seam is nothing a
     // reader should have to see. Ordering by the hint each one concerns puts
     // them in the order the instructions were written.
-    let mut issues = hints.issues;
+    let mut issues = hint_issues;
     issues.extend(edit_issues);
     issues.sort_by_key(|pending| pending.at);
     let issues = issues
@@ -76,13 +85,16 @@ pub fn diff_tables(
     Ok(Diff {
         schemas,
         columns: ColumnsDiff {
-            identities: schema
-                .identities
+            identities: map
+                .pairs()
                 .iter()
-                .map(|column| Coordinate::from_zero_based(column.old, column.new))
+                .map(|pair| ColumnIdentity {
+                    column: Coordinate::from_zero_based(pair.old, pair.new),
+                    basis: pair.basis,
+                })
                 .collect(),
-            added: one_based(&schema.added),
-            dropped: one_based(&schema.dropped),
+            added: one_based(&map.added()),
+            dropped: one_based(&map.dropped()),
             edited: cells
                 .columns
                 .iter()

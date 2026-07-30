@@ -68,6 +68,15 @@ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
 
 Nothing here declares that `amount` became `total`. They are identified as one column because they hold the same value in every row the two files share, which is the strongest evidence available that they are the same column. The `row_edit(2)` belongs to `note`: a column identified this way agrees everywhere by definition, so it can never be the source of a value change.
 
+```console
+$ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
+col_key([id], basis: declared)
+col_rename(amount -> total, basis: exact)
+row_edit(2)
+```
+
+Every rename says on what basis the two columns are one, because some of the ways of arriving at that are certainties and some are judgements, and the line reads the same either way without it. This one is `exact`: the values agree in every shared row. The rest of this file shows the other four — `approximate` next, then `swapped`, `declared`, and `hinted`.
+
 ## A renamed column that was also edited
 
 ```console
@@ -84,13 +93,13 @@ Nothing here has to reach twenty rows or any other minimum. The threshold does i
 data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
 ```
 
-Both `price` and `cost` change in every row, which read alone would be two columns rewritten from scratch. Each holds exactly what the other used to, so the likelier account is one exchange, and it is reported as the two renames it is:
+Both `price` and `cost` change in every row, which read alone would be two columns rewritten from scratch. Each holds exactly what the other used to, so the likelier account is one exchange, and it is reported as the two renames it is, each saying on its own line that it is half of one:
 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
 col_key([id], basis: declared)
-col_rename(price -> cost)
-col_rename(cost -> price)
+col_rename(price -> cost, basis: swapped)
+col_rename(cost -> price, basis: swapped)
 col_order(price, 3 -> 2)
 ```
 
@@ -109,7 +118,7 @@ Without the pair the rows no longer line up. Inference does still identify the t
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
 col_key([amount], basis: guessed, overlap: 0.67)
-col_rename(customer_id -> id)
+col_rename(customer_id -> id, basis: exact)
 row_drop(2)
 row_add(2)
 ```
@@ -137,7 +146,7 @@ A hint supplies what the data cannot. It is written the way the output prints it
 $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
     --hint 'col_rename(discount -> markdown)'
 col_key([id], basis: declared)
-col_rename(discount -> markdown)
+col_rename(discount -> markdown, basis: hinted)
 col_edit(markdown, values)
 ```
 
@@ -167,7 +176,7 @@ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id
 ```console
 $ data-diff demo/replace-old.parquet demo/replace-new.parquet --key id
 col_key([id], basis: declared)
-col_rename(region -> zone)
+col_rename(region -> zone, basis: exact)
 ```
 
 Only you know the two have nothing to do with each other. `col_drop()` and `col_add()` reserve their columns as having no partner, which keeps them out of rename inference:

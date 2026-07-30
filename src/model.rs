@@ -289,10 +289,61 @@ pub struct ColumnEdit {
 /// Resolved column identities and schema events.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColumnsDiff {
-    pub identities: Vec<Coordinate>,
+    pub identities: Vec<ColumnIdentity>,
     pub added: Vec<usize>,
     pub dropped: Vec<usize>,
     pub edited: Vec<ColumnEdit>,
+}
+
+/// One column identified across the two files, and how it was identified.
+///
+/// The coordinate is the whole of the identity; the basis is how reconciliation
+/// arrived at it, which a reader needs because some of the ways are certainties
+/// and some are judgements. Key-ness is deliberately absent: `KeyDiff::columns`
+/// already says which identities the key is made of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnIdentity {
+    pub column: Coordinate,
+    pub basis: IdentityBasis,
+}
+
+/// What established a column identity.
+///
+/// Every pair in the bijection carries one, not only the pairs whose two names
+/// differ: a stage that wants to know whether an identity is a provisional
+/// same-name one should ask rather than compare names again, and a consumer of
+/// `Diff` should find every identity described the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityBasis {
+    /// A component of the declared key, whether it named one column or a pair.
+    Declared,
+    /// An accepted `col_rename` hint.
+    Hinted,
+    /// Both files calling the column the same thing.
+    Name,
+    /// Inference, from values that agree in every matched row.
+    Exact,
+    /// Inference, from values that agree closely and by more than chance.
+    Approximate,
+    /// Swap inference, exchanging this identity's new end with another's.
+    Swapped,
+}
+
+impl IdentityBasis {
+    /// The word the human format writes this basis as.
+    ///
+    /// `Name` has one for completeness rather than for use: a same-named
+    /// identity is not a rename, so it reaches no line of the output.
+    pub fn name(&self) -> &'static str {
+        match self {
+            IdentityBasis::Declared => "declared",
+            IdentityBasis::Hinted => "hinted",
+            IdentityBasis::Name => "name",
+            IdentityBasis::Exact => "exact",
+            IdentityBasis::Approximate => "approximate",
+            IdentityBasis::Swapped => "swapped",
+        }
+    }
 }
 
 /// How the row key was selected.

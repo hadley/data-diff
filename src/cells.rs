@@ -2,7 +2,7 @@ use arrow_array::RecordBatch;
 
 use crate::compare::ComparisonPlan;
 use crate::rows::RowMatches;
-use crate::schema::SchemaMatches;
+use crate::schema::ColumnMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CellChanges {
@@ -64,15 +64,23 @@ impl ColumnChanges {
     }
 }
 
+/// Compare every identified column over the matched rows.
+///
+/// The type change is derived here rather than carried on the identity. This is
+/// the only stage that asks whether a column was retyped, and it has both data
+/// types in hand to build the comparison plan with, so a flag on the pair would
+/// be a copy that every stage rewiring the bijection had to keep honest.
 pub(crate) fn compare_cells(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &SchemaMatches,
+    map: &ColumnMap,
     rows: &RowMatches,
 ) -> CellChanges {
     let mut result = CellChanges::default();
     let mut fanout_cells = vec![Vec::new(); rows.fanout.len()];
-    for identity in &schema.identities {
+    for identity in map.pairs() {
+        let type_changed =
+            old.column(identity.old).data_type() != new.column(identity.new).data_type();
         let mut changed_rows = Vec::new();
         if !identity.is_key {
             let old_values = old.column(identity.old);
@@ -101,11 +109,11 @@ pub(crate) fn compare_cells(
                 }
             }
         }
-        if identity.type_changed || !changed_rows.is_empty() {
+        if type_changed || !changed_rows.is_empty() {
             result.columns.push(ColumnChanges {
                 old: identity.old,
                 new: identity.new,
-                type_changed: identity.type_changed,
+                type_changed,
                 rows: changed_rows,
             });
         }

@@ -2,37 +2,40 @@
 
 use arrow_array::RecordBatch;
 
+use crate::IdentityBasis;
 use crate::agreement::Aligned;
 use crate::compare::ComparisonPlan;
-use crate::hint::Hints;
+use crate::hint::{EditHint, edit_protects};
 use crate::rows::RowMatches;
-use crate::schema::{ColumnIdentity, SchemaMatches};
+use crate::schema::{ColumnMap, ColumnPair};
 
 /// Exchange the ends of two identities whose columns hold each other's values.
 ///
 /// When two same-named columns both change beyond recognition, the likelier
 /// account is not that both were rewritten but that their contents were
-/// swapped. This reads and rewrites `identities` only: it neither consumes nor
+/// swapped. This reads and rewrites the pairs only: it neither consumes nor
 /// produces a drop or an addition, which is what keeps it independent of
 /// rename inference.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &mut SchemaMatches,
+    map: &mut ColumnMap,
     rows: &RowMatches,
-    hints: &Hints,
+    edits: &[EditHint],
 ) {
     if rows.matched.is_empty() {
         return;
     }
     let mut values = Aligned::new(old, new, rows);
-    let eligible = eligible(old, new, schema, hints);
+    // Copies rather than positions in the map, so that the candidates can be
+    // weighed against each other before any of them rewires it.
+    let eligible = eligible(map, edits);
 
     let mut candidates = Vec::new();
-    for (position, &first) in eligible.iter().enumerate() {
-        for &second in &eligible[position + 1..] {
-            if exchanged(old, new, schema, &mut values, first, second) {
-                candidates.push((first, second));
+    for (first, pair) in eligible.iter().enumerate() {
+        for (offset, other) in eligible[first + 1..].iter().enumerate() {
+            if exchanged(old, new, &mut values, pair, other) {
+                candidates.push((first, first + 1 + offset));
             }
         }
     }
@@ -40,57 +43,49 @@ pub(crate) fn infer(
     // Competing swaps cancel rather than compete: a column that could plausibly
     // have been exchanged with either of two others is evidence of neither, and
     // the design leaves it to the user rather than to a tie-break.
-    let mut claims = vec![0_usize; schema.identities.len()];
+    let mut claims = vec![0_usize; eligible.len()];
     for &(first, second) in &candidates {
         claims[first] += 1;
         claims[second] += 1;
     }
     for (first, second) in candidates {
         if claims[first] == 1 && claims[second] == 1 {
-            exchange(old, new, schema, first, second);
+            // By old position, which identifies a pair whatever has happened to
+            // the map since: an exchange moves new ends and leaves old ones be.
+            map.exchange(eligible[first].old, eligible[second].old);
         }
     }
 }
 
 /// The identities a swap may consume: provisional, same-named, and not a key.
 ///
-/// Name equality is what makes an identity provisional. A paired key component
-/// is excluded by `is_key`, and an identity established by rename inference
-/// carries different names at its ends — and could not qualify anyway, since
-/// inference only ever establishes identities that agree closely while a swap
-/// needs two that barely agree at all.
+/// A pair whose basis is `Name` is exactly a provisional same-name identity,
+/// which is what recording the basis was for: every other basis is excluded on
+/// its own account. `Declared` and `Hinted` are assertions, and inference does
+/// not overrule an instruction — a point `design.md` makes by name, and the one
+/// that bites, since a rename hint whose two ends carry the same name would
+/// otherwise look exactly like a candidate. `Exact` and `Approximate` pairs
+/// agree far too closely to be two columns rewritten past recognition, and
+/// `Swapped` has been through here already.
 ///
-/// A hinted identity is excluded whatever its names are. Every other exclusion
-/// here is about a default reconciliation chose, which a swap may override on
-/// better evidence; a hint is not a default but an instruction, and inference
-/// does not get to overrule one. This only bites for a hint whose two ends carry
-/// the same name, every other hinted identity being ineligible already.
+/// A guessed key's column is identified by its name like any other, so `is_key`
+/// is still a separate question rather than one the basis answers.
 ///
-/// An edit hint excludes an identity too, and does so *as well as* the map
+/// An edit hint excludes an identity too, and does so *as well as* the basis
 /// rather than instead of it. A rename hint's identity is protected because the
-/// map records it as hinted; an edit claims no endpoint and so is not in the
-/// map at all, which is why it takes a second question. Withdrawing a swap is
-/// the design's stated purpose for the kind, and it is the one place two same-
-/// named columns that really were both rewritten can say so.
-fn eligible(
-    old: &RecordBatch,
-    new: &RecordBatch,
-    schema: &SchemaMatches,
-    hints: &Hints,
-) -> Vec<usize> {
-    let old_schema = old.schema();
-    let new_schema = new.schema();
-    schema
-        .identities
+/// pair records that a hint established it; an edit claims no endpoint and so is
+/// not in the map at all, which is why it takes a second question. Withdrawing a
+/// swap is the design's stated purpose for the kind, and it is the one place two
+/// same-named columns that really were both rewritten can say so.
+fn eligible(map: &ColumnMap, edits: &[EditHint]) -> Vec<ColumnPair> {
+    map.pairs()
         .iter()
-        .enumerate()
-        .filter(|(_, identity)| {
-            !identity.is_key
-                && !hints.map.hinted(identity.old, identity.new)
-                && !hints.edit_protects(identity.old, identity.new)
-                && old_schema.field(identity.old).name() == new_schema.field(identity.new).name()
+        .filter(|pair| {
+            pair.basis == IdentityBasis::Name
+                && !pair.is_key
+                && !edit_protects(edits, pair.old, pair.new)
         })
-        .map(|(position, _)| position)
+        .copied()
         .collect()
 }
 
@@ -101,13 +96,10 @@ fn eligible(
 fn exchanged(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &SchemaMatches,
     values: &mut Aligned,
-    first: usize,
-    second: usize,
+    first: &ColumnPair,
+    second: &ColumnPair,
 ) -> bool {
-    let first = &schema.identities[first];
-    let second = &schema.identities[second];
     if !rewritten(old, new, values, first) || !rewritten(old, new, values, second) {
         return false;
     }
@@ -120,7 +112,7 @@ fn rewritten(
     old: &RecordBatch,
     new: &RecordBatch,
     values: &mut Aligned,
-    identity: &ColumnIdentity,
+    identity: &ColumnPair,
 ) -> bool {
     let plan = plan_for(old, new, identity.old, identity.new)
         .expect("schema reconciliation accepted the type pair");
@@ -154,36 +146,6 @@ fn crosses(
             .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
 }
 
-/// Exchange two identities' new ends, atomically and in place.
-///
-/// Neither old position moves, so `identities` stays sorted by old position
-/// and `minimal_moves` keeps the precondition it asserts. The new positions do
-/// move, which is why an accepted swap can produce a `col_order()` entry: the
-/// column holding one column's values is now where the other one was.
-fn exchange(
-    old: &RecordBatch,
-    new: &RecordBatch,
-    schema: &mut SchemaMatches,
-    first: usize,
-    second: usize,
-) {
-    let first_new = schema.identities[first].new;
-    let second_new = schema.identities[second].new;
-    rewire(old, new, &mut schema.identities[first], second_new);
-    rewire(old, new, &mut schema.identities[second], first_new);
-}
-
-fn rewire(old: &RecordBatch, new: &RecordBatch, identity: &mut ColumnIdentity, new_index: usize) {
-    identity.new = new_index;
-    // Recomputed rather than carried over: the identity being replaced
-    // described a different pair of columns, and its type change said nothing
-    // about this one. Since a crossing is the same type on both sides, the
-    // answer is always that it did not change, which is the point — a swap
-    // dissolves the type changes the two same-name readings were reporting.
-    identity.type_changed =
-        old.column(identity.old).data_type() != new.column(new_index).data_type();
-}
-
 fn plan_for(
     old: &RecordBatch,
     new: &RecordBatch,
@@ -202,15 +164,14 @@ mod tests {
     use test_support::table;
 
     use super::infer;
-    use crate::DiffOptions;
-    use crate::hint::Hints;
     use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
+    use crate::schema::ColumnMap;
     use crate::schema::testing::reconcile_schema;
-    use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
+    use crate::{DiffOptions, IdentityBasis};
 
-    fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
+    fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: Vec::new(),
@@ -218,18 +179,39 @@ mod tests {
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key).unwrap();
-        infer(old, new, &mut schema, &rows, &Hints::default());
+        infer(old, new, &mut schema, &rows, &[]);
         schema
     }
 
     /// The `(old, new)` pairs of every identity that is not the key.
-    fn pairs(schema: &SchemaMatches) -> Vec<(usize, usize)> {
+    fn pairs(schema: &ColumnMap) -> Vec<(usize, usize)> {
         schema
-            .identities
+            .pairs()
             .iter()
-            .filter(|identity| !identity.is_key)
-            .map(|identity| (identity.old, identity.new))
+            .filter(|pair| !pair.is_key)
+            .map(|pair| (pair.old, pair.new))
             .collect()
+    }
+
+    /// Whether any identity the map holds spans two different types.
+    ///
+    /// Derived from the pairs the way `compare_cells` derives it, no pair
+    /// carrying a type change of its own for an exchange to invalidate.
+    fn type_changed(old: &RecordBatch, new: &RecordBatch, schema: &ColumnMap) -> bool {
+        schema
+            .pairs()
+            .iter()
+            .any(|pair| old.column(pair.old).data_type() != new.column(pair.new).data_type())
+    }
+
+    /// What the map says established the identity holding this old column.
+    fn basis(schema: &ColumnMap, old: usize) -> IdentityBasis {
+        schema
+            .pairs()
+            .iter()
+            .find(|pair| pair.old == old)
+            .expect("the identity exists")
+            .basis
     }
 
     #[test]
@@ -249,26 +231,13 @@ mod tests {
 
         // The crossings are integer to integer and string to string. It is the
         // same-name readings that changed type, and the swap is what explains
-        // why: each column was being compared with the wrong one.
+        // why: each column was being compared with the wrong one. Nothing
+        // carries that conclusion around: the type change is derived from the
+        // pair the map ends up holding, so exchanging the ends dissolves it.
         assert_eq!(pairs(&schema), [(1, 2), (2, 1)]);
-        assert_eq!(
-            schema.identities[1],
-            ColumnIdentity {
-                old: 1,
-                new: 2,
-                type_changed: false,
-                is_key: false,
-            }
-        );
-        assert_eq!(
-            schema.identities[2],
-            ColumnIdentity {
-                old: 2,
-                new: 1,
-                type_changed: false,
-                is_key: false,
-            }
-        );
+        assert_eq!(basis(&schema, 1), IdentityBasis::Swapped);
+        assert_eq!(basis(&schema, 2), IdentityBasis::Swapped);
+        assert!(!type_changed(&old, &new, &schema));
     }
 
     #[test]
@@ -380,7 +349,7 @@ mod tests {
         // the matching that produced the aligned rows in the first place.
         let schema = infer_swaps(&old, &new);
 
-        assert!(schema.identities[0].is_key);
+        assert!(schema.pairs()[0].is_key);
         assert_eq!(pairs(&schema), [(1, 1)]);
     }
 
@@ -404,9 +373,9 @@ mod tests {
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key).unwrap();
-        rename::infer(&old, &new, &mut schema, &rows, &ColumnMap::default());
+        rename::infer(&old, &new, &mut schema, &rows);
         let inferred = schema.clone();
-        infer(&old, &new, &mut schema, &rows, &Hints::default());
+        infer(&old, &new, &mut schema, &rows, &[]);
 
         // "kept" was rewritten and "gone" became "fresh", and the two stages
         // do not interact: the inferred identity carries different names at
@@ -414,8 +383,8 @@ mod tests {
         // inference only ever establishes identities that agree closely.
         assert_eq!(schema, inferred);
         assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
-        assert!(schema.dropped.is_empty());
-        assert!(schema.added.is_empty());
+        assert!(schema.dropped().is_empty());
+        assert!(schema.added().is_empty());
     }
 
     #[test]
@@ -441,11 +410,12 @@ mod tests {
             old.schema_ref(),
             new.schema_ref(),
             &options.hints,
-            crate::schema::ColumnMap::default(),
+            ColumnMap::new(old.schema_ref(), new.schema_ref()),
         )
         .unwrap();
-        let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints.map).unwrap();
-        infer(&old, &new, &mut schema, &rows, &hints);
+        let mut schema = hints.map.clone();
+        crate::schema::reconcile_schema(&old, &new, &key, &mut schema).unwrap();
+        infer(&old, &new, &mut schema, &rows, &hints.edits);
 
         // The values would read as an exchange, and a hint says otherwise. Every
         // other exclusion here is about a default reconciliation chose; this one
@@ -476,11 +446,12 @@ mod tests {
             old.schema_ref(),
             new.schema_ref(),
             &options.hints,
-            ColumnMap::default(),
+            ColumnMap::new(old.schema_ref(), new.schema_ref()),
         )
         .unwrap();
-        let mut schema = crate::schema::reconcile_schema(&old, &new, &key, &hints.map).unwrap();
-        infer(&old, &new, &mut schema, &rows, &hints);
+        let mut schema = hints.map.clone();
+        crate::schema::reconcile_schema(&old, &new, &key, &mut schema).unwrap();
+        infer(&old, &new, &mut schema, &rows, &hints.edits);
 
         // An edit claims no endpoint, so the map knows nothing about it and the
         // hinted-pair exclusion cannot see it. Naming one of the two columns is

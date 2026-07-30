@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
 use crate::schema::ColumnMap;
-use crate::{DiffError, KeyBasis, KeyOverlap, Side};
+use crate::{DiffError, IdentityBasis, KeyBasis, KeyOverlap, Side};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
@@ -151,13 +151,13 @@ pub(crate) fn claimed_identities(
     new: &Schema,
     components: &[Component],
 ) -> ColumnMap {
-    let mut map = ColumnMap::default();
+    let mut map = ColumnMap::new(old, new);
     for component in components {
         if let (Some(old_index), Some(new_index)) = (
             schema_position(old, &component.old),
             schema_position(new, &component.new),
         ) {
-            map.claim(old_index, new_index, false);
+            map.claim(old_index, new_index, IdentityBasis::Declared);
         }
     }
     map
@@ -189,7 +189,8 @@ pub(crate) mod testing {
         options: &DiffOptions,
     ) -> Result<ResolvedKey, DiffError> {
         let components = declared_components(&options.key)?;
-        super::resolve_key(old, new, &components, &ColumnMap::default())
+        let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
+        super::resolve_key(old, new, &components, &map)
     }
 }
 
