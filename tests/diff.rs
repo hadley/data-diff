@@ -1057,7 +1057,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
     );
     assert!(edited.summary.rows.is_empty());
 
-    // And the line the hint produces is itself a hint. `col_edit(total, values)`
+    // And the line the hint produces is itself a hint. `col_edit(total, changed: values)`
     // carries a flag the bare spelling does not, which the parser reads past the
     // way it reads past a rename's basis: the claim is the first argument, and
     // the rest is detail the format prints about the operation.
@@ -1066,7 +1066,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
         .lines()
         .find(|line| line.starts_with("col_edit("))
         .expect("the edit is reported");
-    assert_eq!(line, "col_edit(total, values)");
+    assert_eq!(line, "col_edit(total, changed: values)");
 
     let again = diff_tables(&old, &new, &hinted(&["id"], &[line])).unwrap();
     assert!(again.issues.is_empty());

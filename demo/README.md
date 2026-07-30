@@ -38,7 +38,7 @@ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 
 Row 1 changes in columns `a` and `b`, while column `c` changes in rows 2 and 3.
 The minimum summary therefore contains both `row_edit(1)` and
-`col_edit(c, values)`.
+`col_edit(c, changed: values)`.
 
 ## Mixed structural changes
 
@@ -48,7 +48,7 @@ data-diff demo/mixed-old.parquet demo/mixed-new.parquet --key id
 
 This pair reorders columns and rows, drops `product` and row `102`, adds `stock`
 and row `104`, and changes the prices of the two matched rows. The human format
-summarizes the two price cells as one `col_edit(price, values)`.
+summarizes the two price cells as one `col_edit(price, changed: values)`.
 
 ## Type-only changes
 
@@ -147,7 +147,7 @@ $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
     --hint 'col_rename(discount -> markdown)'
 col_key([id], basis: declared)
 col_rename(discount -> markdown, basis: hinted)
-col_edit(markdown, values)
+col_edit(markdown, changed: values)
 ```
 
 Note what the hint did *not* do. It asserted that the two columns are one, and nothing about their values, so the change it made visible is reported as an edit. Being unmatched is what had been hiding it: a dropped column has no cells to compare.
@@ -198,8 +198,8 @@ Where a change can be read two ways, `col_edit()` says which. The swap above is 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id --hint 'col_edit(price)'
 col_key([id], basis: declared)
-col_edit(price, values)
-col_edit(cost, values)
+col_edit(price, changed: values)
+col_edit(cost, changed: values)
 ```
 
 Naming one column is enough. An exchange takes two, so withdrawing either end leaves both columns to be described under their own names.
@@ -209,7 +209,7 @@ The second case is a rectangular change, which can be summarized by its rows or 
 ```console
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 col_key([id], basis: declared)
-col_edit(c, values)
+col_edit(c, changed: values)
 row_edit(1)
 ```
 
@@ -219,9 +219,9 @@ Hinting the two columns that row 1 accounts for takes their cells out of the rec
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
     --hint 'col_edit(a)' --hint 'col_edit(b)'
 col_key([id], basis: declared)
-col_edit(a, values)
-col_edit(b, values)
-col_edit(c, values)
+col_edit(a, changed: values)
+col_edit(b, changed: values)
+col_edit(c, changed: values)
 ```
 
 An edit hint asserts that something changed, so one naming a column that did not is ignored and reported like any other hint the data contradicts:
@@ -230,7 +230,7 @@ An edit hint asserts that something changed, so one naming a column that did not
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id --hint 'col_edit(id)'
 col_key([id], basis: declared)
 hint_ignored(col_edit(id), unchanged)
-col_edit(c, values)
+col_edit(c, changed: values)
 row_edit(1)
 ```
 
@@ -240,7 +240,7 @@ row_edit(1)
 data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
 ```
 
-Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], values)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
+Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], changed: values)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
 
 ## A guessed key that fans out
 

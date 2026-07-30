@@ -10,7 +10,7 @@ data-diff old.parquet new.parquet
 > col_key([id], basis: guessed, overlap: 1.00)
 > col_drop(product)
 > col_add(stock)
-> col_edit(price, values)
+> col_edit(price, changed: values)
 ```
 
 If you know what the primary key is (i.e. the set of variables that uniquely identifies each row) you should supply it:
@@ -42,7 +42,7 @@ When a change can't be worked out from the data --- e.g. a column renamed and re
 data-diff old.parquet new.parquet --key id --hint 'col_rename(discount -> markdown)'
 > col_key([id], basis: declared)
 > col_rename(discount -> markdown, basis: hinted)
-> col_edit(markdown, values)
+> col_edit(markdown, changed: values)
 ```
 
 You can repeat `--hint` or use `--hints hints.txt` to take a file of hints, skipping blank lines and `#` comments.

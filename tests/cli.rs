@@ -163,7 +163,7 @@ fn reports_mixed_changes_in_human_format() {
     col_drop(drop)
     col_add(add)
     col_order(value, 2 -> 1)
-    col_edit(value, values)
+    col_edit(value, changed: values)
     row_drop(3)
     row_add(3)
     row_order(2 -> 1)
@@ -196,7 +196,7 @@ fn reports_a_bounded_fanout() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
-    row_fanout(4 -> [4, 5], values)
+    row_fanout(4 -> [4, 5], changed: values)
     ");
 }
 
@@ -360,7 +360,7 @@ fn guesses_a_key_that_fans_out() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: guessed, overlap: 1.00)
-    row_fanout(4 -> [4, 5], values)
+    row_fanout(4 -> [4, 5], changed: values)
     ");
 }
 
@@ -447,7 +447,7 @@ fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
-    col_edit(markdown, values)
+    col_edit(markdown, changed: values)
     ");
 }
 
@@ -528,7 +528,7 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
     col_rename(note -> comment, basis: hinted)
     col_drop(discount)
     col_add(markdown)
-    col_edit(comment, values)
+    col_edit(comment, changed: values)
     ");
 }
 
@@ -597,8 +597,8 @@ fn withdraws_a_swap_when_told_the_column_was_edited() {
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
-    col_edit(price, values)
-    col_edit(cost, values)
+    col_edit(price, changed: values)
+    col_edit(cost, changed: values)
     ");
 }
 
@@ -636,6 +636,6 @@ fn reports_an_edit_hint_the_data_does_not_bear_out() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     hint_ignored(col_edit(value), unchanged)
-    col_edit(note, values)
+    col_edit(note, changed: values)
     ");
 }

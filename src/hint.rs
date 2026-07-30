@@ -458,14 +458,16 @@ fn rival_groups(claims: &[(usize, HintClaim, Claim)], contested: &[bool]) -> Vec
 /// Read one line of the grammar as the claim it makes.
 ///
 /// A hint's claim is its first argument. Anything after it is detail the format
-/// prints about the operation — `basis: exact` on a rename, `values` and a type
-/// pair on an edit — and is ignored rather than read, because none of it is the
-/// user's to assert: what a hint contributes is the identity, and supplying
-/// `basis: exact` does not make the basis exact but makes it hinted.
+/// prints about the operation — `basis: exact` on a rename, `changed: values`
+/// and a type pair on an edit — and is ignored rather than read, because none of
+/// it is the user's to assert: what a hint contributes is the identity, and
+/// supplying `basis: exact` does not make the basis exact but makes it hinted.
 ///
-/// Ignored, but not unchecked. A later argument must look like detail, so that
-/// `col_rename(a -> b, c -> d)`, whose second argument is shaped like a second
-/// claim, is refused rather than half-honored.
+/// Ignored, but not unchecked. Every argument after the claim must be a field,
+/// so that `col_rename(a -> b, c -> d)`, whose second argument is shaped like a
+/// second claim, is refused rather than half-honored. One rule and no
+/// vocabulary: the grammar's colon is what marks detail, and the format writes
+/// nothing else after a claim.
 fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
     let malformed = || DiffError::MalformedHint {
         hint: spelling.to_owned(),
@@ -477,7 +479,7 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
     }
     let arguments = arguments(&trimmed[open + 1..trimmed.len() - 1]);
     let (claim, detail) = arguments.split_first().ok_or_else(malformed)?;
-    if !detail.iter().all(|argument| is_detail(argument)) {
+    if !detail.iter().all(|argument| is_field(argument)) {
         return Err(malformed());
     }
     let names = names(claim).ok_or_else(malformed)?;
@@ -510,7 +512,7 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
 /// Split an argument list on the grammar's commas.
 ///
 /// Commas inside quotes and inside a list belong to the argument that contains
-/// them, so `col_edit("a,b", values)` is two arguments and not three.
+/// them, so `col_edit("a,b", changed: values)` is two arguments and not three.
 fn arguments(arguments: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -531,23 +533,22 @@ fn arguments(arguments: &str) -> Vec<&str> {
     parts
 }
 
-/// Whether an argument is detail the format prints rather than a claim.
+/// Whether an argument is a field, which is the only detail a line carries.
 ///
 /// A field is detail whatever it says, because the grammar's colon is what
-/// makes it one: `basis: exact` and `type: Int32 -> Int64` cannot be mistaken
-/// for a claim, and reading the field names here would only duplicate a list
-/// the renderer owns.
+/// makes it one: `basis: exact` and `changed: values` cannot be mistaken for a
+/// claim, and reading the field names here would only duplicate a list the
+/// renderer owns.
 ///
-/// A flag has no such marker, so the flags are named. `values` is the only bare
-/// word the format writes on a line of a hint kind, and admitting bare words in
-/// general would make `col_edit(price, cost)` — a user naming two columns —
-/// quietly mean `col_edit(price)`.
-fn is_detail(argument: &str) -> bool {
+/// That the format writes every detail as a field is what keeps this to one
+/// rule. A bare word would have no such marker, and admitting bare words would
+/// make `col_edit(price, cost)` — a user naming two columns — quietly mean
+/// `col_edit(price)`.
+fn is_field(argument: &str) -> bool {
     let trimmed = argument.trim();
-    let field = scan(trimmed, |index, character| {
+    scan(trimmed, |index, character| {
         character == b':' && trimmed[index..].starts_with(": ")
-    });
-    field || trimmed == "values"
+    })
 }
 
 /// Walk the bytes outside quotes, stopping where `found` says so.
@@ -725,10 +726,13 @@ mod tests {
         for (spelling, bare) in [
             ("col_rename(a -> b, basis: exact)", "col_rename(a -> b)"),
             ("col_rename(a -> b, basis: swapped)", "col_rename(a -> b)"),
-            ("col_edit(a, values)", "col_edit(a)"),
+            ("col_edit(a, changed: values)", "col_edit(a)"),
             ("col_edit(a, type: Int32 -> Int64)", "col_edit(a)"),
-            ("col_edit(a, type: Int32 -> Int64, values)", "col_edit(a)"),
-            ("col_edit(a -> b, values)", "col_edit(a -> b)"),
+            (
+                "col_edit(a, type: Int32 -> Int64, changed: values)",
+                "col_edit(a)",
+            ),
+            ("col_edit(a -> b, changed: values)", "col_edit(a -> b)"),
         ] {
             let claim = parse(spelling).unwrap();
             let expected = parse(bare).unwrap();
@@ -741,15 +745,17 @@ mod tests {
     }
 
     #[test]
-    fn an_argument_after_the_claim_that_is_not_detail_is_refused() {
+    fn an_argument_after_the_claim_that_is_not_a_field_is_refused() {
         // A second argument shaped like a second claim is much likelier to be a
         // user meaning something else than detail the format wrote, so it is
-        // refused rather than half-honored. A bare word is only detail where it
-        // is a flag the format actually writes.
+        // refused rather than half-honored. Every detail the format writes
+        // carries the grammar's colon, so nothing has to be spelled out here:
+        // `values` is refused with the rest, being a column name wherever it is
+        // not a field's value.
         for spelling in [
             "col_rename(a -> b, c -> d)",
             "col_edit(a, b)",
-            "col_edit(a, valued)",
+            "col_edit(a, values)",
             "col_drop(a, b)",
         ] {
             assert!(parse(spelling).is_err(), "{spelling}");
@@ -760,7 +766,7 @@ mod tests {
     fn a_quoted_name_keeps_the_commas_in_it() {
         // Splitting the arguments must not split a name, or quoting would stop
         // reaching the names it exists to reach.
-        let claim = parse(r#"col_edit("a, b", values)"#).unwrap();
+        let claim = parse(r#"col_edit("a, b", changed: values)"#).unwrap();
 
         assert_eq!(claim.names, HintNames::Single("a, b".into()));
     }

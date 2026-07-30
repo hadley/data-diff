@@ -72,7 +72,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             ));
         }
         if edit.values_changed {
-            details.push("values".to_owned());
+            details.push("changed: values".to_owned());
         }
         let suffix = if details.is_empty() {
             String::new()
@@ -97,7 +97,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let suffix = if event.cells.is_empty() {
             ""
         } else {
-            ", values"
+            ", changed: values"
         };
         let targets = event
             .new
@@ -406,7 +406,7 @@ mod tests {
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from(["basis", "missing", "overlap", "type"])
+            BTreeSet::from(["basis", "changed", "missing", "overlap", "type"])
         );
     }
 
@@ -428,7 +428,7 @@ mod tests {
         col_drop(drop)
         col_add(add)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, values)
+        col_edit(value, type: Int32 -> Int64, changed: values)
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
@@ -493,7 +493,7 @@ mod tests {
         col_key([id], basis: declared)
         row_drop(11)
         row_add(12)
-        row_fanout(4 -> [4, 5], values)
+        row_fanout(4 -> [4, 5], changed: values)
         row_order(2 -> 1)
         row_edit(7 -> 8)
         ");
@@ -635,7 +635,7 @@ mod tests {
         col_drop(gone)
         col_add(fresh)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, values)
+        col_edit(value, type: Int32 -> Int64, changed: values)
         ");
     }
 
