@@ -1,7 +1,7 @@
 use data_diff::{
     CellCoordinate, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffError, DiffOptions,
     EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyDiff, KeyOverlap,
-    Side, diff_tables, write_human,
+    RowEdit, Side, diff_tables, write_human,
 };
 use test_support::table;
 
@@ -10,6 +10,14 @@ fn identity(old: usize, new: usize, basis: IdentityBasis) -> ColumnIdentity {
     ColumnIdentity {
         column: Coordinate::from_zero_based(old, new),
         basis,
+    }
+}
+
+/// One row edit, spelled as its two zero-based positions and its cell count.
+fn row_edit(old: usize, new: usize, changes: usize) -> RowEdit {
+    RowEdit {
+        row: Coordinate::from_zero_based(old, new),
+        changes,
     }
 }
 
@@ -62,7 +70,7 @@ fn combines_schema_row_order_and_cell_changes() {
         vec![ColumnEdit {
             column: Coordinate::from_zero_based(1, 0),
             type_changed: false,
-            values_changed: true,
+            changes: 2,
         }]
     );
     assert_eq!(diff.rows.added, vec![3]);
@@ -89,7 +97,7 @@ fn combines_schema_row_order_and_cell_changes() {
             columns: vec![ColumnEdit {
                 column: Coordinate::from_zero_based(1, 0),
                 type_changed: false,
-                values_changed: true,
+                changes: 2,
             }],
             rows: vec![],
         }
@@ -120,9 +128,9 @@ fn summary_combines_row_and_column_edits_minimally() {
             columns: vec![ColumnEdit {
                 column: Coordinate::from_zero_based(3, 3),
                 type_changed: false,
-                values_changed: true,
+                changes: 2,
             }],
-            rows: vec![Coordinate::from_zero_based(0, 0)],
+            rows: vec![row_edit(0, 0, 2)],
         }
     );
 }
@@ -143,7 +151,7 @@ fn selected_row_retains_its_moved_coordinate() {
     let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
     assert!(diff.summary.columns.is_empty());
-    assert_eq!(diff.summary.rows, vec![Coordinate::from_zero_based(0, 1)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(0, 1, 2)]);
 }
 
 #[test]
@@ -242,12 +250,20 @@ fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
         diff.cells,
         vec![CellCoordinate::from_zero_based(6, 1, 7, 1)]
     );
+    // A fanout counts its own differing comparisons, and they stay its own: the
+    // column edit beside it counts only the one-to-one cell.
+    let rendered = String::from_utf8(render(&diff)).unwrap();
+    assert!(
+        rendered.contains("row_fanout(4 -> [4, 5], changes: 1)"),
+        "{rendered}"
+    );
+
     assert_eq!(
         diff.columns.edited,
         vec![ColumnEdit {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
-            values_changed: true,
+            changes: 1,
         }]
     );
     assert_eq!(
@@ -255,7 +271,7 @@ fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
         EditSummary {
             optimal: true,
             columns: vec![],
-            rows: vec![Coordinate::from_zero_based(6, 7)],
+            rows: vec![row_edit(6, 7, 1)],
         }
     );
 }
@@ -315,12 +331,12 @@ fn an_undeclared_rename_is_inferred_from_the_values() {
             ColumnEdit {
                 column: Coordinate::from_zero_based(1, 2),
                 type_changed: true,
-                values_changed: false,
+                changes: 0,
             },
             ColumnEdit {
                 column: Coordinate::from_zero_based(2, 0),
                 type_changed: false,
-                values_changed: true,
+                changes: 1,
             },
         ]
     );
@@ -378,7 +394,7 @@ fn a_rename_is_inferred_despite_an_edit_it_carried() {
         EditSummary {
             optimal: true,
             columns: vec![],
-            rows: vec![Coordinate::from_zero_based(0, 0)],
+            rows: vec![row_edit(0, 0, 2)],
         }
     );
 
@@ -642,7 +658,7 @@ fn a_hint_identifies_a_column_inference_could_not_have() {
         vec![ColumnEdit {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
-            values_changed: true,
+            changes: 3,
         }]
     );
     assert_eq!(diff.cells.len(), 3);
@@ -780,7 +796,7 @@ fn a_hint_can_be_guessed_as_the_key() {
             }),
         }
     );
-    assert_eq!(diff.summary.rows, vec![Coordinate::from_zero_based(1, 1)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
     assert!(diff.rows.added.is_empty());
     assert!(diff.rows.dropped.is_empty());
 }
@@ -924,12 +940,12 @@ fn an_edit_hint_withdraws_a_swap() {
             ColumnEdit {
                 column: Coordinate::from_zero_based(1, 1),
                 type_changed: false,
-                values_changed: true,
+                changes: 2,
             },
             ColumnEdit {
                 column: Coordinate::from_zero_based(2, 2),
                 type_changed: false,
-                values_changed: true,
+                changes: 2,
             },
         ]
     );
@@ -953,10 +969,7 @@ fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
     let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
     assert_eq!(
         inferred.summary.rows,
-        [
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 1),
-        ]
+        [row_edit(0, 0, 2), row_edit(1, 1, 1)]
     );
     assert!(inferred.summary.columns.is_empty());
 
@@ -970,10 +983,12 @@ fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
         [ColumnEdit {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
-            values_changed: true,
+            changes: 2,
         }]
     );
-    assert_eq!(edited.summary.rows, [Coordinate::from_zero_based(0, 0)]);
+    // The surviving row edit counts the cell in the hinted column too: a hint
+    // moves which events are reported, not what is true of row 1.
+    assert_eq!(edited.summary.rows, [row_edit(0, 0, 2)]);
     // The hint changed how the same cells are described, not which cells there
     // are: the complete diff is untouched.
     assert_eq!(edited.cells, inferred.cells);
@@ -1038,7 +1053,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
     let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
     let rendered = String::from_utf8(render(&inferred)).unwrap();
     assert!(rendered.contains("col_rename(amount -> total, basis: approximate)"));
-    assert!(rendered.contains("row_edit(7)"));
+    assert!(rendered.contains("row_edit(7, changes: 1)"));
 
     // A col_edit() line names its column as the new file does, so feeding one
     // back means naming an identity by an end the old file does not have. It
@@ -1052,21 +1067,21 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
         [ColumnEdit {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
-            values_changed: true,
+            changes: 1,
         }]
     );
     assert!(edited.summary.rows.is_empty());
 
-    // And the line the hint produces is itself a hint. `col_edit(total, changed: values)`
-    // carries a flag the bare spelling does not, which the parser reads past the
-    // way it reads past a rename's basis: the claim is the first argument, and
-    // the rest is detail the format prints about the operation.
+    // And the line the hint produces is itself a hint. `col_edit(total, changes: 1)`
+    // carries a count the bare spelling does not, which the parser reads past
+    // the way it reads past a rename's basis: the claim is the first argument,
+    // and the rest is detail the format prints about the operation.
     let printed = String::from_utf8(render(&edited)).unwrap();
     let line = printed
         .lines()
         .find(|line| line.starts_with("col_edit("))
         .expect("the edit is reported");
-    assert_eq!(line, "col_edit(total, changed: values)");
+    assert_eq!(line, "col_edit(total, changes: 1)");
 
     let again = diff_tables(&old, &new, &hinted(&["id"], &[line])).unwrap();
     assert!(again.issues.is_empty());

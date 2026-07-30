@@ -8,7 +8,7 @@ use crate::cells::{CellChanges, ColumnChanges};
 pub(crate) struct SummaryChanges {
     pub optimal: bool,
     pub columns: Vec<SummaryColumn>,
-    pub rows: Vec<(usize, usize)>,
+    pub rows: Vec<SummaryRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,7 +16,16 @@ pub(crate) struct SummaryColumn {
     pub old: usize,
     pub new: usize,
     pub type_changed: bool,
-    pub values_changed: bool,
+    /// Changed cells in this column, over the one-to-one matched rows.
+    pub changes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SummaryRow {
+    pub old: usize,
+    pub new: usize,
+    /// Changed cells in this row, over the identified columns.
+    pub changes: usize,
 }
 
 /// Reduce the changed cells, holding retyped and hinted columns out of it.
@@ -27,6 +36,13 @@ pub(crate) struct SummaryColumn {
 /// change can be described by its rows or by its columns, and the hint says
 /// which. Their cells leave the graph with them, so the row edits are minimal
 /// over what is left to cover rather than being computed and then overridden.
+///
+/// Every chosen event then counts the changed cells incident to it, over the
+/// whole cell set rather than over the graph. A row edit and a column edit that
+/// cross both count the cell they share, so the counts do not sum to the number
+/// of changed cells: each is a fact about its own row or column, which keeps it
+/// checkable against the data and independent of which tied minimum cover was
+/// chosen.
 pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> SummaryChanges {
     let held_out =
         |column: &&ColumnChanges| column.type_changed || forced.contains(&(column.old, column.new));
@@ -39,7 +55,7 @@ pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> Sum
             old: column.old,
             new: column.new,
             type_changed: column.type_changed,
-            values_changed: column.values_changed(),
+            changes: column.rows.len(),
         })
         .collect::<Vec<_>>();
     let residual_columns = changes
@@ -77,16 +93,32 @@ pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> Sum
             old: column.old,
             new: column.new,
             type_changed: false,
-            values_changed: true,
+            changes: column.rows.len(),
         });
     }
     columns.sort_by_key(|column| (column.old, column.new));
     selected_rows.sort_unstable();
 
+    // Counted over every changed column rather than over the graph, so a cell
+    // in a held-out column still counts toward the row it fell in. A hint moves
+    // which events are reported; it does not change what is true of a row.
+    let rows = selected_rows
+        .into_iter()
+        .map(|row| SummaryRow {
+            old: row.0,
+            new: row.1,
+            changes: changes
+                .columns
+                .iter()
+                .filter(|column| column.rows.contains(&row))
+                .count(),
+        })
+        .collect::<Vec<_>>();
+
     let summary = SummaryChanges {
         optimal: true,
         columns,
-        rows: selected_rows,
+        rows,
     };
     debug_assert!(changes.columns.iter().all(|column| {
         column.rows.iter().all(|row| {
@@ -94,7 +126,10 @@ pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> Sum
                 .columns
                 .iter()
                 .any(|selected| selected.old == column.old && selected.new == column.new)
-                || summary.rows.contains(row)
+                || summary
+                    .rows
+                    .iter()
+                    .any(|selected| (selected.old, selected.new) == *row)
         })
     }));
     summary
@@ -290,7 +325,7 @@ impl Matching {
 
 #[cfg(test)]
 mod tests {
-    use super::{BipartiteGraph, SummaryChanges, SummaryColumn, VertexCover};
+    use super::{BipartiteGraph, SummaryChanges, SummaryColumn, SummaryRow, VertexCover};
     use crate::cells::{CellChanges, ColumnChanges};
 
     /// Summarize with nothing forced, which is every test whose subject is the
@@ -464,11 +499,8 @@ mod tests {
             summarize(&changes),
             super::SummaryChanges {
                 optimal: true,
-                columns: vec![
-                    summary_column(0, 1, true, true),
-                    summary_column(3, 3, true, false),
-                ],
-                rows: vec![(0, 1)],
+                columns: vec![summary_column(0, 1, true, 2), summary_column(3, 3, true, 0),],
+                rows: vec![summary_row(0, 1, 2)],
             }
         );
     }
@@ -488,7 +520,7 @@ mod tests {
         };
 
         let free = summarize(&changes);
-        assert_eq!(free.rows, [(0, 0), (1, 1)]);
+        assert_eq!(free.rows, [summary_row(0, 0, 2), summary_row(1, 1, 2)]);
         assert!(free.columns.is_empty());
 
         // Hint the two single-cell columns and they leave the graph, taking
@@ -501,12 +533,57 @@ mod tests {
         assert_eq!(
             forced.columns,
             [
-                summary_column(1, 1, false, true),
-                summary_column(2, 2, false, true),
-                summary_column(3, 3, false, true),
+                summary_column(1, 1, false, 2),
+                summary_column(2, 2, false, 1),
+                summary_column(3, 3, false, 1),
             ]
         );
         assert!(forced.rows.is_empty());
+    }
+
+    #[test]
+    fn overlapping_events_each_count_the_cell_they_share() {
+        // Five changed cells: row 0 changes in all three columns, and column 2
+        // changes in all three rows. Covering them takes that row and that
+        // column, and the cell where they cross belongs to both.
+        let changes = CellChanges {
+            columns: vec![
+                changed_column(0, 0, false, &[(0, 0)]),
+                changed_column(1, 1, false, &[(0, 0)]),
+                changed_column(2, 2, false, &[(0, 0), (1, 1), (2, 2)]),
+            ],
+            ..CellChanges::default()
+        };
+
+        let summary = summarize(&changes);
+
+        // Three and three over five cells. The counts are deliberately not a
+        // partition: each is a fact about its own row or column, which is what
+        // makes it checkable against the data and keeps it independent of which
+        // minimum cover was chosen.
+        assert_eq!(summary.columns, [summary_column(2, 2, false, 3)]);
+        assert_eq!(summary.rows, [summary_row(0, 0, 3)]);
+    }
+
+    #[test]
+    fn a_row_counts_cells_in_a_column_held_out_of_the_graph() {
+        // "a" changes in both rows and "b" in the first, so covering the rows is
+        // the smaller description until "a" is hinted out of the graph.
+        let changes = CellChanges {
+            columns: vec![
+                changed_column(1, 1, false, &[(0, 0), (1, 1)]),
+                changed_column(2, 2, false, &[(0, 0)]),
+            ],
+            ..CellChanges::default()
+        };
+
+        let forced = super::summarize(&changes, &[(1, 1)]);
+
+        // Row 0 is reported for the one cell left to cover, and counts two:
+        // the cell in the hinted column is still a changed cell in that row. A
+        // hint moves which events are reported, not what is true of a row.
+        assert_eq!(forced.columns, [summary_column(1, 1, false, 2)]);
+        assert_eq!(forced.rows, [summary_row(0, 0, 2)]);
     }
 
     #[test]
@@ -525,9 +602,9 @@ mod tests {
 
         assert_eq!(
             summarize(&column_dominant).columns,
-            [summary_column(2, 0, false, true)]
+            [summary_column(2, 0, false, 2)]
         );
-        assert_eq!(summarize(&row_dominant).rows, [(0, 2)]);
+        assert_eq!(summarize(&row_dominant).rows, [summary_row(0, 2, 2)]);
     }
 
     fn changed_column(
@@ -544,17 +621,16 @@ mod tests {
         }
     }
 
-    fn summary_column(
-        old: usize,
-        new: usize,
-        type_changed: bool,
-        values_changed: bool,
-    ) -> SummaryColumn {
+    fn summary_column(old: usize, new: usize, type_changed: bool, changes: usize) -> SummaryColumn {
         SummaryColumn {
             old,
             new,
             type_changed,
-            values_changed,
+            changes,
         }
+    }
+
+    fn summary_row(old: usize, new: usize, changes: usize) -> SummaryRow {
+        SummaryRow { old, new, changes }
     }
 }

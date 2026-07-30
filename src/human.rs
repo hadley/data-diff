@@ -61,6 +61,13 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             column_name(&diff.schemas.new, new)
         ));
     }
+    // A count is every changed cell in the column, so a row edit crossing it
+    // counts the cell they share too. The two numbers describe their own row and
+    // their own column rather than dividing the change between them, which is
+    // what makes each of them checkable against the data.
+    //
+    // A type-only edit has nothing to count and says nothing: `changes: 0` would
+    // be a zero to interpret where an absence can be read past.
     for edit in &diff.summary.columns {
         let (old, new) = edit.column.positions();
         let mut details = Vec::new();
@@ -71,8 +78,8 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
                 column_type(&diff.schemas.new, new)
             ));
         }
-        if edit.values_changed {
-            details.push("changed: values".to_owned());
+        if edit.changes > 0 {
+            details.push(format!("changes: {}", edit.changes));
         }
         let suffix = if details.is_empty() {
             String::new()
@@ -92,12 +99,15 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         operations.push(format!("row_add({position})"));
     }
     for event in &diff.rows.fanout {
-        // The coordinates cannot say whether the new rows differ from the old
-        // one, so the suffix does; the cells themselves are never enumerated.
+        // The coordinates cannot say how far the new rows differ from the old
+        // one, so the count does; the cells themselves are never enumerated.
+        // What it counts is comparisons rather than cells of one table, a
+        // one-to-many event having no single cell to point at: two new rows
+        // disagreeing in the same column is two.
         let suffix = if event.cells.is_empty() {
-            ""
+            String::new()
         } else {
-            ", changed: values"
+            format!(", changes: {}", event.cells.len())
         };
         let targets = event
             .new
@@ -111,13 +121,14 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let (old, new) = coordinate.positions();
         operations.push(format!("row_order({old} -> {new})"));
     }
-    for coordinate in &diff.summary.rows {
-        let (old, new) = coordinate.positions();
-        if old == new {
-            operations.push(format!("row_edit({old})"));
+    for edit in &diff.summary.rows {
+        let (old, new) = edit.row.positions();
+        let row = if old == new {
+            format!("{old}")
         } else {
-            operations.push(format!("row_edit({old} -> {new})"));
-        }
+            format!("{old} -> {new}")
+        };
+        operations.push(format!("row_edit({row}, changes: {})", edit.changes));
     }
 
     if operations.len() == context {
@@ -369,6 +380,14 @@ mod tests {
             "id" => [1, 2, 3],
             "renamed" => [9, 8, 7],
         };
+        let flagged_old = table! {
+            "id" => [1, 2, 3],
+            "flag" => [true, false, true],
+        };
+        let flagged_new = table! {
+            "id" => [1, 2, 3],
+            "count" => [1, 0, 1],
+        };
 
         // Every line kind the renderer can write, so a field introduced
         // anywhere in the format has to show up in this set.
@@ -395,18 +414,35 @@ mod tests {
             ),
             render_hinted(&renamed_old, &renamed_old, &["col_edit(amount)"]),
             render_hinted(&renamed_old, &hinted_new, &["col_edit(amount)"]),
+            // A boolean and an integer cannot be compared, so this hint is
+            // declined rather than obeyed — and its reason is the one field the
+            // fixtures above never reached.
+            render_hinted(&flagged_old, &flagged_new, &["col_rename(flag -> count)"]),
         ]
         .join("\n");
 
         // The fixtures are only a guard if they reach the lines they claim to,
         // and an issue reason is easy to add a fixture for and never render.
-        for reason in ["missing:", "contradictory", "unchanged", "unresolved"] {
+        for reason in [
+            "missing:",
+            "contradictory",
+            "unchanged",
+            "unresolved",
+            "incompatible:",
+        ] {
             assert!(rendered.contains(reason), "{reason}");
         }
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from(["basis", "changed", "missing", "overlap", "type"])
+            BTreeSet::from([
+                "basis",
+                "changes",
+                "incompatible",
+                "missing",
+                "overlap",
+                "type"
+            ])
         );
     }
 
@@ -428,7 +464,7 @@ mod tests {
         col_drop(drop)
         col_add(add)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, changed: values)
+        col_edit(value, type: Int32 -> Int64, changes: 2)
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
@@ -464,7 +500,7 @@ mod tests {
         row_drop(2)
         row_add(3)
         row_order(3 -> 1)
-        row_edit(3 -> 1)
+        row_edit(3 -> 1, changes: 1)
         ");
     }
 
@@ -493,9 +529,9 @@ mod tests {
         col_key([id], basis: declared)
         row_drop(11)
         row_add(12)
-        row_fanout(4 -> [4, 5], changed: values)
+        row_fanout(4 -> [4, 5], changes: 1)
         row_order(2 -> 1)
-        row_edit(7 -> 8)
+        row_edit(7 -> 8, changes: 1)
         ");
     }
 
@@ -610,7 +646,7 @@ mod tests {
         col_drop(gone)
         col_add(fresh)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, changed: values)
+        col_edit(value, type: Int32 -> Int64, changes: 1)
         ");
     }
 
@@ -650,8 +686,58 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([id], basis: declared)\nrow_edit(2)"
+            "col_key([id], basis: declared)\nrow_edit(2, changes: 2)"
         );
+    }
+
+    #[test]
+    fn an_edit_says_how_much_changed() {
+        let old = table! {
+            "id" => i32[1, 2, 3],
+            "kept" => [10, 20, 30],
+            "rewritten" => [1, 2, 3],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "kept" => [10, 20, 30],
+            "rewritten" => [9, 8, 3],
+        };
+
+        // The key was retyped and nothing about its values moved, so it has
+        // nothing to count and says so by saying nothing. The other column
+        // changed in two of its three rows, and every count the format writes is
+        // positive like this one.
+        insta::assert_snapshot!(render(&old, &new), @"
+        col_key([id], basis: declared)
+        col_edit(id, type: Int32 -> Int64)
+        col_edit(rewritten, changes: 2)
+        ");
+    }
+
+    #[test]
+    fn crossing_edits_each_count_the_cell_they_share() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "a" => [0, 0, 0],
+            "b" => [0, 0, 0],
+            "c" => [0, 0, 0],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "a" => [1, 0, 0],
+            "b" => [1, 0, 0],
+            "c" => [1, 1, 1],
+        };
+
+        // Row 1 changed in three columns and "c" changed in three rows, over
+        // five cells in total. Three plus three is deliberately not five: each
+        // count describes its own row or column, and the cell where they cross
+        // is a changed cell of both.
+        insta::assert_snapshot!(render(&old, &new), @"
+        col_key([id], basis: declared)
+        col_edit(c, changes: 3)
+        row_edit(1, changes: 3)
+        ");
     }
 
     #[test]

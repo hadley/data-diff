@@ -20,7 +20,7 @@ The commands below use that installed `data-diff` binary.
 data-diff demo/basic-old.parquet demo/basic-new.parquet
 ```
 
-With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key([id], basis: guessed, overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2)`.
+With no `--key`, `data-diff` guesses the key: `id` is unique on both sides and shares all three values, so the output leads with `col_key([id], basis: guessed, overlap: 1.00)`. All rows and columns retain identity. Row 2 changes in both `name` and `score`, which is summarized as one `row_edit(2, changes: 2)` — the count saying how many cells that one event stands for.
 
 ## Declaring the key explicitly
 
@@ -37,8 +37,10 @@ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 ```
 
 Row 1 changes in columns `a` and `b`, while column `c` changes in rows 2 and 3.
-The minimum summary therefore contains both `row_edit(1)` and
-`col_edit(c, changed: values)`.
+The minimum summary therefore contains both `row_edit(1, changes: 2)` and
+`col_edit(c, changes: 2)`. The counts overlap where the events cross, so they
+describe their own row and their own column rather than dividing four cells
+between them; here the two events happen to be disjoint.
 
 ## Mixed structural changes
 
@@ -48,7 +50,7 @@ data-diff demo/mixed-old.parquet demo/mixed-new.parquet --key id
 
 This pair reorders columns and rows, drops `product` and row `102`, adds `stock`
 and row `104`, and changes the prices of the two matched rows. The human format
-summarizes the two price cells as one `col_edit(price, changed: values)`.
+summarizes the two price cells as one `col_edit(price, changes: 2)`.
 
 ## Type-only changes
 
@@ -66,13 +68,13 @@ type-only column edits and no changed cells.
 data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
 ```
 
-Nothing here declares that `amount` became `total`. They are identified as one column because they hold the same value in every row the two files share, which is the strongest evidence available that they are the same column. The `row_edit(2)` belongs to `note`: a column identified this way agrees everywhere by definition, so it can never be the source of a value change.
+Nothing here declares that `amount` became `total`. They are identified as one column because they hold the same value in every row the two files share, which is the strongest evidence available that they are the same column. The `row_edit(2, changes: 1)` belongs to `note`: a column identified this way agrees everywhere by definition, so it can never be the source of a value change.
 
 ```console
 $ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
 col_key([id], basis: declared)
 col_rename(amount -> total, basis: exact)
-row_edit(2)
+row_edit(2, changes: 1)
 ```
 
 Every rename says on what basis the two columns are one, because some of the ways of arriving at that are certainties and some are judgements, and the line reads the same either way without it. This one is `exact`: the values agree in every shared row. The rest of this file shows the other four — `approximate` next, then `swapped`, `declared`, and `hinted`.
@@ -83,7 +85,7 @@ Every rename says on what basis the two columns are one, because some of the way
 data-diff demo/approx-rename-old.parquet demo/approx-rename-new.parquet --key id
 ```
 
-`amount` and `total` disagree in one of the eleven shared rows, so the evidence for identifying them is strong but no longer perfect. Ten in eleven is more than the nine in ten a rename is asked for, and far more than unrelated columns of distinct values would reach by chance, so they are identified anyway and the row they disagree in becomes a `row_edit(7)`. Unlike the exact case above, an approximately identified column can be the source of a value change: that is what makes it approximate.
+`amount` and `total` disagree in one of the eleven shared rows, so the evidence for identifying them is strong but no longer perfect. Ten in eleven is more than the nine in ten a rename is asked for, and far more than unrelated columns of distinct values would reach by chance, so they are identified anyway and the row they disagree in becomes a `row_edit(7, changes: 1)`. Unlike the exact case above, an approximately identified column can be the source of a value change: that is what makes it approximate.
 
 Nothing here has to reach twenty rows or any other minimum. The threshold does impose one implicitly, though, since nine in ten has to be exceeded rather than met: below eleven rows, a single disagreement is already too many.
 
@@ -147,7 +149,7 @@ $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
     --hint 'col_rename(discount -> markdown)'
 col_key([id], basis: declared)
 col_rename(discount -> markdown, basis: hinted)
-col_edit(markdown, changed: values)
+col_edit(markdown, changes: 3)
 ```
 
 Note what the hint did *not* do. It asserted that the two columns are one, and nothing about their values, so the change it made visible is reported as an edit. Being unmatched is what had been hiding it: a dropped column has no cells to compare.
@@ -198,8 +200,8 @@ Where a change can be read two ways, `col_edit()` says which. The swap above is 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id --hint 'col_edit(price)'
 col_key([id], basis: declared)
-col_edit(price, changed: values)
-col_edit(cost, changed: values)
+col_edit(price, changes: 3)
+col_edit(cost, changes: 3)
 ```
 
 Naming one column is enough. An exchange takes two, so withdrawing either end leaves both columns to be described under their own names.
@@ -209,8 +211,8 @@ The second case is a rectangular change, which can be summarized by its rows or 
 ```console
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 col_key([id], basis: declared)
-col_edit(c, changed: values)
-row_edit(1)
+col_edit(c, changes: 2)
+row_edit(1, changes: 2)
 ```
 
 Hinting the two columns that row 1 accounts for takes their cells out of the reckoning, and what is left has no row worth naming:
@@ -219,9 +221,9 @@ Hinting the two columns that row 1 accounts for takes their cells out of the rec
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
     --hint 'col_edit(a)' --hint 'col_edit(b)'
 col_key([id], basis: declared)
-col_edit(a, changed: values)
-col_edit(b, changed: values)
-col_edit(c, changed: values)
+col_edit(a, changes: 1)
+col_edit(b, changes: 1)
+col_edit(c, changes: 2)
 ```
 
 An edit hint asserts that something changed, so one naming a column that did not is ignored and reported like any other hint the data contradicts:
@@ -230,8 +232,8 @@ An edit hint asserts that something changed, so one naming a column that did not
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id --hint 'col_edit(id)'
 col_key([id], basis: declared)
 hint_ignored(col_edit(id), unchanged)
-col_edit(c, changed: values)
-row_edit(1)
+col_edit(c, changes: 2)
+row_edit(1, changes: 2)
 ```
 
 ## Bounded fanout
@@ -240,7 +242,7 @@ row_edit(1)
 data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
 ```
 
-Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], changed: values)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
+Key `4` identifies one old row and two new rows, as a join that duplicated a row would produce. One of the ten shared keys is affected, which is exactly the 10% limit, so the declared key is kept and the duplication is reported as `row_fanout(4 -> [4, 5], changes: 1)`. The two new rows are not additions, and the values that differ between the old row and its new rows stay inside the event rather than becoming a `row_edit()`.
 
 ## A guessed key that fans out
 

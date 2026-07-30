@@ -23,7 +23,7 @@ pub use model::{
     CellCoordinate, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff, Coordinate, Diff,
     DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind,
     HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,
-    OrderDiff, RowsDiff, Schemas, Side,
+    OrderDiff, RowEdit, RowsDiff, Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -100,7 +100,7 @@ pub fn diff_tables(
                 .map(|column| ColumnEdit {
                     column: Coordinate::from_zero_based(column.old, column.new),
                     type_changed: column.type_changed,
-                    values_changed: column.values_changed(),
+                    changes: column.rows.len(),
                 })
                 .collect(),
         },
@@ -174,13 +174,16 @@ pub fn diff_tables(
                 .map(|column| ColumnEdit {
                     column: Coordinate::from_zero_based(column.old, column.new),
                     type_changed: column.type_changed,
-                    values_changed: column.values_changed,
+                    changes: column.changes,
                 })
                 .collect(),
             rows: summary
                 .rows
                 .iter()
-                .map(|&(old, new)| Coordinate::from_zero_based(old, new))
+                .map(|row| RowEdit {
+                    row: Coordinate::from_zero_based(row.old, row.new),
+                    changes: row.changes,
+                })
                 .collect(),
         },
     })

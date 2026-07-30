@@ -279,11 +279,27 @@ pub struct Schemas {
 }
 
 /// Evidence that an identified column changed.
+///
+/// `changes` counts every changed cell in the column, over the one-to-one
+/// matched rows. It is positive exactly when the values changed, which is why
+/// it carries what a `values_changed` flag used to: the flag was this number
+/// with its magnitude thrown away.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnEdit {
     pub column: Coordinate,
     pub type_changed: bool,
-    pub values_changed: bool,
+    pub changes: usize,
+}
+
+/// Evidence that a matched row changed.
+///
+/// `changes` counts every changed cell in the row, over the identified columns.
+/// A row edit has no aspect but its values, so unlike a column edit this count
+/// is never zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowEdit {
+    pub row: Coordinate,
+    pub changes: usize,
 }
 
 /// Resolved column identities and schema events.
@@ -409,11 +425,17 @@ pub struct OrderDiff {
 }
 
 /// A minimum semantic summary of row and column edits.
+///
+/// Each event carries a count of every changed cell incident to it, so the
+/// counts of a row edit and a column edit that cross both include the cell they
+/// share. They therefore do not sum to the number of changed cells, and are not
+/// meant to: a count is a fact about its own row or column rather than a share
+/// of a partition, and the events themselves already overlap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditSummary {
     pub optimal: bool,
     pub columns: Vec<ColumnEdit>,
-    pub rows: Vec<Coordinate>,
+    pub rows: Vec<RowEdit>,
 }
 
 impl Default for EditSummary {

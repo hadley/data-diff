@@ -86,7 +86,7 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     col_key([id], basis: guessed, overlap: 0.67)
     row_drop(3)
     row_add(3)
-    row_edit(2)
+    row_edit(2, changes: 1)
     ");
 }
 
@@ -163,7 +163,7 @@ fn reports_mixed_changes_in_human_format() {
     col_drop(drop)
     col_add(add)
     col_order(value, 2 -> 1)
-    col_edit(value, changed: values)
+    col_edit(value, changes: 2)
     row_drop(3)
     row_add(3)
     row_order(2 -> 1)
@@ -196,7 +196,7 @@ fn reports_a_bounded_fanout() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
-    row_fanout(4 -> [4, 5], changed: values)
+    row_fanout(4 -> [4, 5], changes: 1)
     ");
 }
 
@@ -231,7 +231,7 @@ fn infers_a_rename_from_the_values() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(amount -> total, basis: exact)
-    row_edit(2)
+    row_edit(2, changes: 1)
     ");
 }
 
@@ -264,7 +264,7 @@ fn infers_a_rename_that_carried_an_edit() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(amount -> total, basis: approximate)
-    row_edit(7)
+    row_edit(7, changes: 1)
     ");
 }
 
@@ -331,7 +331,7 @@ fn accepts_a_paired_key_component() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([customer_id -> id], basis: declared)
     col_rename(customer_id -> id, basis: declared)
-    row_edit(2)
+    row_edit(2, changes: 1)
     ");
 }
 
@@ -360,7 +360,7 @@ fn guesses_a_key_that_fans_out() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: guessed, overlap: 1.00)
-    row_fanout(4 -> [4, 5], changed: values)
+    row_fanout(4 -> [4, 5], changes: 1)
     ");
 }
 
@@ -447,7 +447,7 @@ fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
-    col_edit(markdown, changed: values)
+    col_edit(markdown, changes: 3)
     ");
 }
 
@@ -487,8 +487,8 @@ fn reads_hints_from_a_file_with_comments_and_blank_lines() {
     col_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
     col_rename(note -> comment, basis: hinted)
-    row_edit(1)
-    row_edit(2)
+    row_edit(1, changes: 2)
+    row_edit(2, changes: 2)
     ");
 }
 
@@ -528,7 +528,7 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
     col_rename(note -> comment, basis: hinted)
     col_drop(discount)
     col_add(markdown)
-    col_edit(comment, changed: values)
+    col_edit(comment, changes: 2)
     ");
 }
 
@@ -597,8 +597,8 @@ fn withdraws_a_swap_when_told_the_column_was_edited() {
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
-    col_edit(price, changed: values)
-    col_edit(cost, changed: values)
+    col_edit(price, changes: 2)
+    col_edit(cost, changes: 2)
     ");
 }
 
@@ -636,6 +636,6 @@ fn reports_an_edit_hint_the_data_does_not_bear_out() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     hint_ignored(col_edit(value), unchanged)
-    col_edit(note, changed: values)
+    col_edit(note, changes: 1)
     ");
 }
