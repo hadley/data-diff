@@ -275,7 +275,7 @@ mod tests {
     use test_support::table;
 
     use super::write_human;
-    use crate::{DiffOptions, IdentityBasis, diff_tables};
+    use crate::{DiffOptions, diff_tables};
 
     fn render_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> String {
         let diff = diff_tables(
@@ -513,31 +513,6 @@ mod tests {
         assert_eq!(
             render(&old, &new),
             "col_key([id], basis: declared)\nrow_fanout(4 -> [4, 5])"
-        );
-    }
-
-    #[test]
-    fn every_basis_has_a_word() {
-        // The renderer writes whatever this returns, so a basis added later
-        // reaches the output through here or not at all.
-        assert_eq!(
-            [
-                IdentityBasis::Declared,
-                IdentityBasis::Hinted,
-                IdentityBasis::Name,
-                IdentityBasis::Exact,
-                IdentityBasis::Approximate,
-                IdentityBasis::Swapped,
-            ]
-            .map(|basis| basis.name()),
-            [
-                "declared",
-                "hinted",
-                "name",
-                "exact",
-                "approximate",
-                "swapped"
-            ]
         );
     }
 

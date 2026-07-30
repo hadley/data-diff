@@ -55,7 +55,7 @@ pub fn diff_tables(
     let hint::Hints {
         mut map,
         edits,
-        issues: hint_issues,
+        mut issues,
     } = hints;
     schema::reconcile_schema(old, new, &key, &mut map)?;
 
@@ -74,7 +74,6 @@ pub fn diff_tables(
     // Issues arise on both sides of the comparison, and the seam is nothing a
     // reader should have to see. Ordering by the hint each one concerns puts
     // them in the order the instructions were written.
-    let mut issues = hint_issues;
     issues.extend(edit_issues);
     issues.sort_by_key(|pending| pending.at);
     let issues = issues
