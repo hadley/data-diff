@@ -26,13 +26,19 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     // Renames come first: every operation below names its column as the new
     // file does, which needs explaining when the old file called it something
     // else.
-    for coordinate in &diff.columns.identities {
-        let (old, new) = coordinate.positions();
+    //
+    // The basis says how the identity was reached, because some of the ways are
+    // certainties and some are judgements, and the line reads the same either
+    // way without it. A same-named identity produces no line at all, so `name`
+    // is the one basis this can never write.
+    for identity in &diff.columns.identities {
+        let (old, new) = identity.column.positions();
         if raw_name(&diff.schemas.old, old) != raw_name(&diff.schemas.new, new) {
             operations.push(format!(
-                "col_rename({} -> {})",
+                "col_rename({} -> {}, basis: {})",
                 column_name(&diff.schemas.old, old),
-                column_name(&diff.schemas.new, new)
+                column_name(&diff.schemas.new, new),
+                identity.basis.name()
             ));
         }
     }
@@ -66,7 +72,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             ));
         }
         if edit.values_changed {
-            details.push("values".to_owned());
+            details.push("changed: values".to_owned());
         }
         let suffix = if details.is_empty() {
             String::new()
@@ -91,7 +97,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         let suffix = if event.cells.is_empty() {
             ""
         } else {
-            ", values"
+            ", changed: values"
         };
         let targets = event
             .new
@@ -400,7 +406,7 @@ mod tests {
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from(["basis", "missing", "overlap", "type"])
+            BTreeSet::from(["basis", "changed", "missing", "overlap", "type"])
         );
     }
 
@@ -422,7 +428,7 @@ mod tests {
         col_drop(drop)
         col_add(add)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, values)
+        col_edit(value, type: Int32 -> Int64, changed: values)
         row_drop(3)
         row_add(3)
         row_order(2 -> 1)
@@ -487,7 +493,7 @@ mod tests {
         col_key([id], basis: declared)
         row_drop(11)
         row_add(12)
-        row_fanout(4 -> [4, 5], values)
+        row_fanout(4 -> [4, 5], changed: values)
         row_order(2 -> 1)
         row_edit(7 -> 8)
         ");
@@ -511,6 +517,78 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_says_what_established_the_identity() {
+        // One rename per basis that can produce one. `name` is missing because
+        // it cannot be here: an identity both files call the same thing is not
+        // a rename, so the word exists for `Diff` rather than for the output.
+        let declared_old = table! { "customer_id" => [1, 2], "value" => [10, 20] };
+        let declared_new = table! { "id" => [1, 2], "value" => [10, 20] };
+        let inferred_old = table! { "id" => [1, 2], "amount" => [10, 20] };
+        let exact_new = table! { "id" => [1, 2], "total" => [10, 20] };
+        let hinted_new = table! { "id" => [1, 2], "markdown" => [99, 98] };
+        let approximate_old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "amount" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+        };
+        let approximate_new = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "total" => [10, 20, 30, 40, 50, 60, 71, 80, 90, 100, 110],
+        };
+        let swap_old = table! {
+            "id" => [1, 2],
+            "price" => [10, 20],
+            "cost" => [30, 40],
+        };
+        let swap_new = table! {
+            "id" => [1, 2],
+            "price" => [30, 40],
+            "cost" => [10, 20],
+        };
+
+        let rename = |rendered: String| {
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("col_rename("))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        assert_eq!(
+            rename(render_with(
+                &declared_old,
+                &declared_new,
+                &["customer_id/id"]
+            )),
+            "col_rename(customer_id -> id, basis: declared)"
+        );
+        assert_eq!(
+            rename(render_hinted(
+                &inferred_old,
+                &hinted_new,
+                &["col_rename(amount -> markdown)"]
+            )),
+            "col_rename(amount -> markdown, basis: hinted)"
+        );
+        assert_eq!(
+            rename(render(&inferred_old, &exact_new)),
+            "col_rename(amount -> total, basis: exact)"
+        );
+        assert_eq!(
+            rename(render(&approximate_old, &approximate_new)),
+            "col_rename(amount -> total, basis: approximate)"
+        );
+        // An exchange stays two lines, one per identity, and says on each that
+        // it is half of one. Grouping them would mean detecting a cycle in the
+        // bijection, which two rename hints can make just as well as a swap.
+        assert_eq!(
+            rename(render(&swap_old, &swap_new)),
+            "col_rename(price -> cost, basis: swapped)\n\
+             col_rename(cost -> price, basis: swapped)"
+        );
+    }
+
+    #[test]
     fn names_a_renamed_column_as_the_new_file_does() {
         let old = table! {
             "customer_id" => [1, 2, 3],
@@ -528,11 +606,11 @@ mod tests {
         // dropped column keeps its old name, having no other.
         insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @"
         col_key([customer_id -> id], basis: declared)
-        col_rename(customer_id -> id)
+        col_rename(customer_id -> id, basis: declared)
         col_drop(gone)
         col_add(fresh)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, values)
+        col_edit(value, type: Int32 -> Int64, changed: values)
         ");
     }
 
@@ -551,7 +629,9 @@ mod tests {
         // compound key over two, so the two must not render alike.
         assert_eq!(
             render_with(&old, &new, &["a/b"]),
-            "col_key([a -> b], basis: declared)\ncol_rename(a -> b)\ncol_drop(b)\ncol_add(a)"
+            "col_key([a -> b], basis: declared)\n\
+             col_rename(a -> b, basis: declared)\n\
+             col_drop(b)\ncol_add(a)"
         );
     }
 

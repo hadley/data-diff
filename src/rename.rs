@@ -2,11 +2,11 @@
 
 use arrow_array::RecordBatch;
 
-use crate::Side;
 use crate::agreement::Aligned;
 use crate::compare::ComparisonPlan;
 use crate::rows::RowMatches;
-use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
+use crate::schema::ColumnMap;
+use crate::{IdentityBasis, Side};
 
 /// Pair provisional drops with provisional adds that hold the same values.
 ///
@@ -15,26 +15,13 @@ use crate::schema::{ColumnIdentity, ColumnMap, SchemaMatches};
 /// rows there is nothing to compare, so every candidate keeps its provisional
 /// classification.
 ///
-/// A `col_drop` or `col_add` hint reserves its endpoint in `hinted`, and a
+/// A `col_drop` or `col_add` hint reserves its endpoint in the map, and a
 /// reserved endpoint is exactly a provisional drop or addition that must not be
 /// paired: the user has said the column has no partner. Excluding it here is
 /// both what the instruction means and the performance argument the design
 /// makes for these two kinds, candidates being compared pairwise.
-pub(crate) fn infer(
-    old: &RecordBatch,
-    new: &RecordBatch,
-    schema: &mut SchemaMatches,
-    rows: &RowMatches,
-    hinted: &ColumnMap,
-) {
-    infer_with(
-        old,
-        new,
-        schema,
-        rows,
-        hinted,
-        &mut Aligned::new(old, new, rows),
-    );
+pub(crate) fn infer(old: &RecordBatch, new: &RecordBatch, map: &mut ColumnMap, rows: &RowMatches) {
+    infer_with(old, new, map, rows, &mut Aligned::new(old, new, rows));
 }
 
 /// Exact pairs first, then approximate ones among what is left.
@@ -45,21 +32,17 @@ pub(crate) fn infer(
 fn infer_with(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &mut SchemaMatches,
+    map: &mut ColumnMap,
     rows: &RowMatches,
-    hinted: &ColumnMap,
     values: &mut Aligned,
 ) {
     if rows.matched.is_empty() {
         return;
     }
-    let exact = exact_pairs(old, new, schema, hinted, values);
-    apply(old, new, schema, exact);
-    let approximate = approximate_pairs(old, new, schema, hinted, values);
-    apply(old, new, schema, approximate);
-    // Inferred identities are found in candidate order, while `detect_order`
-    // requires the whole list to ascend by old position.
-    schema.identities.sort_by_key(|identity| identity.old);
+    let exact = exact_pairs(old, new, map, values);
+    apply(map, exact, IdentityBasis::Exact);
+    let approximate = approximate_pairs(old, new, map, values);
+    apply(map, approximate, IdentityBasis::Approximate);
 }
 
 /// Pair candidates that agree in every matched row.
@@ -85,19 +68,19 @@ fn infer_with(
 fn exact_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &SchemaMatches,
-    hinted: &ColumnMap,
+    map: &ColumnMap,
     values: &mut Aligned,
 ) -> Vec<(usize, usize)> {
+    let dropped = map.dropped();
+    let added = map.added();
     // Every exactly agreeing pair, collected before any of them is taken, so
     // that ambiguity is judged against the whole candidate set. A reserved
     // endpoint contributes no candidates, keeping the outer list aligned with
-    // `schema.dropped` while offering it nothing.
-    let matching = schema
-        .dropped
+    // the drops while offering it nothing.
+    let matching = dropped
         .iter()
         .map(|&old_index| {
-            eligible(schema, hinted, old_index)
+            eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
                     plan_for(old, new, old_index, new_index)
                         .is_some_and(|plan| values.agree(plan, old_index, new_index))
@@ -107,20 +90,20 @@ fn exact_pairs(
         })
         .collect::<Vec<_>>();
 
-    let mut claims = vec![0_usize; schema.added.len()];
+    let mut claims = vec![0_usize; added.len()];
     for position in matching.iter().flatten() {
         claims[*position] += 1;
     }
 
-    let mut claimed = vec![false; schema.added.len()];
+    let mut claimed = vec![false; added.len()];
     let mut accepted = Vec::new();
     for (index, candidates) in matching.iter().enumerate() {
-        let old_index = schema.dropped[index];
+        let old_index = dropped[index];
         for &position in candidates {
             if claimed[position] {
                 continue;
             }
-            let new_index = schema.added[position];
+            let new_index = added[position];
             let plan =
                 plan_for(old, new, old_index, new_index).expect("a match implies a plan exists");
             let unambiguous = candidates.len() == 1 && claims[position] == 1;
@@ -141,16 +124,15 @@ fn exact_pairs(
 /// keeps it from acquiring one, and neither of the two stages that draw from
 /// these lists needs a rule about hints of its own.
 fn eligible<'a>(
-    schema: &'a SchemaMatches,
-    hinted: &'a ColumnMap,
+    map: &'a ColumnMap,
+    added: &'a [usize],
     old_index: usize,
 ) -> impl Iterator<Item = (usize, usize)> + 'a {
-    let reserved = hinted.reserved(Side::Old, old_index);
-    schema
-        .added
+    let reserved = map.reserved(Side::Old, old_index);
+    added
         .iter()
         .enumerate()
-        .filter(move |&(_, &new_index)| !reserved && !hinted.reserved(Side::New, new_index))
+        .filter(move |&(_, &new_index)| !reserved && !map.reserved(Side::New, new_index))
         .map(|(position, &new_index)| (position, new_index))
 }
 
@@ -165,15 +147,15 @@ fn eligible<'a>(
 fn approximate_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
-    schema: &SchemaMatches,
-    hinted: &ColumnMap,
+    map: &ColumnMap,
     values: &mut Aligned,
 ) -> Vec<(usize, usize)> {
-    let qualifying = schema
-        .dropped
+    let dropped = map.dropped();
+    let added = map.added();
+    let qualifying = dropped
         .iter()
         .map(|&old_index| {
-            eligible(schema, hinted, old_index)
+            eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
                     plan_for(old, new, old_index, new_index)
                         .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
@@ -183,7 +165,7 @@ fn approximate_pairs(
         })
         .collect::<Vec<_>>();
 
-    let mut claims = vec![0_usize; schema.added.len()];
+    let mut claims = vec![0_usize; added.len()];
     for position in qualifying.iter().flatten() {
         claims[*position] += 1;
     }
@@ -195,27 +177,20 @@ fn approximate_pairs(
             let [position] = matches[..] else {
                 return None;
             };
-            (claims[position] == 1).then(|| (schema.dropped[index], schema.added[position]))
+            (claims[position] == 1).then(|| (dropped[index], added[position]))
         })
         .collect()
 }
 
-/// Turn accepted pairs into identities, removing both of their endpoints.
-fn apply(
-    old: &RecordBatch,
-    new: &RecordBatch,
-    schema: &mut SchemaMatches,
-    accepted: Vec<(usize, usize)>,
-) {
+/// Claim the accepted pairs, which is the whole of applying them.
+///
+/// Both endpoints leave the drops and the additions by being paired, those
+/// being derived rather than maintained, and claiming inserts in old-position
+/// order, so nothing has to put the identities back in the order `detect_order`
+/// requires of them.
+fn apply(map: &mut ColumnMap, accepted: Vec<(usize, usize)>, basis: IdentityBasis) {
     for (old_index, new_index) in accepted {
-        schema.dropped.retain(|&index| index != old_index);
-        schema.added.retain(|&index| index != new_index);
-        schema.identities.push(ColumnIdentity {
-            old: old_index,
-            new: new_index,
-            type_changed: old.column(old_index).data_type() != new.column(new_index).data_type(),
-            is_key: false,
-        });
+        map.claim(old_index, new_index, basis);
     }
 }
 
@@ -238,14 +213,15 @@ mod tests {
 
     use super::{infer, infer_with};
     use crate::DiffOptions;
+    use crate::IdentityBasis;
     use crate::agreement::Aligned;
     use crate::compare::CanonicalValue;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
+    use crate::schema::ColumnMap;
     use crate::schema::testing::reconcile_schema;
-    use crate::schema::{ColumnMap, SchemaMatches};
 
-    fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> SchemaMatches {
+    fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: Vec::new(),
@@ -253,18 +229,28 @@ mod tests {
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key).unwrap();
-        infer(old, new, &mut schema, &rows, &ColumnMap::default());
+        infer(old, new, &mut schema, &rows);
         schema
     }
 
     /// The `(old, new)` pairs of every identity that is not the key.
-    fn renames(schema: &SchemaMatches) -> Vec<(usize, usize)> {
+    fn renames(schema: &ColumnMap) -> Vec<(usize, usize)> {
         schema
-            .identities
+            .pairs()
             .iter()
-            .filter(|identity| !identity.is_key)
-            .map(|identity| (identity.old, identity.new))
+            .filter(|pair| !pair.is_key)
+            .map(|pair| (pair.old, pair.new))
             .collect()
+    }
+
+    /// What the map says established the identity holding this old column.
+    fn basis(schema: &ColumnMap, old: usize) -> IdentityBasis {
+        schema
+            .pairs()
+            .iter()
+            .find(|pair| pair.old == old)
+            .expect("the identity exists")
+            .basis
     }
 
     #[test]
@@ -281,9 +267,9 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert_eq!(renames(&schema), [(1, 1)]);
-        assert!(schema.dropped.is_empty());
-        assert!(schema.added.is_empty());
-        assert!(!schema.identities[1].type_changed);
+        assert_eq!(basis(&schema, 1), IdentityBasis::Exact);
+        assert!(schema.dropped().is_empty());
+        assert!(schema.added().is_empty());
     }
 
     #[test]
@@ -302,7 +288,7 @@ mod tests {
         // The values are equal only under the pair's own comparison plan, so a
         // digest taken per column rather than per plan would miss this.
         assert_eq!(renames(&schema), [(1, 1)]);
-        assert!(schema.identities[1].type_changed);
+        assert_eq!(basis(&schema, 1), IdentityBasis::Exact);
     }
 
     #[test]
@@ -319,8 +305,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -337,8 +323,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -357,8 +343,8 @@ mod tests {
         // The columns are identical, but no row is common to both files, so
         // nothing connects them.
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -432,20 +418,13 @@ mod tests {
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key).unwrap();
         let mut values = Aligned::with_digest(&old, &new, &rows, |_: &[CanonicalValue]| 0);
-        infer_with(
-            &old,
-            &new,
-            &mut schema,
-            &rows,
-            &ColumnMap::default(),
-            &mut values,
-        );
+        infer_with(&old, &new, &mut schema, &rows, &mut values);
 
         // Every column now digests alike, so only the elementwise comparison
         // separates the real rename from the unrelated pair.
         assert_eq!(renames(&schema), [(2, 2)]);
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -498,8 +477,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1, 2]);
-        assert_eq!(schema.added, [1, 2]);
+        assert_eq!(schema.dropped(), [1, 2]);
+        assert_eq!(schema.added(), [1, 2]);
     }
 
     #[test]
@@ -518,8 +497,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1, 2]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1, 2]);
     }
 
     #[test]
@@ -557,8 +536,11 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert_eq!(renames(&schema), [(1, 1)]);
-        assert!(schema.dropped.is_empty());
-        assert!(schema.added.is_empty());
+        // The two stages stay distinguishable in the result rather than only in
+        // the code: this pair is one column on weaker evidence than the last.
+        assert_eq!(basis(&schema, 1), IdentityBasis::Approximate);
+        assert!(schema.dropped().is_empty());
+        assert!(schema.added().is_empty());
     }
 
     #[test]
@@ -575,8 +557,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -631,8 +613,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1, 2]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.dropped(), [1, 2]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
@@ -653,8 +635,8 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped, [1]);
-        assert_eq!(schema.added, [1, 2]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1, 2]);
     }
 
     #[test]
@@ -675,6 +657,6 @@ mod tests {
         let schema = infer_renames(&old, &new);
 
         assert_eq!(renames(&schema), [(1, 2)]);
-        assert_eq!(schema.added, [1]);
+        assert_eq!(schema.added(), [1]);
     }
 }

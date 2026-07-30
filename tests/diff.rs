@@ -1,8 +1,17 @@
 use data_diff::{
-    CellCoordinate, ColumnEdit, Coordinate, Diff, DiffError, DiffOptions, EditSummary, FanoutEvent,
-    HintKind, IssueKind, KeyBasis, KeyDiff, KeyOverlap, Side, diff_tables, write_human,
+    CellCoordinate, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffError, DiffOptions,
+    EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyDiff, KeyOverlap,
+    Side, diff_tables, write_human,
 };
 use test_support::table;
+
+/// One identity, spelled as its two zero-based positions and its basis.
+fn identity(old: usize, new: usize, basis: IdentityBasis) -> ColumnIdentity {
+    ColumnIdentity {
+        column: Coordinate::from_zero_based(old, new),
+        basis,
+    }
+}
 
 fn declared(key: &str) -> DiffOptions {
     DiffOptions {
@@ -42,8 +51,8 @@ fn combines_schema_row_order_and_cell_changes() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 1),
-            Coordinate::from_zero_based(1, 0),
+            identity(0, 1, IdentityBasis::Declared),
+            identity(1, 0, IdentityBasis::Name),
         ]
     );
     assert_eq!(diff.columns.added, vec![3]);
@@ -288,9 +297,12 @@ fn an_undeclared_rename_is_inferred_from_the_values() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 1),
-            Coordinate::from_zero_based(1, 2),
-            Coordinate::from_zero_based(2, 0),
+            identity(0, 1, IdentityBasis::Declared),
+            // Agreeing in every matched row is the strongest evidence there is,
+            // and still evidence rather than an instruction, which is what the
+            // basis is there to say.
+            identity(1, 2, IdentityBasis::Exact),
+            identity(2, 0, IdentityBasis::Name),
         ]
     );
 
@@ -346,9 +358,9 @@ fn a_rename_is_inferred_despite_an_edit_it_carried() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 1),
-            Coordinate::from_zero_based(2, 2),
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Approximate),
+            identity(2, 2, IdentityBasis::Name),
         ]
     );
 
@@ -396,9 +408,9 @@ fn a_swap_replaces_two_edits_with_two_renames() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 2),
-            Coordinate::from_zero_based(2, 1),
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
         ]
     );
     assert!(diff.columns.added.is_empty());
@@ -618,8 +630,8 @@ fn a_hint_identifies_a_column_inference_could_not_have() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 1),
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Hinted),
         ]
     );
 
@@ -707,8 +719,8 @@ fn a_hint_the_key_contradicts_is_reported_and_dropped() {
     assert_eq!(
         diff.columns.identities,
         vec![
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 1),
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Exact),
         ]
     );
 }
@@ -794,15 +806,42 @@ fn a_rendered_rename_can_be_fed_back_as_a_hint() {
         .lines()
         .find(|line| line.starts_with("col_rename("))
         .expect("the rename is reported");
-    assert_eq!(line, "col_rename(amount -> total)");
+    assert_eq!(line, "col_rename(amount -> total, basis: exact)");
 
     // The claim of the format being an input language is that this line, taken
-    // exactly as printed, is a hint asserting what it describes.
+    // exactly as printed, is a hint asserting what it describes. The basis is
+    // detail the line carries about the operation rather than part of what it
+    // asserts, so the parser reads past it.
     let hinted = diff_tables(&old, &new, &hinted(&["id"], &[line])).unwrap();
 
-    assert_eq!(hinted.columns.identities, inferred.columns.identities);
     assert!(hinted.issues.is_empty());
-    assert_eq!(render(&hinted), render(&inferred));
+
+    // What survives the round trip is the identity, and what does not is the
+    // basis — which is the point rather than a shortfall. Supplying the line
+    // does not make the values agree exactly; it makes the identity an
+    // instruction, and the output says so.
+    let columns = |diff: &Diff| {
+        diff.columns
+            .identities
+            .iter()
+            .map(|identity| identity.column.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(columns(&hinted), columns(&inferred));
+    assert_eq!(
+        hinted.columns.identities[1].basis,
+        IdentityBasis::Hinted,
+        "the basis of an asserted identity is the assertion"
+    );
+    assert_eq!(inferred.columns.identities[1].basis, IdentityBasis::Exact);
+
+    // Nothing else about the comparison moves with it.
+    assert_eq!(hinted.cells, inferred.cells);
+    assert_eq!(hinted.summary, inferred.summary);
+    assert_eq!(
+        String::from_utf8(render(&hinted)).unwrap(),
+        rendered.replace("basis: exact", "basis: hinted")
+    );
 }
 
 #[test]
@@ -857,9 +896,9 @@ fn an_edit_hint_withdraws_a_swap() {
     assert_eq!(
         inferred.columns.identities,
         [
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 2),
-            Coordinate::from_zero_based(2, 1),
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
         ]
     );
 
@@ -872,9 +911,11 @@ fn an_edit_hint_withdraws_a_swap() {
     assert_eq!(
         edited.columns.identities,
         [
-            Coordinate::from_zero_based(0, 0),
-            Coordinate::from_zero_based(1, 1),
-            Coordinate::from_zero_based(2, 2),
+            identity(0, 0, IdentityBasis::Declared),
+            // The exchange withdrawn, both columns keep the identity their names
+            // gave them, and the basis says as much.
+            identity(1, 1, IdentityBasis::Name),
+            identity(2, 2, IdentityBasis::Name),
         ]
     );
     assert_eq!(
@@ -996,7 +1037,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
     // row.
     let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
     let rendered = String::from_utf8(render(&inferred)).unwrap();
-    assert!(rendered.contains("col_rename(amount -> total)"));
+    assert!(rendered.contains("col_rename(amount -> total, basis: approximate)"));
     assert!(rendered.contains("row_edit(7)"));
 
     // A col_edit() line names its column as the new file does, so feeding one
@@ -1015,6 +1056,21 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
         }]
     );
     assert!(edited.summary.rows.is_empty());
+
+    // And the line the hint produces is itself a hint. `col_edit(total, changed: values)`
+    // carries a flag the bare spelling does not, which the parser reads past the
+    // way it reads past a rename's basis: the claim is the first argument, and
+    // the rest is detail the format prints about the operation.
+    let printed = String::from_utf8(render(&edited)).unwrap();
+    let line = printed
+        .lines()
+        .find(|line| line.starts_with("col_edit("))
+        .expect("the edit is reported");
+    assert_eq!(line, "col_edit(total, changed: values)");
+
+    let again = diff_tables(&old, &new, &hinted(&["id"], &[line])).unwrap();
+    assert!(again.issues.is_empty());
+    assert_eq!(render(&again), render(&edited));
 }
 
 #[test]

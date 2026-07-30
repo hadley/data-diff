@@ -14,11 +14,11 @@ use arrow_schema::Schema;
 
 use crate::cells::CellChanges;
 use crate::compare::ComparisonPlan;
-use crate::schema::{ColumnMap, SchemaMatches};
-use crate::{DiffError, HintClaim, HintKind, HintNames, Issue, IssueKind, Side};
+use crate::schema::ColumnMap;
+use crate::{DiffError, HintClaim, HintKind, HintNames, IdentityBasis, Issue, IssueKind, Side};
 
 /// What hints established, and what had to be declined to establish it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hints {
     /// The bijection so far, which reconciliation goes on to complete.
     pub map: ColumnMap,
@@ -60,11 +60,13 @@ impl EditHint {
     }
 }
 
-impl Hints {
-    /// Whether an edit hint protects this identity from being reinterpreted.
-    pub(crate) fn edit_protects(&self, old: usize, new: usize) -> bool {
-        self.edits.iter().any(|edit| edit.attaches_to(old, new))
-    }
+/// Whether an edit hint protects this identity from being reinterpreted.
+///
+/// Over the edits rather than over `Hints`, because by the time anyone asks the
+/// map has left: reconciliation owns it from key resolution onwards, and what
+/// remains of the hints is the edits waiting for an identity to attach to.
+pub(crate) fn edit_protects(edits: &[EditHint], old: usize, new: usize) -> bool {
+    edits.iter().any(|edit| edit.attaches_to(old, new))
 }
 
 /// What a resolved hint asserts against the bijection.
@@ -213,7 +215,8 @@ pub(crate) fn resolve(
 
     let mut result = Hints {
         map: claimed,
-        ..Hints::default()
+        edits: Vec::new(),
+        issues: Vec::new(),
     };
     let mut claims: Vec<(usize, HintClaim, Claim)> = Vec::new();
     for (at, hint) in parsed.into_iter().enumerate() {
@@ -243,7 +246,7 @@ pub(crate) fn resolve(
         }
         match claim {
             Claim::Identity { old, new } => {
-                result.map.claim(old, new, true);
+                result.map.claim(old, new, IdentityBasis::Hinted);
             }
             Claim::Unmatched { side, index } => {
                 result.map.reserve(side, index);
@@ -268,13 +271,13 @@ pub(crate) fn resolve(
 /// can report need the finished comparison: whether the identity exists at all
 /// is settled by inference, and whether anything about it changed by the cells.
 pub(crate) fn validate_edits(
-    hints: &Hints,
-    schema: &SchemaMatches,
+    edits: &[EditHint],
+    map: &ColumnMap,
     cells: &CellChanges,
 ) -> (Vec<PendingIssue>, Vec<(usize, usize)>) {
     let mut issues = Vec::new();
     let mut forced = Vec::new();
-    for edit in &hints.edits {
+    for edit in edits {
         let issue = |kind: IssueKind| PendingIssue {
             at: edit.at,
             issue: Issue {
@@ -285,10 +288,10 @@ pub(crate) fn validate_edits(
         // At most one identity can match: each endpoint the hint resolved
         // belongs to one identity at most, and an unresolved one constrains
         // nothing.
-        let identity = schema
-            .identities
+        let identity = map
+            .pairs()
             .iter()
-            .find(|identity| edit.attaches_to(identity.old, identity.new));
+            .find(|pair| edit.attaches_to(pair.old, pair.new));
         let Some(identity) = identity else {
             issues.push(issue(IssueKind::HintUnresolvedIdentity));
             continue;
@@ -453,6 +456,18 @@ fn rival_groups(claims: &[(usize, HintClaim, Claim)], contested: &[bool]) -> Vec
 }
 
 /// Read one line of the grammar as the claim it makes.
+///
+/// A hint's claim is its first argument. Anything after it is detail the format
+/// prints about the operation — `basis: exact` on a rename, `changed: values`
+/// and a type pair on an edit — and is ignored rather than read, because none of
+/// it is the user's to assert: what a hint contributes is the identity, and
+/// supplying `basis: exact` does not make the basis exact but makes it hinted.
+///
+/// Ignored, but not unchecked. Every argument after the claim must be a field,
+/// so that `col_rename(a -> b, c -> d)`, whose second argument is shaped like a
+/// second claim, is refused rather than half-honored. One rule and no
+/// vocabulary: the grammar's colon is what marks detail, and the format writes
+/// nothing else after a claim.
 fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
     let malformed = || DiffError::MalformedHint {
         hint: spelling.to_owned(),
@@ -462,7 +477,12 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
     if !trimmed.ends_with(')') {
         return Err(malformed());
     }
-    let names = names(&trimmed[open + 1..trimmed.len() - 1]).ok_or_else(malformed)?;
+    let arguments = arguments(&trimmed[open + 1..trimmed.len() - 1]);
+    let (claim, detail) = arguments.split_first().ok_or_else(malformed)?;
+    if !detail.iter().all(|argument| is_field(argument)) {
+        return Err(malformed());
+    }
+    let names = names(claim).ok_or_else(malformed)?;
 
     let kind = match trimmed[..open].trim() {
         "col_rename" => HintKind::Rename,
@@ -489,6 +509,74 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
         .ok_or_else(malformed)
 }
 
+/// Split an argument list on the grammar's commas.
+///
+/// Commas inside quotes and inside a list belong to the argument that contains
+/// them, so `col_edit("a,b", changed: values)` is two arguments and not three.
+fn arguments(arguments: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_usize;
+    scan(arguments, |index, character| {
+        match character {
+            b'[' | b'(' => depth += 1,
+            b']' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&arguments[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+        false
+    });
+    parts.push(&arguments[start..]);
+    parts
+}
+
+/// Whether an argument is a field, which is the only detail a line carries.
+///
+/// A field is detail whatever it says, because the grammar's colon is what
+/// makes it one: `basis: exact` and `changed: values` cannot be mistaken for a
+/// claim, and reading the field names here would only duplicate a list the
+/// renderer owns.
+///
+/// That the format writes every detail as a field is what keeps this to one
+/// rule. A bare word would have no such marker, and admitting bare words would
+/// make `col_edit(price, cost)` — a user naming two columns — quietly mean
+/// `col_edit(price)`.
+fn is_field(argument: &str) -> bool {
+    let trimmed = argument.trim();
+    scan(trimmed, |index, character| {
+        character == b':' && trimmed[index..].starts_with(": ")
+    })
+}
+
+/// Walk the bytes outside quotes, stopping where `found` says so.
+///
+/// Every rule the parser has about punctuation is a rule about punctuation the
+/// user did not quote, so one scanner serves them all: a name spelled with the
+/// grammar's own characters in it is written as a JSON string and read straight
+/// past here.
+fn scan(text: &str, mut found: impl FnMut(usize, u8) -> bool) -> bool {
+    let bytes = text.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if quoted => index += 1,
+            b'"' => quoted = !quoted,
+            character if !quoted => {
+                if found(index, character) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Read an argument list as the one or two names a hint is written with.
 fn names(arguments: &str) -> Option<HintNames> {
     match split_pair(arguments) {
@@ -502,21 +590,15 @@ fn names(arguments: &str) -> Option<HintNames> {
 /// The arrow is found outside quotes, so a name containing one can be spelled
 /// by quoting it.
 fn split_pair(arguments: &str) -> Option<(&str, &str)> {
-    let bytes = arguments.as_bytes();
-    let mut quoted = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' if quoted => index += 1,
-            b'"' => quoted = !quoted,
-            b'-' if !quoted && arguments[index..].starts_with("->") => {
-                return Some((&arguments[..index], &arguments[index + 2..]));
-            }
-            _ => {}
+    let mut at = None;
+    scan(arguments, |index, character| {
+        let arrow = character == b'-' && arguments[index..].starts_with("->");
+        if arrow {
+            at = Some(index);
         }
-        index += 1;
-    }
-    None
+        arrow
+    });
+    at.map(|index| (&arguments[..index], &arguments[index + 2..]))
 }
 
 /// Read one argument as a column name.
@@ -550,7 +632,7 @@ mod tests {
     use test_support::table;
 
     use super::{Hints, parse, resolve};
-    use crate::{DiffError, HintKind, HintNames, IssueKind, Side};
+    use crate::{DiffError, HintKind, HintNames, IdentityBasis, IssueKind, Side};
 
     fn hint_for(old: &RecordBatch, new: &RecordBatch, hints: &[&str]) -> Hints {
         try_hints(old, new, hints, &[]).unwrap()
@@ -633,6 +715,60 @@ mod tests {
             let claim = parse(spelling).unwrap();
             assert_eq!((claim.kind, claim.names), (kind, names), "{spelling}");
         }
+    }
+
+    #[test]
+    fn the_detail_a_printed_line_carries_is_read_past() {
+        // Every suffix the format writes, each on the kind that writes it. The
+        // claim is the first argument, so all of these mean what the bare
+        // spelling means: a line the tool printed is an instruction, and the
+        // detail in it describes the operation rather than asserting anything.
+        for (spelling, bare) in [
+            ("col_rename(a -> b, basis: exact)", "col_rename(a -> b)"),
+            ("col_rename(a -> b, basis: swapped)", "col_rename(a -> b)"),
+            ("col_edit(a, changed: values)", "col_edit(a)"),
+            ("col_edit(a, type: Int32 -> Int64)", "col_edit(a)"),
+            (
+                "col_edit(a, type: Int32 -> Int64, changed: values)",
+                "col_edit(a)",
+            ),
+            ("col_edit(a -> b, changed: values)", "col_edit(a -> b)"),
+        ] {
+            let claim = parse(spelling).unwrap();
+            let expected = parse(bare).unwrap();
+            assert_eq!(
+                (claim.kind, claim.names),
+                (expected.kind, expected.names),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_argument_after_the_claim_that_is_not_a_field_is_refused() {
+        // A second argument shaped like a second claim is much likelier to be a
+        // user meaning something else than detail the format wrote, so it is
+        // refused rather than half-honored. Every detail the format writes
+        // carries the grammar's colon, so nothing has to be spelled out here:
+        // `values` is refused with the rest, being a column name wherever it is
+        // not a field's value.
+        for spelling in [
+            "col_rename(a -> b, c -> d)",
+            "col_edit(a, b)",
+            "col_edit(a, values)",
+            "col_drop(a, b)",
+        ] {
+            assert!(parse(spelling).is_err(), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_name_keeps_the_commas_in_it() {
+        // Splitting the arguments must not split a name, or quoting would stop
+        // reaching the names it exists to reach.
+        let claim = parse(r#"col_edit("a, b", changed: values)"#).unwrap();
+
+        assert_eq!(claim.names, HintNames::Single("a, b".into()));
     }
 
     #[test]
@@ -1073,7 +1209,7 @@ mod tests {
         let hints = try_hints(&old, &new, &["col_rename(id -> fresh)"], &["id/code"]).unwrap();
 
         assert_eq!(pairs(&hints), [(0, 0)]);
-        assert!(!hints.map.hinted(0, 0));
+        assert_eq!(hints.map.pairs()[0].basis, IdentityBasis::Declared);
         assert_eq!(hints.issues[0].issue.kind, IssueKind::ContradictoryHints);
     }
 
