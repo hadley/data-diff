@@ -25,7 +25,7 @@ fn help_describes_the_initial_interface() {
       <NEW>  Modified Parquet file
 
     Options:
-          --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; when omitted, a single-column key is guessed
+          --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; '#row' matches rows by position; when omitted, a single-column key is guessed
           --hint <HINT>    A hint, written as the output prints it, such as 'col_rename(old -> new)'; repeatable
           --hints <HINTS>  A file of hints, one per line, skipping blank lines and those starting with #
       -h, --help           Print help
@@ -91,7 +91,7 @@ fn guesses_a_key_when_the_flag_is_omitted() {
 }
 
 #[test]
-fn reports_a_missing_key_when_nothing_can_be_guessed() {
+fn falls_back_to_row_position_when_nothing_can_be_guessed() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
@@ -105,11 +105,61 @@ fn reports_a_missing_key_when_nothing_can_be_guessed() {
         .output()
         .expect("failed to run data-diff");
 
+    // The two files share no key value, so nothing can be guessed and rows are
+    // paired by position instead. Nothing went wrong, so there is no separator.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([#row], basis: fallback)
+    col_edit(id, changes: 2)
+    ");
+}
+
+#[test]
+fn declaring_row_position_reaches_the_same_key_deliberately() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    common::write_parquet(&old_path, &table! { "id" => [1, 2] });
+    common::write_parquet(&new_path, &table! { "id" => [3, 4] });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "#row"])
+        .output()
+        .unwrap();
+
+    // The same key as the fallback above, and only the basis differs: one was
+    // asked for and the other was arrived at.
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([#row], basis: declared)
+    col_edit(id, changes: 2)
+    ");
+}
+
+#[test]
+fn row_position_cannot_be_compounded_with_a_column() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    common::write_parquet(&old_path, &table! { "id" => [1, 2] });
+    common::write_parquet(&new_path, &table! { "id" => [1, 2] });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id,#row"])
+        .output()
+        .unwrap();
+
+    // A fault in the --key string itself, which stays fatal: there is no key to
+    // fall back from.
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "no key was supplied and no eligible key could be guessed; supply --key\n"
+        "key component \"#row\" matches rows by position and cannot be combined \
+         with a column\n"
     );
 }
 
@@ -365,7 +415,7 @@ fn guesses_a_key_that_fans_out() {
 }
 
 #[test]
-fn rejects_a_declared_key_that_fans_out_too_broadly() {
+fn reports_a_declared_key_that_fans_out_too_broadly() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
@@ -378,13 +428,18 @@ fn rejects_a_declared_key_that_fans_out_too_broadly() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "declared key fans out for 1 of 2 shared key values, above the 10% limit; \
-         supply a different --key\n"
-    );
+    // The declared key is refused rather than fatal. Uniqueness and fanout
+    // belong to the whole key, so the subject is bracketed, and the comparison
+    // continues on what can identify rows instead.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    key_invalid([id], reason: excessive_fanout)
+    ----
+    col_key([#row], basis: fallback)
+    row_add(3)
+    row_edit(2, changes: 1)
+    ");
 }
 
 #[test]
@@ -523,8 +578,9 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
     hint_ignored(col_rename(discount -> mrkdown), missing: mrkdown)
+    ----
+    col_key([id], basis: declared)
     col_rename(note -> comment, basis: hinted)
     col_drop(discount)
     col_add(markdown)
@@ -634,8 +690,9 @@ fn reports_an_edit_hint_the_data_does_not_bear_out() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    hint_ignored(col_edit(value), reason: unchanged)
+    ----
     col_key([id], basis: declared)
-    hint_ignored(col_edit(value), unchanged)
     col_edit(note, changes: 1)
     ");
 }

@@ -235,9 +235,10 @@ pub(crate) fn reconcile_schema(
 
     // A declared component asserts its pair; a guessed key only picks one of the
     // identities the names would have produced anyway, so it claims as one.
+    // A positional key claims nothing, having no columns to claim with.
     let basis = match key.basis {
         KeyBasis::Declared => IdentityBasis::Declared,
-        KeyBasis::Guessed => IdentityBasis::Name,
+        KeyBasis::Guessed | KeyBasis::Fallback => IdentityBasis::Name,
     };
     for column in &key.columns {
         map.claim(column.old, column.new, basis);
