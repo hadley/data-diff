@@ -49,9 +49,11 @@ fn main() {
         },
     );
 
+    // The same three columns and the same three rows in each file, both
+    // rotated by one, so nothing changes but the order.
     write(
         &output,
-        "mixed-old.parquet",
+        "order-old.parquet",
         table! {
             "id" => [101, 102, 103],
             "product" => ["apple", "bread", "coffee"],
@@ -60,11 +62,11 @@ fn main() {
     );
     write(
         &output,
-        "mixed-new.parquet",
+        "order-new.parquet",
         table! {
-            "price" => [31.0, 11.0, 40.0],
-            "id" => [103, 101, 104],
-            "stock" => [8, 5, 12],
+            "price" => [30.0, 10.0, 20.0],
+            "id" => [103, 101, 102],
+            "product" => ["coffee", "apple", "bread"],
         },
     );
 
@@ -186,28 +188,6 @@ fn main() {
         },
     );
 
-    // "region" went and "zone" arrived, and their values happen to agree in
-    // every shared row, so inference identifies them. Only the user knows the
-    // two columns have nothing to do with each other.
-    write(
-        &output,
-        "replace-old.parquet",
-        table! {
-            "id" => [1, 2, 3],
-            "region" => ["north", "south", "east"],
-            "note" => ["ok", "ok", "ok"],
-        },
-    );
-    write(
-        &output,
-        "replace-new.parquet",
-        table! {
-            "id" => [1, 2, 3],
-            "zone" => ["north", "south", "east"],
-            "note" => ["ok", "ok", "ok"],
-        },
-    );
-
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(
@@ -224,50 +204,6 @@ fn main() {
         table! {
             "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
             "value" => [10, 20, 30, 40, 41, 50, 60, 70, 80, 90, 100],
-        },
-    );
-
-    // The only candidate that can identify rows is the one that fans out:
-    // "region" repeats in `old` and so can never be a key.
-    write(
-        &output,
-        "guessed-fanout-old.parquet",
-        table! {
-            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "region" => [
-                "north", "south", "north", "south", "north",
-                "south", "north", "south", "north", "south",
-            ],
-        },
-    );
-    write(
-        &output,
-        "guessed-fanout-new.parquet",
-        table! {
-            "id" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
-            "region" => [
-                "north", "south", "north", "south", "east", "north",
-                "south", "north", "south", "north", "south",
-            ],
-        },
-    );
-
-    // One of two shared keys is 50%, which reads as a broken key rather than
-    // as fanout.
-    write(
-        &output,
-        "fanout-broad-old.parquet",
-        table! {
-            "id" => [1, 2],
-            "value" => [10, 20],
-        },
-    );
-    write(
-        &output,
-        "fanout-broad-new.parquet",
-        table! {
-            "id" => [1, 1, 2],
-            "value" => [10, 11, 20],
         },
     );
 

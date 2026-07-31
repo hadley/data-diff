@@ -106,4 +106,10 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+[demo/README.md](demo/README.md) shows the output of every command it documents, and `cargo test` re-runs them all against it, so that file cannot drift from what the tool does. After a deliberate change to the output format, refresh its transcripts rather than editing them by hand:
+
+```console
+UPDATE_README=1 cargo test --test readme
+```
+
 See [demo/README.md](demo/README.md) for ready-to-run sample datasets, [design.md](design.md) for what the operations mean and how they are resolved, and [plan.md](plan.md) with [plan-next.md](plan-next.md) for the step in progress and the ones after it.
