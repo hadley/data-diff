@@ -1,0 +1,5 @@
+# Check text files out with LF everywhere. tests/readme.rs matches transcripts
+# byte-for-byte against `demo/README.md`, and repeated runs must be
+# byte-identical, so a CRLF checkout on Windows must never happen.
+* text=auto eol=lf
+*.parquet binary
