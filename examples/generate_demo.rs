@@ -188,6 +188,25 @@ fn main() {
         },
     );
 
+    // Nothing here can identify a row: both columns repeat a value in `old`,
+    // so neither is eligible and rows are matched by position.
+    write(
+        &output,
+        "no-key-old.parquet",
+        table! {
+            "region" => ["north", "north", "south"],
+            "reading" => [11.4, 11.4, 9.8],
+        },
+    );
+    write(
+        &output,
+        "no-key-new.parquet",
+        table! {
+            "region" => ["north", "north", "south"],
+            "reading" => [11.4, 12.5, 9.8],
+        },
+    );
+
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(

@@ -19,11 +19,13 @@ use arrow_array::RecordBatch;
 
 pub use human::write_human;
 pub use input::{read_parquet, validate_tables};
+pub use key::POSITIONAL_COMPONENT;
 pub use model::{
     CellCoordinate, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff, Coordinate, Diff,
     DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim, HintKind,
-    HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyDiff, KeyOverlap, NormalizedType,
-    OrderDiff, RowEdit, RowsDiff, Schemas, Side,
+    HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyComponent, KeyDiff, KeyOverlap,
+    KeyRejection, KeySubject, NormalizedType, OrderDiff, RejectionReason, RowEdit, RowsDiff,
+    Schemas, Side,
 };
 
 /// Compare two in-memory tables.
@@ -39,14 +41,17 @@ pub fn diff_tables(
     // Hints resolve first, and against what the key already claims rather than
     // beside it, so a rename can be asserted in time to identify rows through a
     // key column the two files call different things.
-    let components = key::declared_components(&options.key)?;
+    let declared = key::declared_components(&options.key)?;
     let hints = hint::resolve(
         old.schema_ref(),
         new.schema_ref(),
         &options.hints,
-        key::claimed_identities(old.schema_ref(), new.schema_ref(), &components),
+        key::claimed_identities(old.schema_ref(), new.schema_ref(), declared.components()),
     )?;
-    let key = key::resolve_key(old, new, &components, &hints.map)?;
+    // Resolution cannot fail: a declared key this data will not support is
+    // refused as a value, and the chain falls back to a guess and then to row
+    // position, so the identities the declaration asserted survive it.
+    let key = key::resolve_key(old, new, &declared, &hints.map);
     let rows = rows::match_rows(&key);
     // The map leaves the hints here and does not go back: from now on it is
     // reconciliation's account of column identity, which every stage below both
@@ -112,6 +117,7 @@ pub fn diff_tables(
                 .map(|column| Coordinate::from_zero_based(column.old, column.new))
                 .collect(),
             overlap: key.overlap,
+            rejection: key.rejection,
         },
         rows: RowsDiff {
             added: one_based(&rows.added),

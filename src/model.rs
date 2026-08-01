@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use crate::key::MAX_FANOUT_PERCENT;
-
 /// Options that influence reconciliation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
@@ -40,32 +38,14 @@ pub enum DiffError {
         source_type: String,
         row: usize,
     },
-    /// No key was supplied and no eligible key could be guessed.
-    MissingKey,
     /// A comma-separated key contained an empty component.
     EmptyKeyComponent,
     /// A key component named more than one column per side.
     MalformedKeyComponent { component: String },
     /// More than one key component claimed the same column.
     DuplicateKeyColumn { side: Side, column: String },
-    /// A key component was absent on one side.
-    MissingKeyColumn { side: Side, component: String },
-    /// A corresponding key-column pair cannot be compared.
-    IncompatibleKeyTypes {
-        component: String,
-        old_type: String,
-        new_type: String,
-    },
-    /// A key contains null or `NaN`.
-    InvalidKeyValue {
-        side: Side,
-        component: String,
-        row: usize,
-    },
-    /// The declared key is not unique in the old input.
-    NonUniqueOldKey { first_row: usize, row: usize },
-    /// New-side duplication is too broad to be read as fanout.
-    ExcessiveFanout { affected: usize, shared: usize },
+    /// `#row` was compounded with a real component.
+    CompoundPositionalKey,
     /// A hint could not be read as a line of the format's grammar.
     MalformedHint { hint: String },
     /// A hint named an operation that cannot be asserted.
@@ -111,9 +91,6 @@ impl std::fmt::Display for DiffError {
                 f,
                 "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
             ),
-            DiffError::MissingKey => f.write_str(
-                "no key was supplied and no eligible key could be guessed; supply --key",
-            ),
             DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
             DiffError::MalformedKeyComponent { component } => write!(
                 f,
@@ -123,33 +100,9 @@ impl std::fmt::Display for DiffError {
                 f,
                 "{side} column {column:?} is claimed by more than one key component"
             ),
-            DiffError::MissingKeyColumn { side, component } => {
-                write!(f, "{side} is missing key column {component:?}")
-            }
-            DiffError::IncompatibleKeyTypes {
-                component,
-                old_type,
-                new_type,
-            } => write!(
-                f,
-                "key column {component:?} has incompatible types {old_type} and {new_type}"
-            ),
-            DiffError::InvalidKeyValue {
-                side,
-                component,
-                row,
-            } => write!(
-                f,
-                "{side} key column {component:?} has null or NaN at row {row}"
-            ),
-            DiffError::NonUniqueOldKey { first_row, row } => write!(
-                f,
-                "old key is non-unique at rows {first_row} and {row} (non_unique_old)"
-            ),
-            DiffError::ExcessiveFanout { affected, shared } => write!(
-                f,
-                "declared key fans out for {affected} of {shared} shared key values, \
-                 above the {MAX_FANOUT_PERCENT}% limit; supply a different --key"
+            DiffError::CompoundPositionalKey => f.write_str(
+                "key component \"#row\" matches rows by position and cannot be combined \
+                 with a column",
             ),
             DiffError::MalformedHint { hint } => write!(
                 f,
@@ -367,6 +320,12 @@ impl IdentityBasis {
 pub enum KeyBasis {
     Declared,
     Guessed,
+    /// Row position, reached because nothing else could identify a row.
+    ///
+    /// Declaring `#row` reaches the same key under `Declared`, so this basis
+    /// says the tool ran out of alternatives rather than that rows are matched
+    /// positionally, which the empty column list says on its own.
+    Fallback,
 }
 
 /// Exact shared-value evidence behind a guessed key.
@@ -387,11 +346,79 @@ impl KeyOverlap {
 }
 
 /// The resolved row key.
+///
+/// `columns` is empty exactly for the positional key, whether that key was
+/// declared as `#row` or fallen back to, since a declared key of no components
+/// is refused before it gets here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyDiff {
     pub basis: KeyBasis,
     pub columns: Vec<Coordinate>,
     pub overlap: Option<KeyOverlap>,
+    /// A declared key this data could not support, which is why the basis is
+    /// not `Declared`.
+    pub rejection: Option<KeyRejection>,
+}
+
+/// A declared key that could not be used, and what about it failed.
+///
+/// This is not an [`Issue`], which is an instruction declined and names the
+/// hints it concerns. A rejected key concerns none, so it is recorded here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRejection {
+    pub subject: KeySubject,
+    pub reason: RejectionReason,
+}
+
+/// What a rejection is about.
+///
+/// Resolving a component can fail on its own account, while uniqueness and
+/// fanout are properties of the whole tuple and blame no one component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeySubject {
+    /// One component of the declared key.
+    Component(KeyComponent),
+    /// The declared key entire.
+    Key(Vec<KeyComponent>),
+}
+
+/// One declared key component, named on each side.
+///
+/// The two names come from parsing rather than from resolution, so a component
+/// can be named in a rejection even when the column it names was never found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyComponent {
+    pub old: String,
+    pub new: String,
+}
+
+/// Why a declared key was rejected.
+///
+/// Each variant carries what the fatal error it replaces used to report, so
+/// making these recoverable moves the detail into the diff rather than losing
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RejectionReason {
+    MissingColumn { side: Side },
+    IncompatibleTypes { old_type: String, new_type: String },
+    DuplicateColumn { side: Side },
+    InvalidValue { side: Side, row: usize },
+    NonUniqueOld { first_row: usize, row: usize },
+    ExcessiveFanout { affected: usize, shared: usize },
+}
+
+impl RejectionReason {
+    /// The stable identifier the format writes.
+    pub fn name(&self) -> &'static str {
+        match self {
+            RejectionReason::MissingColumn { .. } => "missing_column",
+            RejectionReason::IncompatibleTypes { .. } => "incompatible_types",
+            RejectionReason::DuplicateColumn { .. } => "duplicate_column",
+            RejectionReason::InvalidValue { .. } => "invalid_value",
+            RejectionReason::NonUniqueOld { .. } => "non_unique_old",
+            RejectionReason::ExcessiveFanout { .. } => "excessive_fanout",
+        }
+    }
 }
 
 /// Row matching events.

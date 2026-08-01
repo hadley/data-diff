@@ -53,6 +53,24 @@ row_add(2)
 
 The rename is still found, but only after the key has been resolved and the rows matched by it, which is too late to be any use.
 
+### When nothing can identify a row
+
+Both columns here repeat a value, so neither can be a key. Rather than give up, `data-diff` matches rows by position:
+
+```console
+$ data-diff demo/no-key-old.parquet demo/no-key-new.parquet
+col_key([#row], basis: fallback)
+row_edit(2, changes: 1)
+```
+
+You can also specify this manually
+
+```console
+$ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key '#row'
+col_key([#row], basis: declared)
+row_edit(2, changes: 1)
+```
+
 ## Fanout
 
 We can still use a key, even if it's duplicated (up to 10%) in the new table, as this might indicate a join gone wrong:

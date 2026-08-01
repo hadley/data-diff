@@ -1,7 +1,7 @@
 use data_diff::{
-    CellCoordinate, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffError, DiffOptions,
-    EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyDiff, KeyOverlap,
-    RowEdit, Side, diff_tables, write_human,
+    CellCoordinate, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffOptions, EditSummary,
+    FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyComponent, KeyDiff, KeyOverlap,
+    KeyRejection, KeySubject, RejectionReason, RowEdit, Side, diff_tables, write_human,
 };
 use test_support::table;
 
@@ -18,6 +18,22 @@ fn row_edit(old: usize, new: usize, changes: usize) -> RowEdit {
     RowEdit {
         row: Coordinate::from_zero_based(old, new),
         changes,
+    }
+}
+
+/// One key component naming a column that differs between the files.
+fn paired(old: &str, new: &str) -> KeyComponent {
+    KeyComponent {
+        old: old.to_owned(),
+        new: new.to_owned(),
+    }
+}
+
+/// One key component naming the same column on both sides.
+fn shared(name: &str) -> KeyComponent {
+    KeyComponent {
+        old: name.to_owned(),
+        new: name.to_owned(),
     }
 }
 
@@ -176,6 +192,7 @@ fn default_options_guess_a_key_and_align_reordered_rows() {
                 shared: 3,
                 possible: 3,
             }),
+            rejection: None,
         }
     );
     assert_eq!(
@@ -195,23 +212,19 @@ fn default_options_guess_a_key_and_align_reordered_rows() {
 }
 
 #[test]
-fn automatic_resolution_without_an_eligible_key_is_an_error() {
+fn automatic_resolution_without_an_eligible_key_falls_back() {
     let empty = table! { "id" => i64[] };
     let rows = table! { "id" => [1, 2] };
     let disjoint = table! { "id" => [3, 4] };
 
-    assert_eq!(
-        diff_tables(&empty, &rows, &DiffOptions::default()).unwrap_err(),
-        DiffError::MissingKey
-    );
-    assert_eq!(
-        diff_tables(&rows, &empty, &DiffOptions::default()).unwrap_err(),
-        DiffError::MissingKey
-    );
-    assert_eq!(
-        diff_tables(&rows, &disjoint, &DiffOptions::default()).unwrap_err(),
-        DiffError::MissingKey
-    );
+    // Nothing can identify a row, so each pair falls back to row position
+    // rather than failing.
+    for (old, new) in [(&empty, &rows), (&rows, &empty), (&rows, &disjoint)] {
+        let diff = diff_tables(old, new, &DiffOptions::default()).unwrap();
+        assert_eq!(diff.key.basis, KeyBasis::Fallback);
+        assert!(diff.key.columns.is_empty());
+        assert_eq!(diff.key.rejection, None);
+    }
 }
 
 #[test]
@@ -281,13 +294,21 @@ fn an_excessive_fanout_rejects_the_declared_key() {
     let old = table! { "id" => [1, 2] };
     let new = table! { "id" => [1, 1, 2] };
 
+    // The key is refused rather than fatal, and the comparison continues on
+    // whatever can identify rows instead.
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
     assert_eq!(
-        diff_tables(&old, &new, &declared("id")).unwrap_err(),
-        DiffError::ExcessiveFanout {
-            affected: 1,
-            shared: 2,
-        }
+        diff.key.rejection,
+        Some(KeyRejection {
+            subject: KeySubject::Key(vec![shared("id")]),
+            reason: RejectionReason::ExcessiveFanout {
+                affected: 1,
+                shared: 2,
+            },
+        })
     );
+    assert_ne!(diff.key.basis, KeyBasis::Declared);
 }
 
 #[test]
@@ -474,6 +495,7 @@ fn a_renamed_key_identifies_rows_across_both_files() {
             basis: KeyBasis::Declared,
             columns: vec![Coordinate::from_zero_based(0, 0)],
             overlap: None,
+            rejection: None,
         }
     );
     assert!(diff.columns.added.is_empty());
@@ -523,6 +545,7 @@ fn a_guessed_key_may_fan_out() {
                 shared: 10,
                 possible: 10,
             }),
+            rejection: None,
         }
     );
     // Nothing downstream asks how the key was chosen, so a guessed fanout
@@ -692,6 +715,7 @@ fn a_hint_can_supply_a_renamed_key_column() {
             basis: KeyBasis::Declared,
             columns: vec![Coordinate::from_zero_based(0, 0)],
             overlap: None,
+            rejection: None,
         }
     );
     assert_eq!(
@@ -794,6 +818,7 @@ fn a_hint_can_be_guessed_as_the_key() {
                 shared: 3,
                 possible: 3,
             }),
+            rejection: None,
         }
     );
     assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
@@ -1173,4 +1198,108 @@ fn a_reservation_frees_the_other_endpoint_for_another_candidate() {
 
     assert_eq!(replaced.columns.dropped, [2, 3]);
     assert_eq!(replaced.columns.added, [2]);
+}
+
+#[test]
+fn every_stage_still_runs_under_a_fallback_key() {
+    // No column can identify a row: "tag" repeats and "amount" is rewritten
+    // wholesale under a new name. Rows are paired by position instead.
+    let old = table! {
+        "tag" => ["x", "x", "x"],
+        "amount" => [10, 20, 30],
+        "note" => ["a", "a", "a"],
+    };
+    let new = table! {
+        "tag" => ["x", "x", "x"],
+        "total" => [10, 20, 30],
+        "note" => ["a", "a", "z"],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+    assert!(diff.key.columns.is_empty());
+    // Rename inference reads agreement across the positionally matched rows and
+    // is not disabled: no stage below key resolution branches on the basis.
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Name),
+            identity(1, 1, IdentityBasis::Exact),
+            identity(2, 2, IdentityBasis::Name),
+        ]
+    );
+    // Positional matches ascend on both sides, so there is never a row to move.
+    assert!(diff.order.rows.is_empty());
+    assert_eq!(diff.rows.matched.len(), 3);
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert_eq!(diff.summary.rows, vec![row_edit(2, 2, 1)]);
+}
+
+#[test]
+fn a_declared_positional_key_and_the_fallback_reach_one_key() {
+    let old = table! { "tag" => ["x", "x"], "value" => [1, 1] };
+    let new = table! { "tag" => ["x", "x"], "value" => [1, 2] };
+
+    let fallen_back = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    let declared = diff_tables(
+        &old,
+        &new,
+        &DiffOptions {
+            key: vec![data_diff::POSITIONAL_COMPONENT.to_owned()],
+            hints: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    // Only how the key was arrived at differs; everything read off it agrees.
+    assert_eq!(declared.key.basis, KeyBasis::Declared);
+    assert_eq!(fallen_back.key.basis, KeyBasis::Fallback);
+    assert_eq!(declared.rows, fallen_back.rows);
+    assert_eq!(declared.cells, fallen_back.cells);
+    assert_eq!(declared.summary, fallen_back.summary);
+    assert_eq!(declared.columns, fallen_back.columns);
+}
+
+#[test]
+fn a_rejected_pair_keeps_the_identity_it_asserted() {
+    let old = table! { "customer_id" => [1, 1], "value" => [10, 10] };
+    let new = table! { "id" => [1, 1], "value" => [10, 25] };
+
+    // The pair asserts two things: that these columns are one, and that the
+    // column identifies rows. Only the second fails.
+    let diff = diff_tables(
+        &old,
+        &new,
+        &DiffOptions {
+            key: vec!["customer_id/id".to_owned()],
+            hints: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        diff.key.rejection,
+        Some(KeyRejection {
+            subject: KeySubject::Key(vec![paired("customer_id", "id")]),
+            reason: RejectionReason::NonUniqueOld {
+                first_row: 1,
+                row: 2,
+            },
+        })
+    );
+    assert!(
+        diff.columns
+            .identities
+            .contains(&identity(0, 0, IdentityBasis::Declared))
+    );
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "key_invalid([customer_id -> id], reason: non_unique_old)\n\
+         ----\n\
+         col_key([#row], basis: fallback)\n\
+         col_rename(customer_id -> id, basis: declared)\n\
+         row_edit(2, changes: 1)"
+    );
 }

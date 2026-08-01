@@ -1,25 +1,40 @@
 use std::io::{self, Write};
 
-use crate::{ColumnSchema, Diff, HintClaim, HintNames, Issue, IssueKind, KeyBasis};
+use crate::{
+    ColumnSchema, Diff, HintClaim, HintNames, Issue, IssueKind, KeyBasis, KeyComponent,
+    KeyRejection, KeySubject, POSITIONAL_COMPONENT,
+};
+
+/// The line dividing what went wrong from what was found.
+const SEPARATOR: &str = "----";
 
 /// Write a compact, operation-oriented description of a diff.
 ///
-/// The first line always announces the resolved key; it is informational
-/// context rather than a change operation, so `no_changes()` still follows it
-/// when nothing changed.
+/// Anything that went wrong comes first — a rejected key, a declined hint —
+/// then a `----` line, then everything the comparison learned. With nothing to
+/// report there is no separator and the output opens on the key line, which is
+/// informational context rather than a change operation, so `no_changes()`
+/// still follows it when nothing changed.
 pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     let mut operations = Vec::new();
 
-    operations.push(key_context(diff));
-
-    // Issues sit with the key line rather than among the operations: like the
-    // key, they are context for reading what follows, saying what the diff was
-    // told to do and did not.
+    // A rejected key is not an `Issue`, which is an instruction declined and
+    // names the hints it concerns. It comes first because it explains the key
+    // line below the separator, and being carried on the key rather than among
+    // the issues is what spares the two from needing a common ordering.
+    if let Some(rejection) = &diff.key.rejection {
+        operations.push(key_rejection(rejection));
+    }
     for issue in &diff.issues {
         operations.push(issue_context(issue));
     }
+    if !operations.is_empty() {
+        operations.push(SEPARATOR.to_owned());
+    }
+
+    operations.push(key_context(diff));
     // Where the operations start, so that "nothing changed" stays a statement
-    // about the data. A declined hint is context, not a change, and a diff of
+    // about the data. A declined hint is a problem, not a change, and a diff of
     // two identical files still has to say so however many hints were dropped.
     let context = operations.len();
 
@@ -143,25 +158,33 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
 /// format does not change shape once compound guesses exist. A declared pair
 /// renders as `"old" -> "new"` rather than as two names, which would make
 /// `--key a/b` and `--key a,b` indistinguishable.
+///
+/// The positional key has no columns and names `#row` in their place, so the
+/// list is never empty and `basis` keeps meaning throughout the format what it
+/// means for every other key: how this one was arrived at.
 fn key_context(diff: &Diff) -> String {
-    let components = diff
-        .key
-        .columns
-        .iter()
-        .map(|coordinate| {
-            let (old, new) = coordinate.positions();
-            let old_name = column_name(&diff.schemas.old, old);
-            let new_name = column_name(&diff.schemas.new, new);
-            if old_name == new_name {
-                old_name
-            } else {
-                format!("{old_name} -> {new_name}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let components = if diff.key.columns.is_empty() {
+        POSITIONAL_COMPONENT.to_owned()
+    } else {
+        diff.key
+            .columns
+            .iter()
+            .map(|coordinate| {
+                let (old, new) = coordinate.positions();
+                let old_name = column_name(&diff.schemas.old, old);
+                let new_name = column_name(&diff.schemas.new, new);
+                if old_name == new_name {
+                    old_name
+                } else {
+                    format!("{old_name} -> {new_name}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     match diff.key.basis {
         KeyBasis::Declared => format!("col_key([{components}], basis: declared)"),
+        KeyBasis::Fallback => format!("col_key([{components}], basis: fallback)"),
         KeyBasis::Guessed => {
             // Rounded to two digits for display; `KeyOverlap` keeps the exact
             // shared and possible counts for anything that needs them.
@@ -172,6 +195,49 @@ fn key_context(diff: &Diff) -> String {
                 .unwrap_or(0.0);
             format!("col_key([{components}], basis: guessed, overlap: {overlap:.2})")
         }
+    }
+}
+
+/// Render a declared key the data would not support.
+///
+/// The subject follows the reason. Resolving a component can fail on its own
+/// account and names that component; uniqueness and fanout are properties of
+/// the whole tuple and blame no one column, so they name the declared key
+/// entire and are bracketed like the key line to say so at sight.
+///
+/// A component is named the way the key line names it, `customer_id -> id`
+/// rather than the `customer_id/id` it was declared as, so that a rejection and
+/// the `col_key()` line it explains describe one component one way.
+fn key_rejection(rejection: &KeyRejection) -> String {
+    let subject = match &rejection.subject {
+        KeySubject::Component(component) => component_name(component),
+        KeySubject::Key(components) => format!(
+            "[{}]",
+            components
+                .iter()
+                .map(component_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!(
+        "key_invalid({subject}, reason: {})",
+        rejection.reason.name()
+    )
+}
+
+/// Name a key component the way the key line names it.
+///
+/// A pair reads `old -> new`, and an unpaired component collapses to its one
+/// name, exactly as `key_context` writes them. Each name is quoted on its own
+/// account, so the arrow is never inside a quoted string.
+fn component_name(component: &KeyComponent) -> String {
+    let old = value(&component.old);
+    let new = value(&component.new);
+    if old == new {
+        old
+    } else {
+        format!("{old} -> {new}")
     }
 }
 
@@ -197,7 +263,10 @@ fn issue_context(issue: &Issue) -> String {
             )
         }
         IssueKind::ContradictoryHints => {
-            format!("hint_ignored([{}], contradictory)", hints.join(", "))
+            format!(
+                "hint_ignored([{}], reason: contradictory)",
+                hints.join(", ")
+            )
         }
         IssueKind::HintIncompatibleTypes { old_type, new_type } => format!(
             "hint_ignored({}, incompatible: {} -> {})",
@@ -206,9 +275,11 @@ fn issue_context(issue: &Issue) -> String {
             value(new_type)
         ),
         IssueKind::HintUnresolvedIdentity => {
-            format!("hint_ignored({}, unresolved)", hints.join(", "))
+            format!("hint_ignored({}, reason: unresolved)", hints.join(", "))
         }
-        IssueKind::HintNoChange => format!("hint_ignored({}, unchanged)", hints.join(", ")),
+        IssueKind::HintNoChange => {
+            format!("hint_ignored({}, reason: unchanged)", hints.join(", "))
+        }
     }
 }
 
@@ -425,9 +496,9 @@ mod tests {
         // and an issue reason is easy to add a fixture for and never render.
         for reason in [
             "missing:",
-            "contradictory",
-            "unchanged",
-            "unresolved",
+            "reason: contradictory",
+            "reason: unchanged",
+            "reason: unresolved",
             "incompatible:",
         ] {
             assert!(rendered.contains(reason), "{reason}");
@@ -441,6 +512,7 @@ mod tests {
                 "incompatible",
                 "missing",
                 "overlap",
+                "reason",
                 "type"
             ])
         );
@@ -747,12 +819,14 @@ mod tests {
             "value" => [10, 20],
         };
 
-        // An issue is context, like the key line. Two identical files still
-        // have nothing to report, however many instructions were dropped.
+        // A declined instruction is a problem, not a change. Two identical
+        // files still have nothing to report, however many were dropped, and
+        // "nothing changed" is a statement about what lies below the separator.
         assert_eq!(
             render_hinted(&table, &table, &["col_rename(value -> absent)"]),
-            "col_key([id], basis: declared)\n\
-             hint_ignored(col_rename(value -> absent), missing: absent)\n\
+            "hint_ignored(col_rename(value -> absent), missing: absent)\n\
+             ----\n\
+             col_key([id], basis: declared)\n\
              no_changes()"
         );
     }
@@ -816,5 +890,85 @@ mod tests {
         col_drop("a->b")
         col_drop("café")
         "#);
+    }
+
+    #[test]
+    fn the_positional_key_names_itself_rather_than_showing_an_empty_list() {
+        let old = table! { "label" => ["x", "x"] };
+        let new = table! { "label" => ["x", "y"] };
+
+        // Nothing can identify a row, so the chain reaches its last resort.
+        assert_eq!(
+            render_with(&old, &new, &[]),
+            "col_key([#row], basis: fallback)\nrow_edit(2, changes: 1)"
+        );
+    }
+
+    #[test]
+    fn declaring_the_positional_key_changes_only_the_basis() {
+        let old = table! { "label" => ["x", "x"] };
+        let new = table! { "label" => ["x", "y"] };
+
+        let fallen_back = render_with(&old, &new, &[]);
+        let declared = render_with(&old, &new, &["#row"]);
+
+        assert_eq!(
+            declared,
+            "col_key([#row], basis: declared)\nrow_edit(2, changes: 1)"
+        );
+        // The two routes reach one key: only the line saying how differs.
+        assert_eq!(
+            declared.replace("basis: declared", "basis: fallback"),
+            fallen_back
+        );
+    }
+
+    #[test]
+    fn a_component_rejection_names_the_component_and_a_key_rejection_brackets_it() {
+        // A missing column is one component's own fault.
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "other" => [1, 2] };
+        assert!(
+            render_with(&old, &new, &["id"])
+                .starts_with("key_invalid(id, reason: missing_column)\n----\n"),
+            "{}",
+            render_with(&old, &new, &["id"])
+        );
+
+        // Uniqueness belongs to the tuple, so the whole key is named and
+        // bracketed to say so at sight.
+        let old = table! { "a" => [1, 1], "b" => [1, 1] };
+        let new = table! { "a" => [1, 1], "b" => [1, 1] };
+        assert!(
+            render_with(&old, &new, &["a", "b"])
+                .starts_with("key_invalid([a, b], reason: non_unique_old)\n----\n"),
+            "{}",
+            render_with(&old, &new, &["a", "b"])
+        );
+    }
+
+    #[test]
+    fn a_rejected_pair_is_named_the_way_the_key_line_names_it() {
+        let old = table! { "customer_id" => [1, 1] };
+        let new = table! { "id" => [1, 1] };
+
+        // `customer_id -> id` rather than the `customer_id/id` it was declared
+        // as, so the rejection and the key line it explains agree.
+        assert!(
+            render_with(&old, &new, &["customer_id/id"])
+                .starts_with("key_invalid([customer_id -> id], reason: non_unique_old)\n"),
+            "{}",
+            render_with(&old, &new, &["customer_id/id"])
+        );
+    }
+
+    #[test]
+    fn a_clean_comparison_has_no_separator() {
+        let table = table! { "id" => [1, 2] };
+
+        assert_eq!(
+            render_with(&table, &table, &["id"]),
+            "col_key([id], basis: declared)\nno_changes()"
+        );
     }
 }

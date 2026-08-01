@@ -188,7 +188,7 @@ Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hint
 
 ## Key resolution
 
-We resolve a stable row identifier from a declared key, a guessed key, or finally row number.
+We resolve a stable row identifier from a declared key, a guessed key, or finally row position.
 
 ### Key comparison
 
@@ -217,9 +217,13 @@ $$
 
 We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to key guessing. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
 
-If a declared key fails validation, reconciliation records an `invalid_key` issue with all reasons, then continues to key guessing and, if necessary, row-number matching. The fallback basis is recorded as `guessed` or `row_number`, and the issue remains visible. A replacement key reruns validation and all downstream stages.
+A `--key` string that cannot be read at all — an empty component, more than two names in one component, or a column claimed twice — is a fault in the instruction rather than in the data, and remains fatal. Everything below that is a well-formed key this pair of files cannot support: a component absent on one side, an incompatible type pair, two components resolving onto one column, a null or `NaN`, duplication in `old`, or fanout above the limit. Each of these is recorded as a `key_invalid` rejection and reconciliation continues to key guessing and, if necessary, to row position. The fallback basis is recorded as `guessed` or `fallback`, and the rejection remains visible. A replacement key reruns validation and all downstream stages.
 
-Fanout is intentionally one-directional: a unique old row can be compared unambiguously with multiple new rows, while multiple old rows mapping to one new row might represent aggregation, deduplication, or arbitrary pairing. We do not define reverse fanout. Duplication in `old` invalidates the key with reason `non_unique_old`; full reconciliation falls back, while the MVP terminates.
+The rejection carries the one reason that stopped validation rather than every reason that might apply. The reasons are not independent: the fanout rate is only defined once `old` is known unique, so a rate computed over a non-unique old side would be a number that means nothing. Its subject follows its reason. Resolving a component can fail on its own account and names that component, as the user spelled it; uniqueness and fanout are properties of the whole tuple and name the declared key entire.
+
+A rejection is not an `Issue`. Every issue names the hints it concerns, and a rejected key concerns none, so it is recorded on the key itself.
+
+Fanout is intentionally one-directional: a unique old row can be compared unambiguously with multiple new rows, while multiple old rows mapping to one new row might represent aggregation, deduplication, or arbitrary pairing. We do not define reverse fanout. Duplication in `old` invalidates the key with reason `non_unique_old`, and reconciliation falls back.
 
 ### Guessed key
 
@@ -235,9 +239,15 @@ $$
 
 where $n_o$ and $n_n$ are the numbers of distinct key values on each side. Because `old` is unique, $n_o$ is its row count, and $n_n$ is smaller than the new row count exactly when `new` duplicates a value. The denominator does not depend on the candidate's shared count, so $r$ summarizes but does not affect selection. If either table is empty, $r$ is `null` and no guessed key is eligible.
 
-### Row-number fallback
+### Row-position fallback
 
-If no candidate key exists, we match by row number. This cannot distinguish a `row_edit()` from `row_drop()` + `row_add()` and represents reordering as many edits, but provides an initial display. Guessed and row-number bases are visible and overrideable in the UI; an override reruns all downstream stages.
+If no candidate key exists, we match by row position. This cannot distinguish a `row_edit()` from `row_drop()` + `row_add()` and represents reordering as many edits, but provides an initial display. Guessed and fallback bases are visible and overrideable in the UI; an override reruns all downstream stages.
+
+The key is synthesized rather than special-cased: row positions are distinct, present, and comparable across sides, so they satisfy everything row matching assumes of a key. Positional matching is therefore the ordinary algorithm over those values, unique in `old` and incapable of fanout by construction, and no stage below key resolution branches on the basis.
+
+The same key can be asked for. `--key '#row'` declares it, recording `declared` rather than `fallback`, which is the whole of the difference between the two: one was chosen and the other arrived at. The name is reserved rather than looked up, and since a bare name never begins with `#` it cannot be confused with any column the format writes bare. It is a whole key or none of one, so it cannot be compounded with a column. The key line names `#row` in its component list rather than showing an empty one, so `basis` keeps meaning what it means for every other key.
+
+No stage is disabled under this basis, including rename and swap inference. Two files compared without a key are usually two versions of one file whose rows are in the same order, and on that reading positional matching is the right key rather than a degraded one. Where the rows are not in the same order, every stage reading a matched row inherits the error: cells report widespread edits, and inference may identify two columns on coincidental agreement. The first is loud and the second quiet, and the safeguard for both is the basis on the first line.
 
 ## Row matching
 

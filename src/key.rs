@@ -2,23 +2,27 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
 use crate::schema::ColumnMap;
-use crate::{DiffError, IdentityBasis, KeyBasis, KeyOverlap, Side};
+use crate::{
+    DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject,
+    RejectionReason, Side,
+};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedKey {
     pub basis: KeyBasis,
+    /// Empty exactly for the positional key, declared or fallen back to.
     pub columns: Vec<KeyColumn>,
     pub old: Vec<Vec<CanonicalValue>>,
     pub new: Vec<Vec<CanonicalValue>>,
     pub overlap: Option<KeyOverlap>,
+    /// The declared key this one replaced, where one was declared and refused.
+    pub rejection: Option<KeyRejection>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct KeyColumn {
-    /// The component as declared, which for a pair names both columns.
-    pub component: String,
     pub old: usize,
     pub new: usize,
 }
@@ -26,7 +30,7 @@ pub(crate) struct KeyColumn {
 /// The share of common key values a declared key may duplicate in `new` and
 /// still be read as fanout rather than as a broken key.
 ///
-/// `DiffError::ExcessiveFanout` states this limit in its message.
+/// `RejectionReason::ExcessiveFanout` carries the counts it was measured from.
 pub(crate) const MAX_FANOUT_PERCENT: usize = 10;
 
 /// Rows grouped by key hash, with equality confirmed on lookup.
@@ -76,15 +80,70 @@ impl<'a> KeyIndex<'a> {
     }
 }
 
+/// Resolve the key, falling back until something can identify rows.
+///
+/// Declared, then guessed, then position. A declared key this data cannot
+/// support is a rejection rather than an error, so the comparison continues
+/// and the rejection travels with the key that replaced it. Nothing below here
+/// learns which attempt won except through `ResolvedKey`.
 pub(crate) fn resolve_key(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    declared: &Declared,
+    hinted: &ColumnMap,
+) -> ResolvedKey {
+    let rejection = match declared {
+        // A positional key has nothing to resolve and nothing to validate, so
+        // it is reached directly rather than through the chain below.
+        Declared::Positional => return positional_key(old, new, KeyBasis::Declared),
+        Declared::Components(components) => match declared_key(old, new, components, hinted) {
+            Ok(key) => return key,
+            Err(rejection) => Some(rejection),
+        },
+        Declared::Guess => None,
+    };
+
+    let mut key =
+        guess_key(old, new, hinted).unwrap_or_else(|| positional_key(old, new, KeyBasis::Fallback));
+    key.rejection = rejection;
+    key
+}
+
+/// The key that matches rows by position.
+///
+/// Row positions satisfy everything `match_rows` assumes of a key — distinct,
+/// so unique in `old` and incapable of fanout; never null or `NaN`; and equal
+/// across sides exactly when the positions are equal — so positional matching
+/// is the ordinary algorithm over these values rather than a path beside it.
+fn positional_key(old: &RecordBatch, new: &RecordBatch, basis: KeyBasis) -> ResolvedKey {
+    fn positions(rows: usize) -> Vec<Vec<CanonicalValue>> {
+        (0..rows)
+            .map(|row| vec![CanonicalValue::Int(row as i64)])
+            .collect()
+    }
+
+    ResolvedKey {
+        basis,
+        columns: Vec::new(),
+        old: positions(old.num_rows()),
+        new: positions(new.num_rows()),
+        overlap: None,
+        rejection: None,
+    }
+}
+
+/// Resolve and validate the components the user declared.
+///
+/// Resolution and validation share one result because the split between them is
+/// not the split between fatal and recoverable: a missing column is discovered
+/// while resolving and a duplicate while validating, and both are a key this
+/// data cannot support. Only parsing, above this, still fails outright.
+fn declared_key(
     old: &RecordBatch,
     new: &RecordBatch,
     components: &[Component],
     hinted: &ColumnMap,
-) -> Result<ResolvedKey, DiffError> {
-    if components.is_empty() {
-        return guess_key(old, new, hinted);
-    }
+) -> Result<ResolvedKey, KeyRejection> {
     let mut columns = Vec::with_capacity(components.len());
     let mut old_components = Vec::with_capacity(components.len());
     let mut new_components = Vec::with_capacity(components.len());
@@ -96,16 +155,16 @@ pub(crate) fn resolve_key(
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
         let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
-            || DiffError::IncompatibleKeyTypes {
-                component: component.spelling.to_owned(),
-                old_type: format!("{:?}", old_values.data_type()),
-                new_type: format!("{:?}", new_values.data_type()),
+            || {
+                component.rejected(RejectionReason::IncompatibleTypes {
+                    old_type: format!("{:?}", old_values.data_type()),
+                    new_type: format!("{:?}", new_values.data_type()),
+                })
             },
         )?;
         old_components.push(plan.canonicalize_old(old_values.as_ref()));
         new_components.push(plan.canonicalize_new(new_values.as_ref()));
         columns.push(KeyColumn {
-            component: component.spelling.to_owned(),
             old: old_index,
             new: new_index,
         });
@@ -115,14 +174,23 @@ pub(crate) fn resolve_key(
     // names. Two components can name different columns and land on the same
     // one: `--key id,customer_id` with a `customer_id -> id` hint resolves both
     // through that identity, which the name check cannot see.
-    validate_distinct(&columns)?;
+    validate_distinct(&columns, components)?;
 
     let old_keys = transpose(old.num_rows(), &old_components);
     let new_keys = transpose(new.num_rows(), &new_components);
-    validate_present(&old_keys, &columns, Side::Old)?;
-    validate_present(&new_keys, &columns, Side::New)?;
-    validate_unique_old(&old_keys)?;
-    validate_fanout(&old_keys, &KeyIndex::new(&new_keys))?;
+    validate_present(&old_keys, components, Side::Old)?;
+    validate_present(&new_keys, components, Side::New)?;
+    // Uniqueness and fanout are properties of the tuple rather than of any one
+    // component, so they blame the declared key entire.
+    let whole = || KeySubject::Key(components.iter().map(Component::named).collect());
+    validate_unique_old(&old_keys).map_err(|reason| KeyRejection {
+        subject: whole(),
+        reason,
+    })?;
+    validate_fanout(&old_keys, &KeyIndex::new(&new_keys)).map_err(|reason| KeyRejection {
+        subject: whole(),
+        reason,
+    })?;
 
     Ok(ResolvedKey {
         basis: KeyBasis::Declared,
@@ -130,6 +198,7 @@ pub(crate) fn resolve_key(
         old: old_keys,
         new: new_keys,
         overlap: None,
+        rejection: None,
     })
 }
 
@@ -176,21 +245,38 @@ pub(crate) mod testing {
     use arrow_array::RecordBatch;
 
     use super::{ColumnMap, ResolvedKey, declared_components};
-    use crate::{DiffError, DiffOptions};
+    use crate::{DiffError, DiffOptions, KeyRejection};
 
     /// Resolve a key from options alone, with no hints in play.
     ///
     /// Reconciliation resolves hints first and passes them in. Keeping this
     /// under the same name spares every test that predates hints from
     /// restating "and no hints" at each of its call sites.
+    ///
+    /// The `Err` is now only a `--key` string that could not be read;
+    /// everything the data refuses arrives as `ResolvedKey::rejection` on the
+    /// key that replaced it.
     pub(crate) fn resolve_key(
         old: &RecordBatch,
         new: &RecordBatch,
         options: &DiffOptions,
     ) -> Result<ResolvedKey, DiffError> {
-        let components = declared_components(&options.key)?;
+        let declared = declared_components(&options.key)?;
         let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
-        super::resolve_key(old, new, &components, &map)
+        Ok(super::resolve_key(old, new, &declared, &map))
+    }
+
+    /// Why the declared key was refused, for tests whose subject is that.
+    pub(crate) fn rejection(
+        old: &RecordBatch,
+        new: &RecordBatch,
+        key: &[&str],
+    ) -> Option<KeyRejection> {
+        let options = DiffOptions {
+            key: key.iter().map(|name| (*name).to_owned()).collect(),
+            hints: Vec::new(),
+        };
+        resolve_key(old, new, &options).unwrap().rejection
     }
 }
 
@@ -205,51 +291,41 @@ fn component_endpoints(
     new: &RecordBatch,
     component: &Component,
     hinted: &ColumnMap,
-) -> Result<(usize, usize), DiffError> {
+) -> Result<(usize, usize), KeyRejection> {
+    let missing = |side| component.rejected(RejectionReason::MissingColumn { side });
     let old_found = position(old, &component.old);
     let new_found = position(new, &component.new);
     let old_index = match (old_found, new_found) {
         (Some(index), _) => index,
         (None, Some(new_index)) => hinted
             .old_for_new(new_index)
-            .ok_or_else(|| missing_key_column(Side::Old, &component.old))?,
-        (None, None) => return Err(missing_key_column(Side::Old, &component.old)),
+            .ok_or_else(|| missing(Side::Old))?,
+        (None, None) => return Err(missing(Side::Old)),
     };
     let new_index = match new_found {
         Some(index) => index,
         None => hinted
             .new_for_old(old_index)
-            .ok_or_else(|| missing_key_column(Side::New, &component.new))?,
+            .ok_or_else(|| missing(Side::New))?,
     };
     Ok((old_index, new_index))
 }
 
 /// Reject a key whose components resolved to the same column twice.
-fn validate_distinct(columns: &[KeyColumn]) -> Result<(), DiffError> {
+fn validate_distinct(columns: &[KeyColumn], components: &[Component]) -> Result<(), KeyRejection> {
     let mut old_seen = HashSet::new();
     let mut new_seen = HashSet::new();
-    for column in columns {
-        if !old_seen.insert(column.old) {
-            return Err(DiffError::DuplicateKeyColumn {
-                side: Side::Old,
-                column: column.component.clone(),
-            });
-        }
-        if !new_seen.insert(column.new) {
-            return Err(DiffError::DuplicateKeyColumn {
-                side: Side::New,
-                column: column.component.clone(),
-            });
+    for (column, component) in columns.iter().zip(components) {
+        for (side, seen, index) in [
+            (Side::Old, &mut old_seen, column.old),
+            (Side::New, &mut new_seen, column.new),
+        ] {
+            if !seen.insert(index) {
+                return Err(component.rejected(RejectionReason::DuplicateColumn { side }));
+            }
         }
     }
     Ok(())
-}
-
-fn missing_key_column(side: Side, component: &str) -> DiffError {
-    DiffError::MissingKeyColumn {
-        side,
-        component: component.to_owned(),
-    }
 }
 
 fn position(table: &RecordBatch, name: &str) -> Option<usize> {
@@ -266,19 +342,14 @@ fn position(table: &RecordBatch, name: &str) -> Option<usize> {
 /// the two files wins, and freedom from fanout only settles a tie. A true key
 /// that duplicated one row is a better guess than a column that happens to be
 /// unique but identifies far fewer rows.
-fn guess_key(
-    old: &RecordBatch,
-    new: &RecordBatch,
-    hinted: &ColumnMap,
-) -> Result<ResolvedKey, DiffError> {
+fn guess_key(old: &RecordBatch, new: &RecordBatch, hinted: &ColumnMap) -> Option<ResolvedKey> {
     if old.num_rows() == 0 || new.num_rows() == 0 {
-        return Err(DiffError::MissingKey);
+        return None;
     }
 
     struct Candidate {
         old_index: usize,
         new_index: usize,
-        name: String,
         old_values: Vec<CanonicalValue>,
         new_values: Vec<CanonicalValue>,
         overlap: Overlap,
@@ -328,7 +399,6 @@ fn guess_key(
             best = Some(Candidate {
                 old_index,
                 new_index,
-                name: old_field.name().clone(),
                 old_values,
                 new_values,
                 overlap,
@@ -336,18 +406,16 @@ fn guess_key(
         }
     }
 
-    let Some(candidate) = best else {
-        return Err(DiffError::MissingKey);
-    };
-    Ok(ResolvedKey {
+    let candidate = best?;
+    Some(ResolvedKey {
         basis: KeyBasis::Guessed,
         columns: vec![KeyColumn {
-            component: candidate.name,
             old: candidate.old_index,
             new: candidate.new_index,
         }],
         old: single_component_rows(candidate.old_values),
         new: single_component_rows(candidate.new_values),
+        rejection: None,
         overlap: Some(KeyOverlap {
             shared: candidate.overlap.shared,
             // Distinct keys on each side. `old` is unique, so its distinct
@@ -453,24 +521,82 @@ fn first_occurrences<'a>(
     })
 }
 
-/// One declared key component and the column it names on each side.
 /// One declared key component, parsed but not yet resolved to columns.
 ///
 /// Owned rather than borrowed because components are parsed before hints are
 /// considered and resolved after, so they outlive the strings they came from.
 pub(crate) struct Component {
-    /// The component as the user wrote it, for messages about the pair.
-    spelling: String,
     old: String,
     new: String,
 }
 
+impl Component {
+    /// The two columns this component names, which parsing knows whether or
+    /// not either of them turns out to exist.
+    fn named(&self) -> KeyComponent {
+        KeyComponent {
+            old: self.old.clone(),
+            new: self.new.clone(),
+        }
+    }
+
+    /// This component refused, for a reason that is its own fault.
+    fn rejected(&self, reason: RejectionReason) -> KeyRejection {
+        KeyRejection {
+            subject: KeySubject::Component(self.named()),
+            reason,
+        }
+    }
+}
+
+/// The component naming the key that matches rows by position.
+///
+/// Reserved rather than looked up. A bare name in this format is letters,
+/// digits and underscores and never begins with `#`, so this cannot collide
+/// with any column the output writes bare; a column genuinely called `#row`
+/// prints quoted and stays distinguishable, at the cost of never being
+/// declarable as a key itself.
+pub const POSITIONAL_COMPONENT: &str = "#row";
+
+/// What `--key` asked for, once parsed.
+pub(crate) enum Declared {
+    /// No `--key` at all, so a key is to be guessed.
+    Guess,
+    /// `--key '#row'`: match rows by position, deliberately.
+    Positional,
+    Components(Vec<Component>),
+}
+
+impl Declared {
+    /// The components to claim identities from, of which a positional key has
+    /// none.
+    pub(crate) fn components(&self) -> &[Component] {
+        match self {
+            Declared::Components(components) => components,
+            Declared::Guess | Declared::Positional => &[],
+        }
+    }
+}
+
 /// Parse each component and check that no column is claimed twice.
+///
+/// This is the only stage of key resolution that still fails outright, because
+/// it is the only one whose failures are faults in the `--key` string rather
+/// than in what the data can support. Everything below it produces a
+/// `KeyRejection` and falls back.
 ///
 /// Uniqueness is a property of the endpoints rather than of the component
 /// string: `id,id/other` claims `id` on the old side twice while spelling its
 /// components differently, and `a/b,c/b` claims `b` on the new side twice.
-pub(crate) fn declared_components(keys: &[String]) -> Result<Vec<Component>, DiffError> {
+pub(crate) fn declared_components(keys: &[String]) -> Result<Declared, DiffError> {
+    if keys.iter().any(|key| key == POSITIONAL_COMPONENT) {
+        // A positional key is the whole key or none of it: there is nothing for
+        // a column to compound with.
+        if keys.len() > 1 {
+            return Err(DiffError::CompoundPositionalKey);
+        }
+        return Ok(Declared::Positional);
+    }
     let mut old_seen = HashSet::new();
     let mut new_seen = HashSet::new();
     let mut components = Vec::with_capacity(keys.len());
@@ -487,6 +613,11 @@ pub(crate) fn declared_components(keys: &[String]) -> Result<Vec<Component>, Dif
         if old.is_empty() || new.is_empty() {
             return Err(DiffError::EmptyKeyComponent);
         }
+        // Reaching here means the spelling is not `#row` alone, so an endpoint
+        // naming it is one half of a pair, which has no reading.
+        if old == POSITIONAL_COMPONENT || new == POSITIONAL_COMPONENT {
+            return Err(DiffError::CompoundPositionalKey);
+        }
         if !old_seen.insert(old) {
             return Err(DiffError::DuplicateKeyColumn {
                 side: Side::Old,
@@ -500,12 +631,15 @@ pub(crate) fn declared_components(keys: &[String]) -> Result<Vec<Component>, Dif
             });
         }
         components.push(Component {
-            spelling: spelling.clone(),
             old: old.to_owned(),
             new: new.to_owned(),
         });
     }
-    Ok(components)
+    Ok(if components.is_empty() {
+        Declared::Guess
+    } else {
+        Declared::Components(components)
+    })
 }
 
 fn transpose(rows: usize, columns: &[Vec<CanonicalValue>]) -> Vec<Vec<CanonicalValue>> {
@@ -516,17 +650,14 @@ fn transpose(rows: usize, columns: &[Vec<CanonicalValue>]) -> Vec<Vec<CanonicalV
 
 fn validate_present(
     keys: &[Vec<CanonicalValue>],
-    columns: &[KeyColumn],
+    components: &[Component],
     side: Side,
-) -> Result<(), DiffError> {
+) -> Result<(), KeyRejection> {
     for (row, key) in keys.iter().enumerate() {
-        for (component, value) in key.iter().enumerate() {
+        for (position, value) in key.iter().enumerate() {
             if value.invalid_key() {
-                return Err(DiffError::InvalidKeyValue {
-                    side,
-                    component: columns[component].component.clone(),
-                    row: row + 1,
-                });
+                return Err(components[position]
+                    .rejected(RejectionReason::InvalidValue { side, row: row + 1 }));
             }
         }
     }
@@ -539,12 +670,12 @@ fn validate_present(
 /// aggregation, a deduplication, or an arbitrary pairing, so old-side
 /// duplication stays fatal. It is also what makes the fanout rate well defined,
 /// and is therefore checked first.
-fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), DiffError> {
+fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), RejectionReason> {
     let index = KeyIndex::new(keys);
     for (row, key) in keys.iter().enumerate() {
         let first = index.rows(key).next().expect("a row matches its own key");
         if first != row {
-            return Err(DiffError::NonUniqueOldKey {
+            return Err(RejectionReason::NonUniqueOld {
                 first_row: first + 1,
                 row: row + 1,
             });
@@ -562,7 +693,10 @@ fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), DiffError> {
 /// fanout, so it contributes to neither count and cannot invalidate the key;
 /// with no shared keys at all both counts are zero, which is the design's
 /// convention that the rate is then zero.
-fn validate_fanout(old_keys: &[Vec<CanonicalValue>], new: &KeyIndex) -> Result<(), DiffError> {
+fn validate_fanout(
+    old_keys: &[Vec<CanonicalValue>],
+    new: &KeyIndex,
+) -> Result<(), RejectionReason> {
     let mut shared = 0;
     let mut affected = 0;
     for key in old_keys {
@@ -576,7 +710,7 @@ fn validate_fanout(old_keys: &[Vec<CanonicalValue>], new: &KeyIndex) -> Result<(
         }
     }
     if !within_fanout_limit(affected, shared) {
-        return Err(DiffError::ExcessiveFanout { affected, shared });
+        return Err(RejectionReason::ExcessiveFanout { affected, shared });
     }
     Ok(())
 }
@@ -593,14 +727,45 @@ fn within_fanout_limit(affected: usize, shared: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use arrow_array::RecordBatch;
     use test_support::{rows_without_columns, table};
 
-    use super::testing::resolve_key;
-    use super::{KeyIndex, Overlap, candidate_overlap};
+    use super::testing::{rejection, resolve_key};
+    use super::{
+        KeyIndex, Overlap, candidate_overlap, declared_components, validate_fanout,
+        validate_unique_old,
+    };
     #[cfg(test)]
     use crate::DiffOptions;
     use crate::compare::{CanonicalValue, stable_hash};
-    use crate::{DiffError, KeyBasis, KeyOverlap, Side};
+    use crate::{
+        DiffError, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject, RejectionReason,
+        Side,
+    };
+
+    /// One component naming the same column on both sides.
+    fn shared(name: &str) -> KeyComponent {
+        KeyComponent {
+            old: name.to_owned(),
+            new: name.to_owned(),
+        }
+    }
+
+    /// One component naming a column that differs between the files.
+    fn paired(old: &str, new: &str) -> KeyComponent {
+        KeyComponent {
+            old: old.to_owned(),
+            new: new.to_owned(),
+        }
+    }
+
+    /// The old-side name of one resolved key component.
+    fn key_name(old: &RecordBatch, key: &super::ResolvedKey, component: usize) -> String {
+        old.schema()
+            .field(key.columns[component].old)
+            .name()
+            .clone()
+    }
 
     fn options(key: &[&str]) -> DiffOptions {
         DiffOptions {
@@ -610,12 +775,79 @@ mod tests {
     }
 
     #[test]
+    fn the_positional_component_is_a_whole_key_or_none_of_it() {
+        // A positional key has no components to compound with, so both the
+        // compound and the paired form are faults in the --key string itself.
+        for key in [&["id", "#row"][..], &["#row", "id"][..], &["id/#row"][..]] {
+            assert!(matches!(
+                declared_components(&key.iter().map(|k| (*k).to_owned()).collect::<Vec<_>>()),
+                Err(DiffError::CompoundPositionalKey)
+            ));
+        }
+    }
+
+    #[test]
+    fn the_positional_key_satisfies_what_row_matching_assumes() {
+        let old = table! { "label" => ["x", "x", "x"] };
+        let new = table! { "label" => ["x", "x"] };
+
+        let key = resolve_key(&old, &new, &options(&["#row"])).unwrap();
+
+        // One key per row, distinct and therefore unique in `old` and incapable
+        // of fanout, and no rejection because there is nothing to validate.
+        assert_eq!(key.basis, KeyBasis::Declared);
+        assert!(key.columns.is_empty());
+        assert_eq!(key.old.len(), 3);
+        assert_eq!(key.new.len(), 2);
+        assert_eq!(key.old[..2], key.new[..]);
+        assert!(key.rejection.is_none());
+        assert!(validate_unique_old(&key.old).is_ok());
+        assert!(validate_fanout(&key.old, &KeyIndex::new(&key.new)).is_ok());
+    }
+
+    #[test]
+    fn a_refused_declaration_falls_through_to_a_guess_and_keeps_its_reason() {
+        let old = table! { "id" => [1, 1], "other" => [7, 8] };
+        let new = table! { "id" => [1, 1], "other" => [7, 8] };
+
+        // `id` repeats in `old`, so it is refused as declared and is equally
+        // ineligible as a guess; `other` identifies rows and is guessed instead.
+        let key = resolve_key(&old, &new, &options(&["id"])).unwrap();
+
+        assert_eq!(key.basis, KeyBasis::Guessed);
+        assert_eq!(key_name(&old, &key, 0), "other");
+        assert_eq!(
+            key.rejection,
+            Some(KeyRejection {
+                subject: KeySubject::Key(vec![shared("id")]),
+                reason: RejectionReason::NonUniqueOld {
+                    first_row: 1,
+                    row: 2,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_refused_declaration_reaches_position_when_no_guess_survives() {
+        let old = table! { "id" => [1, 1] };
+        let new = table! { "id" => [1, 1] };
+
+        let key = resolve_key(&old, &new, &options(&["id"])).unwrap();
+
+        assert_eq!(key.basis, KeyBasis::Fallback);
+        assert!(key.columns.is_empty());
+        assert!(key.rejection.is_some());
+    }
+
+    #[test]
     fn validates_key_syntax() {
         let empty = table! {};
-        assert!(matches!(
-            resolve_key(&empty, &empty, &options(&[])),
-            Err(DiffError::MissingKey)
-        ));
+        // Nothing to guess from, so the chain reaches its last resort.
+        assert_eq!(
+            resolve_key(&empty, &empty, &options(&[])).unwrap().basis,
+            KeyBasis::Fallback
+        );
         assert!(matches!(
             resolve_key(&empty, &empty, &options(&[""])),
             Err(DiffError::EmptyKeyComponent)
@@ -649,7 +881,7 @@ mod tests {
         let key = resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap();
 
         assert_eq!(key.basis, KeyBasis::Declared);
-        assert_eq!(key.columns[0].component, "customer_id/id");
+        assert_eq!(key_name(&old, &key, 0), "customer_id");
         assert_eq!((key.columns[0].old, key.columns[0].new), (0, 0));
     }
 
@@ -701,12 +933,14 @@ mod tests {
         let old = table! { "customer_id" => [1] };
         let new = table! { "other" => [1] };
 
+        // The subject is the component as written, and the side says which of
+        // its two ends could not be found.
         assert_eq!(
-            resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap_err(),
-            DiffError::MissingKeyColumn {
-                side: Side::New,
-                component: "id".into(),
-            }
+            rejection(&old, &new, &["customer_id/id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Component(paired("customer_id", "id")),
+                reason: RejectionReason::MissingColumn { side: Side::New },
+            })
         );
     }
 
@@ -716,12 +950,14 @@ mod tests {
         let new = table! { "id" => [1] };
 
         assert_eq!(
-            resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap_err(),
-            DiffError::IncompatibleKeyTypes {
-                component: "customer_id/id".into(),
-                old_type: "Boolean".into(),
-                new_type: "Int64".into(),
-            }
+            rejection(&old, &new, &["customer_id/id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Component(paired("customer_id", "id")),
+                reason: RejectionReason::IncompatibleTypes {
+                    old_type: "Boolean".into(),
+                    new_type: "Int64".into(),
+                },
+            })
         );
     }
 
@@ -747,11 +983,11 @@ mod tests {
         let old = table! { "id" => [1] };
         let new = table! { "other" => [1] };
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::MissingKeyColumn {
-                side: Side::New,
-                component: "id".into(),
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Component(shared("id")),
+                reason: RejectionReason::MissingColumn { side: Side::New },
+            })
         );
     }
 
@@ -760,8 +996,11 @@ mod tests {
         let old = table! { "id" => [true] };
         let new = table! { "id" => [1] };
         assert!(matches!(
-            resolve_key(&old, &new, &options(&["id"])),
-            Err(DiffError::IncompatibleKeyTypes { .. })
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                reason: RejectionReason::IncompatibleTypes { .. },
+                ..
+            })
         ));
     }
 
@@ -770,19 +1009,24 @@ mod tests {
         let old = table! { "id" => [Some(1.0), None] };
         let new = table! { "id" => [1.0, 2.0] };
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::InvalidKeyValue {
-                side: Side::Old,
-                component: "id".into(),
-                row: 2,
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Component(shared("id")),
+                reason: RejectionReason::InvalidValue {
+                    side: Side::Old,
+                    row: 2,
+                },
+            })
         );
 
         let old = table! { "id" => [f64::NAN] };
         let new = table! { "id" => [1.0] };
         assert!(matches!(
-            resolve_key(&old, &new, &options(&["id"])),
-            Err(DiffError::InvalidKeyValue { .. })
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                reason: RejectionReason::InvalidValue { .. },
+                ..
+            })
         ));
     }
 
@@ -790,12 +1034,16 @@ mod tests {
     fn uniqueness_uses_cross_type_canonicalization() {
         let old = table! { "id" => ["1", "1.0"] };
         let new = table! { "id" => [1, 2] };
+        // Uniqueness belongs to the tuple, so the whole declared key is named.
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::NonUniqueOldKey {
-                first_row: 1,
-                row: 2,
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Key(vec![shared("id")]),
+                reason: RejectionReason::NonUniqueOld {
+                    first_row: 1,
+                    row: 2,
+                },
+            })
         );
     }
 
@@ -817,11 +1065,14 @@ mod tests {
         let new = table! { "id" => [1, 1, 2] };
 
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::ExcessiveFanout {
-                affected: 1,
-                shared: 2,
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Key(vec![shared("id")]),
+                reason: RejectionReason::ExcessiveFanout {
+                    affected: 1,
+                    shared: 2,
+                },
+            })
         );
     }
 
@@ -832,7 +1083,7 @@ mod tests {
 
         // Three new rows for one key is still one affected key; counting rows
         // would make this 20% and reject it.
-        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+        assert!(rejection(&old, &new, &["id"]).is_none());
     }
 
     #[test]
@@ -843,11 +1094,14 @@ mod tests {
         // One of five shared keys is 20% and rejects; one of twenty old keys
         // would be 5% and would wrongly retain.
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::ExcessiveFanout {
-                affected: 1,
-                shared: 5,
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Key(vec![shared("id")]),
+                reason: RejectionReason::ExcessiveFanout {
+                    affected: 1,
+                    shared: 5,
+                },
+            })
         );
     }
 
@@ -858,7 +1112,7 @@ mod tests {
 
         // A key absent from `old` has no row to fan out from, so however often
         // it repeats it cannot invalidate the declared key.
-        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+        assert!(rejection(&old, &new, &["id"]).is_none());
     }
 
     #[test]
@@ -866,7 +1120,7 @@ mod tests {
         let old = table! { "id" => [1] };
         let new = table! { "id" => [2, 2] };
 
-        assert!(resolve_key(&old, &new, &options(&["id"])).is_ok());
+        assert!(rejection(&old, &new, &["id"]).is_none());
     }
 
     #[test]
@@ -874,12 +1128,16 @@ mod tests {
         let old = table! { "id" => [1, 1] };
         let new = table! { "id" => [1, 1] };
 
+        // Uniqueness belongs to the tuple, so the whole declared key is named.
         assert_eq!(
-            resolve_key(&old, &new, &options(&["id"])).unwrap_err(),
-            DiffError::NonUniqueOldKey {
-                first_row: 1,
-                row: 2,
-            }
+            rejection(&old, &new, &["id"]),
+            Some(KeyRejection {
+                subject: KeySubject::Key(vec![shared("id")]),
+                reason: RejectionReason::NonUniqueOld {
+                    first_row: 1,
+                    row: 2,
+                },
+            })
         );
     }
 
@@ -898,7 +1156,7 @@ mod tests {
 
         // "id" is the obvious identity and comes first, but its one shared key
         // is duplicated, and 100% is far above the bound.
-        assert_eq!(key.columns[0].component, "other");
+        assert_eq!(key_name(&old, &key, 0), "other");
     }
 
     #[test]
@@ -917,7 +1175,7 @@ mod tests {
         // "status" repeats in `old` and can never identify rows, so the only
         // candidate left is one that fans out.
         assert_eq!(key.basis, KeyBasis::Guessed);
-        assert_eq!(key.columns[0].component, "id");
+        assert_eq!(key_name(&old, &key, 0), "id");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -942,7 +1200,7 @@ mod tests {
 
         // "a" identifies twelve rows and duplicated one; "b" is spotless but
         // identifies five. The evidence wins.
-        assert_eq!(key.columns[0].component, "a");
+        assert_eq!(key_name(&old, &key, 0), "a");
     }
 
     #[test]
@@ -960,7 +1218,7 @@ mod tests {
 
         // Both share ten keys and "a" comes first, so the tie-break is what
         // chooses the candidate that does not fan out.
-        assert_eq!(key.columns[0].component, "b");
+        assert_eq!(key_name(&old, &key, 0), "b");
     }
 
     #[test]
@@ -979,7 +1237,7 @@ mod tests {
         // "a" shares ten keys over twelve matching rows because one key repeats
         // three times; "b" shares eleven over eleven. Counting rows would pick
         // "a" whatever the column order, and counting keys picks "b".
-        assert_eq!(key.columns[0].component, "b");
+        assert_eq!(key_name(&old, &key, 0), "b");
     }
 
     #[test]
@@ -991,7 +1249,7 @@ mod tests {
 
         // Key 3 is absent from `old`, so its rows are additions rather than a
         // fanout and the candidate is unaffected by them.
-        assert_eq!(key.columns[0].component, "id");
+        assert_eq!(key_name(&old, &key, 0), "id");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -1016,7 +1274,7 @@ mod tests {
 
         // Two of ten shared keys is 20%, so "id" is ineligible rather than
         // merely outranked; "other" shares the same ten keys cleanly.
-        assert_eq!(key.columns[0].component, "other");
+        assert_eq!(key_name(&old, &key, 0), "other");
     }
 
     #[test]
@@ -1065,10 +1323,9 @@ mod tests {
         let empty = table! { "id" => i64[] };
         let rows = table! { "id" => [1] };
         for (old, new) in [(&empty, &rows), (&rows, &empty), (&empty, &empty)] {
-            assert!(matches!(
-                resolve_key(old, new, &options(&[])),
-                Err(DiffError::MissingKey)
-            ));
+            let key = resolve_key(old, new, &options(&[])).unwrap();
+            assert_eq!(key.basis, KeyBasis::Fallback);
+            assert!(key.columns.is_empty());
         }
     }
 
@@ -1087,7 +1344,7 @@ mod tests {
 
         assert_eq!(key.basis, KeyBasis::Guessed);
         assert_eq!(key.columns.len(), 1);
-        assert_eq!(key.columns[0].component, "id");
+        assert_eq!(key_name(&old, &key, 0), "id");
         assert_eq!((key.columns[0].old, key.columns[0].new), (1, 1));
         assert_eq!(
             key.overlap,
@@ -1143,10 +1400,10 @@ mod tests {
             "disjoint" => [3, 4],
         };
 
-        assert!(matches!(
-            resolve_key(&old, &new, &options(&[])),
-            Err(DiffError::MissingKey)
-        ));
+        assert_eq!(
+            resolve_key(&old, &new, &options(&[])).unwrap().basis,
+            KeyBasis::Fallback
+        );
     }
 
     #[test]
@@ -1162,7 +1419,7 @@ mod tests {
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(key.columns[0].component, "full");
+        assert_eq!(key_name(&old, &key, 0), "full");
         assert_eq!(
             key.overlap,
             Some(KeyOverlap {
@@ -1179,7 +1436,7 @@ mod tests {
 
         let key = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(key.columns[0].component, "b");
+        assert_eq!(key_name(&old, &key, 0), "b");
         assert_eq!((key.columns[0].old, key.columns[0].new), (0, 1));
     }
 
@@ -1203,10 +1460,11 @@ mod tests {
     fn rows_without_columns_leave_nothing_to_guess() {
         let old = rows_without_columns(2);
 
-        assert!(matches!(
-            resolve_key(&old, &old, &options(&[])),
-            Err(DiffError::MissingKey)
-        ));
+        // No column can be a candidate, so rows are matched by position.
+        let key = resolve_key(&old, &old, &options(&[])).unwrap();
+        assert_eq!(key.basis, KeyBasis::Fallback);
+        assert_eq!(key.old.len(), 2);
+        assert_eq!(key.old, key.new);
     }
 
     #[test]
@@ -1236,7 +1494,7 @@ mod tests {
         // "strong" shares all three values and "weak" only one, so guessing
         // would choose the other column; a declaration is never compared.
         assert_eq!(key.basis, KeyBasis::Declared);
-        assert_eq!(key.columns[0].component, "weak");
+        assert_eq!(key_name(&old, &key, 0), "weak");
         assert_eq!(key.overlap, None);
     }
 
@@ -1254,7 +1512,7 @@ mod tests {
         let first = resolve_key(&old, &new, &options(&[])).unwrap();
         let second = resolve_key(&old, &new, &options(&[])).unwrap();
 
-        assert_eq!(first.columns[0].component, second.columns[0].component);
+        assert_eq!(first.columns[0].old, second.columns[0].old);
         assert_eq!(first.overlap, second.overlap);
         assert_eq!(first.old, second.old);
         assert_eq!(first.new, second.new);

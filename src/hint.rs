@@ -655,7 +655,8 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        let claimed = crate::key::claimed_identities(schema(old), schema(new), &components);
+        let claimed =
+            crate::key::claimed_identities(schema(old), schema(new), components.components());
         resolve(schema(old), schema(new), &spellings, claimed)
     }
 
