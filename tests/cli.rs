@@ -95,8 +95,8 @@ fn falls_back_to_row_position_when_nothing_can_be_guessed() {
     let dir = common::TempDir::new();
     let old_path = dir.path().join("old.parquet");
     let new_path = dir.path().join("new.parquet");
-    let old = table! { "id" => [1, 2] };
-    let new = table! { "id" => [3, 4] };
+    let old = table! { "id" => [1, 1, 2, 3] };
+    let new = table! { "id" => [1, 1, 4, 5] };
     common::write_parquet(&old_path, &old);
     common::write_parquet(&new_path, &new);
 
@@ -105,13 +105,85 @@ fn falls_back_to_row_position_when_nothing_can_be_guessed() {
         .output()
         .expect("failed to run data-diff");
 
-    // The two files share no key value, so nothing can be guessed and rows are
-    // paired by position instead. Nothing went wrong, so there is no separator.
+    // The column repeats a value, so nothing can be guessed and rows are
+    // paired by position instead. Nothing went wrong, so there is no
+    // separator; and exactly half the cells changed, which is the most the
+    // fallback reports as edits rather than as a regeneration.
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([#row], basis: fallback)
     col_edit(id, changes: 2)
+    ");
+}
+
+#[test]
+fn an_implausible_guess_is_retracted_and_reported() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "a" => [1, 2, 3, 4],
+        "b" => [10, 20, 30, 40],
+        "x" => [5, 6, 7, 8],
+    };
+    let new = table! {
+        "a" => [4, 3, 2, 1],
+        "b" => [10, 20, 30, 40],
+        "x" => [5, 6, 7, 8],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .output()
+        .expect("failed to run data-diff");
+
+    // "a" wins the first guess and is withdrawn by its own diff: matching by
+    // it reverses the rows and makes every other cell disagree. The
+    // retraction is a problem, above the separator, and the next candidate
+    // tells the plausible story.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    key_retracted([a], reason: excessive_change)
+    ----
+    col_key([b], basis: guessed, overlap: 1.00)
+    col_edit(a, changes: 4)
+    ");
+}
+
+#[test]
+fn wholesale_change_without_a_key_reports_a_regeneration() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "tag" => ["p", "p"],
+        "v" => [1, 2],
+    };
+    let new = table! {
+        "tag" => ["q", "q"],
+        "v" => [3, 4],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .output()
+        .expect("failed to run data-diff");
+
+    // Nothing identifies a row and every cell disagrees, so a row story would
+    // describe the positional matching rather than the data. Nothing went
+    // wrong — regeneration is a finding, not a problem, so there is no
+    // separator.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([#row], basis: fallback)
+    table_regenerate()
     ");
 }
 

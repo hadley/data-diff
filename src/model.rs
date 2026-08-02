@@ -358,6 +358,36 @@ pub struct KeyDiff {
     /// A declared key this data could not support, which is why the basis is
     /// not `Declared`.
     pub rejection: Option<KeyRejection>,
+    /// A guessed key the tool itself withdrew, which this key replaced.
+    pub retraction: Option<KeyRetraction>,
+}
+
+/// A guessed key the tool withdrew after seeing the diff it produced.
+///
+/// Not a [`KeyRejection`]: a rejected key is a declaration the data could not
+/// support, refused before any row was matched, while a retracted key validated
+/// and was then judged by its own diff. The mass holds the measurement the
+/// `key_retracted()` line omits, as a rejection's variants hold their detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRetraction {
+    /// The retracted key's components, named as the key line named them.
+    pub columns: Vec<KeyComponent>,
+    /// The measurement that condemned it.
+    pub mass: ChangeMass,
+}
+
+/// How much of the two files a diff accounts as changed.
+///
+/// Cell-denominated and symmetric: a dropped or added row contributes its whole
+/// width once, and a changed matched cell exists in both files and contributes
+/// two. Fanout groups are outside both counts, and under the fallback basis
+/// added rows are read as appended and leave `changed` while staying in
+/// `total`. Exact counts rather than a ratio, so the model stays `Eq` and the
+/// threshold is applied where it is defined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeMass {
+    pub changed: usize,
+    pub total: usize,
 }
 
 /// A declared key that could not be used, and what about it failed.
@@ -563,6 +593,12 @@ pub struct Diff {
     pub summary: EditSummary,
     /// Instructions declined and ambiguities left unresolved.
     pub issues: Vec<Issue>,
+    /// Set when the diff is not credible as a story of edits: change outweighs
+    /// sameness under a key the tool chose rather than the user. The human
+    /// format then writes `table_regenerate()` in place of the row-level
+    /// findings; everything underneath — cells, summary, row events — is still
+    /// computed and held here.
+    pub regeneration: Option<ChangeMass>,
 }
 
 #[cfg(test)]

@@ -25,11 +25,13 @@ data-diff old.parquet new.parquet --key customer_id,date
 
 Otherwise `data-diff` guesses, taking the single column that identifies the most rows across both files. Where nothing can identify a row, it matches them by position and says so; `--key '#row'` asks for that key directly, which is a whole key and cannot be combined with a column. The key line always says which key was used and, for a guess, how much of the data it accounts for, so you can see whether to override it.
 
+A key `data-diff` chose for itself is also judged by the diff it produces, once. If the first pass's rename inference identifies a better candidate (e.g. a renamed column) the key is reconsidered. A guess whose diff changes more than half of the two files' cells is not believed: it is retracted, reported as `key_retracted([column], reason: excessive_change)`, and the comparison reruns on the next candidate or on row position. A key you declared is never second-guessed.
+
 A key you declare can turn out not to identify rows --- it repeats a value, names a column one file lacks, or fans out too broadly. That is reported rather than fatal, and the comparison continues on whatever can identify rows instead:
 
 ```console
 data-diff old.parquet new.parquet --key customer_id/id
-> key_invalid([customer_id/id], reason: non_unique_old)
+> key_invalid([customer_id -> id], reason: non_unique_old)
 > ----
 > col_key([#row], basis: fallback)
 > col_rename(customer_id -> id, basis: declared)
@@ -84,7 +86,9 @@ Output goes to stdout, one operation per line:
 | `row_edit(idx, changes: n)` | a row whose non-key values changed, and how many cells |
 | `row_fanout(old_idx -> [new_idx, ...])` | one old row that several new rows share a key with |
 | `row_order(old_idx -> new_idx)` | the fewest rows that must move to explain the new order |
+| `table_regenerate()` | the new file is not usefully described as an edit of the old |
 | `key_invalid(subject, reason: why)` | a declared key this data could not support |
+| `key_retracted([column], reason: why)` | a guessed key withdrawn after the diff it produced |
 | `hint_ignored(hint, reason: why)` | an instruction that was declined |
 
 Every edit says how much changed. `changes` counts the cells the event stands for: for a column, the rows it differs in; for a row, the columns it differs in. A row edit and a column edit that cross both count the cell they share, so the numbers describe their own row and their own column rather than adding up to the total. A type-only edit has no cells to count and carries no number.
@@ -95,7 +99,9 @@ A key's `basis` is one of three: `declared` for a `--key` you supplied, `guessed
 
 `key_invalid()` names one component where resolving it failed on its own account, and the whole declared key, bracketed, where uniqueness or fanout failed --- those being properties of the tuple rather than of any column in it. The reason is one of `missing_column`, `incompatible_types`, `duplicate_column`, `invalid_value`, `non_unique_old`, and `excessive_fanout`, and it is the one that stopped validation rather than every one that might apply.
 
-Anything that went wrong comes first --- a rejected key, a declined hint --- then a `----` line, then what the comparison found. With nothing to report there is no separator and the output opens on the key line.
+When more than half of the cells change under a guessed or fallback key, the row story is withheld and `table_regenerate()` stands in for it: row events and value counts would describe a matching the tool no longer believes, so only what follows from schemas and identities is kept --- the key line, renames, column adds, drops, order, and type changes. A declared key is exempt: you vouched for the matching, so the edits are reported in full.
+
+Anything that went wrong comes first --- a rejected key, a retracted guess, a declined hint --- then a `----` line, then what the comparison found. With nothing to report there is no separator and the output opens on the key line.
 
 A name is quoted only when it has to be: an ordinary one --- letters, digits and underscores, not starting with a digit --- is written bare, so quotes mark a name with something in it worth noticing. Coordinates are one-based, counting positions in the original files. A column is named as the new file names it, except where only the old file has it. When nothing changed, `no_changes()` follows the key line.
 

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crate::{
     ColumnSchema, Diff, HintClaim, HintNames, Issue, IssueKind, KeyBasis, KeyComponent,
-    KeyRejection, KeySubject, POSITIONAL_COMPONENT,
+    KeyRejection, KeyRetraction, KeySubject, POSITIONAL_COMPONENT,
 };
 
 /// The line dividing what went wrong from what was found.
@@ -24,6 +24,13 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     // the issues is what spares the two from needing a common ordering.
     if let Some(rejection) = &diff.key.rejection {
         operations.push(key_rejection(rejection));
+    }
+    // A retracted guess follows the rejection it may sit beside, keeping the
+    // problems in the order they arose: the declaration was refused first, the
+    // guess withdrawn after. A key superseded by a better-informed one prints
+    // nothing here — nothing went wrong, and the key line tells that story.
+    if let Some(retraction) = &diff.key.retraction {
+        operations.push(key_retraction(retraction));
     }
     for issue in &diff.issues {
         operations.push(issue_context(issue));
@@ -76,6 +83,15 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             column_name(&diff.schemas.new, new)
         ));
     }
+    // A regenerated table withholds the row story. Every line below this point
+    // is conditional on a row matching the tool has just declared
+    // untrustworthy — which rows exist, which cells changed, what moved — so
+    // enumerating them would describe the matching rather than the data. What
+    // stayed above is everything derived from schemas and identities. Value
+    // counts go with the story, so a column edit that also changed type prints
+    // its type alone. The model underneath holds everything regardless.
+    let regenerated = diff.regeneration.is_some();
+
     // A count is every changed cell in the column, so a row edit crossing it
     // counts the cell they share too. The two numbers describe their own row and
     // their own column rather than dividing the change between them, which is
@@ -84,6 +100,9 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     // A type-only edit has nothing to count and says nothing: `changes: 0` would
     // be a zero to interpret where an absence can be read past.
     for edit in &diff.summary.columns {
+        if regenerated && !edit.type_changed {
+            continue;
+        }
         let (old, new) = edit.column.positions();
         let mut details = Vec::new();
         if edit.type_changed {
@@ -93,7 +112,7 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
                 column_type(&diff.schemas.new, new)
             ));
         }
-        if edit.changes > 0 {
+        if edit.changes > 0 && !regenerated {
             details.push(format!("changes: {}", edit.changes));
         }
         let suffix = if details.is_empty() {
@@ -107,43 +126,50 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
         ));
     }
 
-    for &position in &diff.rows.dropped {
-        operations.push(format!("row_drop({position})"));
-    }
-    for &position in &diff.rows.added {
-        operations.push(format!("row_add({position})"));
-    }
-    for event in &diff.rows.fanout {
-        // The coordinates cannot say how far the new rows differ from the old
-        // one, so the count does; the cells themselves are never enumerated.
-        // What it counts is comparisons rather than cells of one table, a
-        // one-to-many event having no single cell to point at: two new rows
-        // disagreeing in the same column is two.
-        let suffix = if event.cells.is_empty() {
-            String::new()
-        } else {
-            format!(", changes: {}", event.cells.len())
-        };
-        let targets = event
-            .new
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        operations.push(format!("row_fanout({} -> [{targets}]{suffix})", event.old));
-    }
-    for coordinate in &diff.order.rows {
-        let (old, new) = coordinate.positions();
-        operations.push(format!("row_order({old} -> {new})"));
-    }
-    for edit in &diff.summary.rows {
-        let (old, new) = edit.row.positions();
-        let row = if old == new {
-            format!("{old}")
-        } else {
-            format!("{old} -> {new}")
-        };
-        operations.push(format!("row_edit({row}, changes: {})", edit.changes));
+    if regenerated {
+        // No arguments: the subject is the table itself, and the measurement
+        // lives in `Diff::regeneration` as a rejection's detail lives in its
+        // variant.
+        operations.push("table_regenerate()".to_owned());
+    } else {
+        for &position in &diff.rows.dropped {
+            operations.push(format!("row_drop({position})"));
+        }
+        for &position in &diff.rows.added {
+            operations.push(format!("row_add({position})"));
+        }
+        for event in &diff.rows.fanout {
+            // The coordinates cannot say how far the new rows differ from the
+            // old one, so the count does; the cells themselves are never
+            // enumerated. What it counts is comparisons rather than cells of
+            // one table, a one-to-many event having no single cell to point
+            // at: two new rows disagreeing in the same column is two.
+            let suffix = if event.cells.is_empty() {
+                String::new()
+            } else {
+                format!(", changes: {}", event.cells.len())
+            };
+            let targets = event
+                .new
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            operations.push(format!("row_fanout({} -> [{targets}]{suffix})", event.old));
+        }
+        for coordinate in &diff.order.rows {
+            let (old, new) = coordinate.positions();
+            operations.push(format!("row_order({old} -> {new})"));
+        }
+        for edit in &diff.summary.rows {
+            let (old, new) = edit.row.positions();
+            let row = if old == new {
+                format!("{old}")
+            } else {
+                format!("{old} -> {new}")
+            };
+            operations.push(format!("row_edit({row}, changes: {})", edit.changes));
+        }
     }
 
     if operations.len() == context {
@@ -223,6 +249,23 @@ fn key_rejection(rejection: &KeyRejection) -> String {
     format!(
         "key_invalid({subject}, reason: {})",
         rejection.reason.name()
+    )
+}
+
+/// Render a guessed key the tool withdrew after seeing the diff it produced.
+///
+/// Always bracketed: implausibility is a judgement about the key entire, like
+/// uniqueness and fanout, however many columns the key had. The measurement
+/// that condemned it stays in the model, as a rejection's detail does.
+fn key_retraction(retraction: &KeyRetraction) -> String {
+    format!(
+        "key_retracted([{}], reason: excessive_change)",
+        retraction
+            .columns
+            .iter()
+            .map(component_name)
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
@@ -489,6 +532,26 @@ mod tests {
             // declined rather than obeyed — and its reason is the one field the
             // fixtures above never reached.
             render_hinted(&flagged_old, &flagged_new, &["col_rename(flag -> count)"]),
+            // A retracted guess and a regenerated table are lines of the format
+            // too, one with a reason field and one with no arguments at all.
+            render_with(
+                &table! {
+                    "a" => [1, 2, 3, 4],
+                    "x" => [1, 1, 2, 2],
+                    "y" => [3, 3, 4, 4],
+                },
+                &table! {
+                    "a" => [4, 3, 2, 1],
+                    "x" => [1, 1, 2, 2],
+                    "y" => [3, 3, 4, 4],
+                },
+                &[],
+            ),
+            render_with(
+                &table! { "tag" => ["a", "a"], "value" => [1, 2] },
+                &table! { "tag" => ["b", "b"], "value" => [3, 4] },
+                &[],
+            ),
         ]
         .join("\n");
 
@@ -500,6 +563,8 @@ mod tests {
             "reason: unchanged",
             "reason: unresolved",
             "incompatible:",
+            "reason: excessive_change",
+            "table_regenerate()",
         ] {
             assert!(rendered.contains(reason), "{reason}");
         }
@@ -970,5 +1035,54 @@ mod tests {
             render_with(&table, &table, &["id"]),
             "col_key([id], basis: declared)\nno_changes()"
         );
+    }
+
+    #[test]
+    fn a_retracted_guess_follows_the_rejection_it_sits_beside() {
+        let old = table! {
+            "a" => [1, 2, 3, 4],
+            "x" => [1, 1, 2, 2],
+            "y" => [3, 3, 4, 4],
+        };
+        let new = table! {
+            "a" => [4, 3, 2, 1],
+            "x" => [1, 1, 2, 2],
+            "y" => [3, 3, 4, 4],
+        };
+
+        // The declared key is refused, the guess ("a", whose reversal makes
+        // every other cell disagree) is withdrawn by its own diff, and the two
+        // problems read in the order they arose. The fallback that remains
+        // tells a plausible story — "a" itself changed — so the row story is
+        // kept.
+        insta::assert_snapshot!(render_with(&old, &new, &["absent"]), @"
+        key_invalid(absent, reason: missing_column)
+        key_retracted([a], reason: excessive_change)
+        ----
+        col_key([#row], basis: fallback)
+        col_edit(a, changes: 4)
+        ");
+    }
+
+    #[test]
+    fn a_regenerated_table_withholds_the_row_story() {
+        let old = table! {
+            "tag" => ["a", "a"],
+            "value" => i32[1, 2],
+        };
+        let new = table! {
+            "tag" => ["b", "b"],
+            "value" => [3, 4],
+        };
+
+        // Nothing can identify a row and every cell disagrees, so the row
+        // story would describe the positional matching rather than the data.
+        // The type change survives, being a fact about the schemas, but its
+        // value count goes with the story it was part of.
+        insta::assert_snapshot!(render_with(&old, &new, &[]), @"
+        col_key([#row], basis: fallback)
+        col_edit(value, type: Int32 -> Int64)
+        table_regenerate()
+        ");
     }
 }

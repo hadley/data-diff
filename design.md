@@ -36,6 +36,7 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 | `row_edit()` | Existing rows' (non-key) values changed |
 | `row_fanout()` | One old row corresponds to multiple new rows with the same key |
 | `row_order()` | Minimum set of one-to-one matched rows that must move to explain a change in relative order |
+| `table_regenerate()` | The new file is not usefully described as an edit of the old; the row-level findings are withheld |
 
 Note that rows and columns are not exactly symmetrical. You can add, remove, and edit both rows and columns, but you can't rename a row or fan out a column.
 
@@ -97,6 +98,7 @@ With those preliminaries in place, we can outline the full reconciliation proces
 7. Infer column swaps.
 8. Determine row and column reordering.
 9. Determine value changes.
+10. Reconsider the key once, when the evidence warrants, rerunning steps 4–9 over the replacement.
 
 ## Column identity model
 
@@ -247,7 +249,26 @@ The key is synthesized rather than special-cased: row positions are distinct, pr
 
 The same key can be asked for. `--key '#row'` declares it, recording `declared` rather than `fallback`, which is the whole of the difference between the two: one was chosen and the other arrived at. The name is reserved rather than looked up, and since a bare name never begins with `#` it cannot be confused with any column the format writes bare. It is a whole key or none of one, so it cannot be compounded with a column. The key line names `#row` in its component list rather than showing an empty one, so `basis` keeps meaning what it means for every other key.
 
-No stage is disabled under this basis, including rename and swap inference. Two files compared without a key are usually two versions of one file whose rows are in the same order, and on that reading positional matching is the right key rather than a degraded one. Where the rows are not in the same order, every stage reading a matched row inherits the error: cells report widespread edits, and inference may identify two columns on coincidental agreement. The first is loud and the second quiet, and the safeguard for both is the basis on the first line.
+No stage is disabled under this basis, including rename and swap inference. Two files compared without a key are usually two versions of one file whose rows are in the same order, and on that reading positional matching is the right key rather than a degraded one. Where the rows are not in the same order, every stage reading a matched row inherits the error: cells report widespread edits, and inference may identify two columns on coincidental agreement. The first is loud and the second quiet, and the safeguards are the basis on the first line and, past a limit, the diff itself: a fallback diff that accounts more of the files as changed than unchanged is reported as a `table_regenerate()` rather than as edits, as described under key reconsideration.
+
+One reading is built into that measure. A longer new file under the fallback is read, until the matched prefix says otherwise, as rows appended at the end: appending preserves the position of every pre-existing row, so it is exactly the operation positional matching is right about, and the tail additions count for nothing against plausibility. The assumption is deliberately not symmetric — a shorter new file earns no truncation reading, because rows are usually deleted by filtering, from anywhere, and the position shift that causes is precisely the misreading the measure exists to catch.
+
+### Key reconsideration
+
+A key the tool chose — guessed or fallen back to — is a judgement, and the diff it produces is evidence about the judgement itself. After the first complete pass, the key is reconsidered **once**. Two triggers, either sufficient:
+
+* **A better key exists.** Rerunning the guess with the pass's final identity map may find a winner the first resolution could not see, because an inferred identity is now a candidate — which is how a renamed key column, invisible to guessing by name, is recovered. Evaluating the trigger *is* running the second guess: a candidate that does not qualify as a key on its own values, or does not outrank the incumbent under the ordinary shared-count ranking, changes nothing.
+* **The diff is implausible.** A guessed key whose diff accounts more of the two files as changed than unchanged is retracted: recorded as a `key_retracted()` problem with reason `excessive_change`, excluded, and the guess rerun without it, landing on the next candidate or the fallback. An implausible fallback has nothing below it to retract to and goes directly to regeneration reporting.
+
+Implausibility is measured in cell mass, symmetric across sides: a dropped or added row contributes its whole width once, a changed matched cell exists in both files and contributes two, and fanout groups leave both counts — their own limit caps affected keys rather than rows, so counting their rows in the total while nothing of them can appear in the changed mass would let a large fanout dilute the ratio. The diff is implausible when the changed mass exceeds half of the total, in exact integer arithmetic, strict at the limit; the 50% threshold is a tunable implementation parameter like the fanout limit's. Under the fallback, added rows contribute nothing to the changed mass, per the appended-tail reading above; dropped rows always count, and under a guessed key both do, an addition there being a claim the key vouches for.
+
+The second pass starts from the hint map plus exactly the identities the adopted key rests on, claimed with the basis pass one established for them; when that basis is `swapped`, the exchange's companion identity comes too, since swapped identities exist only in pairs. Everything else pass one inferred was derived from a matching that has just been set aside, and is re-derived over the new one or not at all. The adopted pair itself is re-validated by key resolution on its own values — presence, uniqueness, fanout — which is evidence independent of any matching.
+
+Whatever the second pass produces is final, unconditionally: it was computed with strictly more information, and ranking the two passes would need a quality metric of its own. Its diff is never used to trigger anything further — the once-only rule, held structurally as two straight-line passes rather than by a counter — and its backstop is regeneration reporting, not a third pass. A declared key is never reconsidered at all, `--key '#row'` included: it is the user's assertion, not the tool's to withdraw, and for the same reason a declared key's diff is never reported as a regeneration, however large.
+
+A retraction is a problem and renders in the problems block, after any `key_invalid()` and before the hint issues, so a run can show the whole chain: a rejected declaration, a retracted guess, and the key that remains. A supersession — the first trigger replacing a guess or a fallback with a better-informed winner — renders nothing: nothing went wrong, and the final key line with the rename beside it tells the story. The retraction's measurement stays in the model, as a rejection's detail does.
+
+When the *final* diff is implausible and its basis is `guessed` or `fallback`, the structured diff records the mass and the human format writes `table_regenerate()` in place of the row story: the row events, value-only column edits, and the value counts of type-changed ones, all of which are conditional on a matching the tool has just declared untrustworthy. Everything derived from schemas and identities stays — the key line, renames with their bases, column adds, drops and order, and type-only edits. The line takes no arguments; the measurement is in the model. Underneath, the complete cell-level diff, the summary, and every row event are still computed and retained, which keeps the result model's invariant that the evidence stays accessible.
 
 ## Row matching
 

@@ -207,6 +207,26 @@ fn main() {
         },
     );
 
+    // Nothing can identify a row here either, and beyond that nothing agrees:
+    // every cell of the positional matching differs, so the diff is not
+    // credible as a story of edits and is reported as a regeneration.
+    write(
+        &output,
+        "regenerate-old.parquet",
+        table! {
+            "batch" => ["a", "a", "b", "b"],
+            "reading" => [0.31, 0.48, 0.79, 0.66],
+        },
+    );
+    write(
+        &output,
+        "regenerate-new.parquet",
+        table! {
+            "batch" => ["c", "c", "d", "d"],
+            "reading" => [0.52, 0.13, 0.44, 0.97],
+        },
+    );
+
     // One of ten shared keys is exactly the 10% limit, so this pair is
     // retained and reported as a fanout.
     write(

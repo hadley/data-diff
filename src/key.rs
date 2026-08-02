@@ -103,8 +103,8 @@ pub(crate) fn resolve_key(
         Declared::Guess => None,
     };
 
-    let mut key =
-        guess_key(old, new, hinted).unwrap_or_else(|| positional_key(old, new, KeyBasis::Fallback));
+    let mut key = guess_key(old, new, hinted, &[])
+        .unwrap_or_else(|| positional_key(old, new, KeyBasis::Fallback));
     key.rejection = rejection;
     key
 }
@@ -115,7 +115,7 @@ pub(crate) fn resolve_key(
 /// so unique in `old` and incapable of fanout; never null or `NaN`; and equal
 /// across sides exactly when the positions are equal — so positional matching
 /// is the ordinary algorithm over these values rather than a path beside it.
-fn positional_key(old: &RecordBatch, new: &RecordBatch, basis: KeyBasis) -> ResolvedKey {
+pub(crate) fn positional_key(old: &RecordBatch, new: &RecordBatch, basis: KeyBasis) -> ResolvedKey {
     fn positions(rows: usize) -> Vec<Vec<CanonicalValue>> {
         (0..rows)
             .map(|row| vec![CanonicalValue::Int(row as i64)])
@@ -342,7 +342,18 @@ fn position(table: &RecordBatch, name: &str) -> Option<usize> {
 /// the two files wins, and freedom from fanout only settles a tie. A true key
 /// that duplicated one row is a better guess than a column that happens to be
 /// unique but identifies far fewer rows.
-fn guess_key(old: &RecordBatch, new: &RecordBatch, hinted: &ColumnMap) -> Option<ResolvedKey> {
+///
+/// `excluded` holds pairs a caller has already tried and withdrawn — a retracted
+/// guess must not be guessed again — and is empty on a first resolution. The
+/// map, not this function, is how reconsideration widens the field: an identity
+/// inference established makes its pair a candidate here exactly as a hinted
+/// identity always has.
+pub(crate) fn guess_key(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    hinted: &ColumnMap,
+    excluded: &[(usize, usize)],
+) -> Option<ResolvedKey> {
     if old.num_rows() == 0 || new.num_rows() == 0 {
         return None;
     }
@@ -378,6 +389,9 @@ fn guess_key(old: &RecordBatch, new: &RecordBatch, hinted: &ColumnMap) -> Option
         let Some(new_index) = hinted.new_for_old(old_index).or(by_name) else {
             continue;
         };
+        if excluded.contains(&(old_index, new_index)) {
+            continue;
+        }
         let old_column = old.column(old_index);
         let new_column = new.column(new_index);
         let Some(plan) = ComparisonPlan::new(old_column.data_type(), new_column.data_type()) else {
@@ -732,15 +746,16 @@ mod tests {
 
     use super::testing::{rejection, resolve_key};
     use super::{
-        KeyIndex, Overlap, candidate_overlap, declared_components, validate_fanout,
+        KeyIndex, Overlap, candidate_overlap, declared_components, guess_key, validate_fanout,
         validate_unique_old,
     };
     #[cfg(test)]
     use crate::DiffOptions;
     use crate::compare::{CanonicalValue, stable_hash};
+    use crate::schema::ColumnMap;
     use crate::{
-        DiffError, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject, RejectionReason,
-        Side,
+        DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject,
+        RejectionReason, Side,
     };
 
     /// One component naming the same column on both sides.
@@ -1438,6 +1453,39 @@ mod tests {
 
         assert_eq!(key_name(&old, &key, 0), "b");
         assert_eq!((key.columns[0].old, key.columns[0].new), (0, 1));
+    }
+
+    #[test]
+    fn guessing_passes_over_an_excluded_candidate() {
+        let old = table! { "id" => [1, 2], "code" => [7, 8] };
+        let new = table! { "id" => [1, 2], "code" => [7, 8] };
+        let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
+
+        // Exclusion narrows the field without changing the ranking: the best
+        // remaining candidate wins, and excluding them all leaves nothing.
+        let first = guess_key(&old, &new, &map, &[]).unwrap();
+        assert_eq!(key_name(&old, &first, 0), "id");
+        let second = guess_key(&old, &new, &map, &[(0, 0)]).unwrap();
+        assert_eq!(key_name(&old, &second, 0), "code");
+        assert!(guess_key(&old, &new, &map, &[(0, 0), (1, 1)]).is_none());
+    }
+
+    #[test]
+    fn an_identity_in_the_map_makes_a_cross_name_candidate() {
+        let old = table! { "customer_id" => [1, 2], "v" => [1, 1] };
+        let new = table! { "id" => [1, 2], "v" => [1, 1] };
+
+        // No name is shared by a usable column, so nothing can be guessed —
+        // until the map identifies the renamed pair, which is the mechanism
+        // reconsideration widens the field through.
+        let bare = ColumnMap::new(old.schema_ref(), new.schema_ref());
+        assert!(guess_key(&old, &new, &bare, &[]).is_none());
+
+        let mut identified = ColumnMap::new(old.schema_ref(), new.schema_ref());
+        identified.claim(0, 0, IdentityBasis::Exact);
+        let key = guess_key(&old, &new, &identified, &[]).unwrap();
+        assert_eq!((key.columns[0].old, key.columns[0].new), (0, 0));
+        assert_eq!(key.basis, KeyBasis::Guessed);
     }
 
     #[test]

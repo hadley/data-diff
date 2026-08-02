@@ -1,7 +1,8 @@
 use data_diff::{
-    CellCoordinate, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffOptions, EditSummary,
-    FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyComponent, KeyDiff, KeyOverlap,
-    KeyRejection, KeySubject, RejectionReason, RowEdit, Side, diff_tables, write_human,
+    CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffOptions,
+    EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyComponent, KeyDiff,
+    KeyOverlap, KeyRejection, KeyRetraction, KeySubject, RejectionReason, RowEdit, Side,
+    diff_tables, write_human,
 };
 use test_support::table;
 
@@ -193,6 +194,7 @@ fn default_options_guess_a_key_and_align_reordered_rows() {
                 possible: 3,
             }),
             rejection: None,
+            retraction: None,
         }
     );
     assert_eq!(
@@ -496,6 +498,7 @@ fn a_renamed_key_identifies_rows_across_both_files() {
             columns: vec![Coordinate::from_zero_based(0, 0)],
             overlap: None,
             rejection: None,
+            retraction: None,
         }
     );
     assert!(diff.columns.added.is_empty());
@@ -546,6 +549,7 @@ fn a_guessed_key_may_fan_out() {
                 possible: 10,
             }),
             rejection: None,
+            retraction: None,
         }
     );
     // Nothing downstream asks how the key was chosen, so a guessed fanout
@@ -716,6 +720,7 @@ fn a_hint_can_supply_a_renamed_key_column() {
             columns: vec![Coordinate::from_zero_based(0, 0)],
             overlap: None,
             rejection: None,
+            retraction: None,
         }
     );
     assert_eq!(
@@ -819,6 +824,7 @@ fn a_hint_can_be_guessed_as_the_key() {
                 possible: 3,
             }),
             rejection: None,
+            retraction: None,
         }
     );
     assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
@@ -1202,16 +1208,17 @@ fn a_reservation_frees_the_other_endpoint_for_another_candidate() {
 
 #[test]
 fn every_stage_still_runs_under_a_fallback_key() {
-    // No column can identify a row: "tag" repeats and "amount" is rewritten
-    // wholesale under a new name. Rows are paired by position instead.
+    // No column can identify a row: "tag" and "amount" both repeat a value, so
+    // even once the rename is found the pair cannot be reconsidered into a
+    // key, and rows stay paired by position.
     let old = table! {
         "tag" => ["x", "x", "x"],
-        "amount" => [10, 20, 30],
+        "amount" => [10, 10, 30],
         "note" => ["a", "a", "a"],
     };
     let new = table! {
         "tag" => ["x", "x", "x"],
-        "total" => [10, 20, 30],
+        "total" => [10, 10, 30],
         "note" => ["a", "a", "z"],
     };
 
@@ -1302,4 +1309,366 @@ fn a_rejected_pair_keeps_the_identity_it_asserted() {
          col_rename(customer_id -> id, basis: declared)\n\
          row_edit(2, changes: 1)"
     );
+}
+
+#[test]
+fn a_renamed_key_is_recovered_on_reconsideration() {
+    // Guessing pairs candidates by name, so the renamed key is invisible to it
+    // and the first pass settles on "amount". Inference then identifies the
+    // rename, and reconsidering the key with that identity in hand finds the
+    // better candidate: three shared values against two.
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "amount" => [10, 20, 30],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "amount" => [10, 20, 35],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![Coordinate::from_zero_based(0, 0)],
+            overlap: Some(KeyOverlap {
+                shared: 3,
+                possible: 3,
+            }),
+            rejection: None,
+            retraction: None,
+        }
+    );
+    // The identity the key rests on keeps saying how it was found.
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Exact),
+            identity(1, 1, IdentityBasis::Name),
+        ]
+    );
+    // Under the first pass's key the changed row was a drop and an add; under
+    // the reconsidered key it is what it was all along.
+    assert_eq!(diff.rows.matched.len(), 3);
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(2, 1, 2, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_implausible_guess_is_retracted_for_the_next_candidate() {
+    // "a" wins the first guess by column order, but matching by it reverses
+    // the rows and makes every other cell disagree: sixteen of twenty-four
+    // cell masses changed, past the limit. The guess is retracted, excluded,
+    // and the chain lands on "b", whose diff says only that "a" itself
+    // changed.
+    let old = table! {
+        "a" => [1, 2, 3, 4],
+        "b" => [10, 20, 30, 40],
+        "x" => [5, 6, 7, 8],
+    };
+    let new = table! {
+        "a" => [4, 3, 2, 1],
+        "b" => [10, 20, 30, 40],
+        "x" => [5, 6, 7, 8],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(
+        diff.key.retraction,
+        Some(KeyRetraction {
+            columns: vec![shared("a")],
+            mass: ChangeMass {
+                changed: 16,
+                total: 24,
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(1, 1)]);
+    assert_eq!(diff.regeneration, None);
+    assert_eq!(diff.cells.len(), 4);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "key_retracted([a], reason: excessive_change)\n\
+         ----\n\
+         col_key([b], basis: guessed, overlap: 1.00)\n\
+         col_edit(a, changes: 4)"
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_implausible_guess_with_no_successor_is_retracted_for_the_fallback() {
+    let old = table! {
+        "a" => [1, 2, 3, 4],
+        "x" => [1, 1, 2, 2],
+        "y" => [3, 3, 4, 4],
+    };
+    let new = table! {
+        "a" => [4, 3, 2, 1],
+        "x" => [1, 1, 2, 2],
+        "y" => [3, 3, 4, 4],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    // "x" and "y" repeat values, so once "a" is retracted nothing else can
+    // identify a row and the chain ends at row position — where the diff is a
+    // plausible story again: "a" changed, everything else agrees.
+    assert_eq!(
+        diff.key.retraction,
+        Some(KeyRetraction {
+            columns: vec![shared("a")],
+            mass: ChangeMass {
+                changed: 16,
+                total: 24,
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+    assert!(diff.key.columns.is_empty());
+    assert_eq!(diff.regeneration, None);
+}
+
+#[test]
+fn an_implausible_fallback_regenerates_without_a_second_pass() {
+    let old = table! {
+        "tag" => ["p", "p"],
+        "v" => [1, 2],
+    };
+    let new = table! {
+        "tag" => ["q", "q"],
+        "v" => [3, 4],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    // There is nothing below the fallback to retract it to, and inference
+    // offered no candidate, so the implausible diff goes straight to
+    // regeneration: no retraction, and the model still holds every cell.
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+    assert_eq!(diff.key.retraction, None);
+    assert_eq!(
+        diff.regeneration,
+        Some(ChangeMass {
+            changed: 8,
+            total: 8,
+        })
+    );
+    assert_eq!(diff.cells.len(), 4);
+    assert_eq!(diff.summary.rows.len() + diff.summary.columns.len(), 2);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "col_key([#row], basis: fallback)\ntable_regenerate()"
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_declared_key_is_neither_reconsidered_nor_regenerated_over() {
+    // Every non-key cell changed, which under a chosen key would be past the
+    // limit. The user vouched for this matching, so the edits are real and
+    // the row story is kept in full.
+    let old = table! {
+        "id" => [1, 2, 3],
+        "v" => [1, 2, 3],
+        "w" => [4, 5, 6],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "v" => [7, 8, 9],
+        "w" => [10, 11, 12],
+    };
+
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Declared);
+    assert_eq!(diff.key.retraction, None);
+    assert_eq!(diff.regeneration, None);
+    assert_eq!(diff.summary.columns.len(), 2);
+    assert_eq!(diff.cells.len(), 6);
+}
+
+#[test]
+fn a_rejection_and_a_retraction_stay_visible_together() {
+    let old = table! {
+        "a" => [1, 2, 3, 4],
+        "x" => [1, 1, 2, 2],
+        "y" => [3, 3, 4, 4],
+    };
+    let new = table! {
+        "a" => [4, 3, 2, 1],
+        "x" => [1, 1, 2, 2],
+        "y" => [3, 3, 4, 4],
+    };
+
+    let diff = diff_tables(&old, &new, &declared("absent")).unwrap();
+
+    // The whole chain is on the key: a declaration the data lacks a column
+    // for, a guess withdrawn by its own diff, and the fallback that remains.
+    assert_eq!(
+        diff.key.rejection,
+        Some(KeyRejection {
+            subject: KeySubject::Component(shared("absent")),
+            reason: RejectionReason::MissingColumn { side: Side::Old },
+        })
+    );
+    assert_eq!(
+        diff.key.retraction,
+        Some(KeyRetraction {
+            columns: vec![shared("a")],
+            mass: ChangeMass {
+                changed: 16,
+                total: 24,
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+}
+
+#[test]
+fn the_key_is_reconsidered_at_most_once() {
+    // Both candidates produce an implausible diff: "a" reverses the rows and
+    // "b" pairs neighbours, and either way every cell of the other two
+    // columns disagrees. The first guess is retracted; the second stands,
+    // because a second pass is never itself reconsidered, and its implausible
+    // diff is reported as a regeneration instead.
+    let old = table! {
+        "a" => [1, 2, 3, 4],
+        "b" => [10, 20, 30, 40],
+        "x" => [5, 6, 7, 8],
+    };
+    let new = table! {
+        "a" => [4, 3, 2, 1],
+        "b" => [20, 10, 40, 30],
+        "x" => [9, 10, 11, 12],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(
+        diff.key.retraction,
+        Some(KeyRetraction {
+            columns: vec![shared("a")],
+            mass: ChangeMass {
+                changed: 16,
+                total: 24,
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(1, 1)]);
+    assert_eq!(
+        diff.regeneration,
+        Some(ChangeMass {
+            changed: 16,
+            total: 24,
+        })
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn pass_one_identities_are_rederived_rather_than_carried() {
+    // Positionally, "g" and "f" agree everywhere — an exact rename — and the
+    // key columns agree in twenty of twenty-two rows, an approximate one. The
+    // key is reconsidered onto that pair, and under the keyed matching the
+    // two moved rows separate "g" from "f": pass two re-derives the identity
+    // as approximate, which it could not say if pass one's exact finding had
+    // been carried across.
+    let old = table! {
+        "cid" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        ],
+        "g" => [
+            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100,
+            1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200,
+        ],
+    };
+    let new = table! {
+        "id" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 21,
+        ],
+        "f" => [
+            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100,
+            1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200,
+        ],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Approximate),
+            identity(1, 1, IdentityBasis::Approximate),
+        ]
+    );
+    // All twenty-two rows match under the reconsidered key; the two moved
+    // rows carry the only changes.
+    assert_eq!(diff.rows.matched.len(), 22);
+    assert_eq!(diff.cells.len(), 2);
+}
+
+#[test]
+fn adopting_a_swapped_key_pair_carries_its_companion() {
+    // "a" and "b" exchanged their contents, so neither shares a value with
+    // its own name and the first pass falls back — where swap inference sees
+    // the exchange. Reconsideration then adopts one half of it as the key,
+    // and the companion identity comes along: a swapped identity never
+    // appears without its exchange.
+    let old = table! {
+        "a" => [1, 2, 3],
+        "b" => [10, 20, 30],
+        "t" => ["x", "x", "x"],
+    };
+    let new = table! {
+        "a" => [10, 20, 30],
+        "b" => [1, 2, 3],
+        "t" => ["x", "x", "x"],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 1)]);
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 1, IdentityBasis::Swapped),
+            identity(1, 0, IdentityBasis::Swapped),
+            identity(2, 2, IdentityBasis::Name),
+        ]
+    );
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
 }
