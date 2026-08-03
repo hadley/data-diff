@@ -5,7 +5,7 @@ use std::path::Path;
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, SchemaRef};
 use arrow_select::concat::concat_batches;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
 
 use crate::{ColumnSchema, DiffError, DuplicateColumnName, NormalizedType, Schemas, Side};
 
@@ -19,8 +19,20 @@ pub const MISSING_FILE: &str = "#missing";
 /// Read a Parquet file into one logical in-memory table.
 pub fn read_parquet(path: &Path) -> Result<RecordBatch, DiffError> {
     let file = File::open(path).map_err(|error| read_error(path, error))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| read_error(path, error))?;
+    // Some writers embed an `ARROW:schema` blob this Arrow version cannot
+    // verify — nanoparquet among them. The Parquet types are authority enough
+    // for such a file, so it is reread with the embedded schema skipped
+    // rather than refused; only a file unreadable both ways is an error.
+    let builder = match ParquetRecordBatchReaderBuilder::try_new(
+        file.try_clone().map_err(|error| read_error(path, error))?,
+    ) {
+        Ok(builder) => builder,
+        Err(_) => ParquetRecordBatchReaderBuilder::try_new_with_options(
+            file,
+            ArrowReaderOptions::new().with_skip_arrow_metadata(true),
+        )
+        .map_err(|error| read_error(path, error))?,
+    };
     let schema = builder.schema().clone();
     let reader = builder.build().map_err(|error| read_error(path, error))?;
     let batches = reader
