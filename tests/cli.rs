@@ -21,8 +21,8 @@ fn help_describes_the_initial_interface() {
     Usage: data-diff [OPTIONS] <OLD> <NEW>
 
     Arguments:
-      <OLD>  Original Parquet file
-      <NEW>  Modified Parquet file
+      <OLD>  Original Parquet file; '#missing' when the file does not exist
+      <NEW>  Modified Parquet file; '#missing' when the file does not exist
 
     Options:
           --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; '#row' matches rows by position; when omitted, a single-column key is guessed
@@ -54,7 +54,7 @@ fn compares_two_identical_parquet_files() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     no_changes()
     ");
 }
@@ -83,7 +83,7 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: guessed, overlap: 0.67)
+    table_key([id], basis: guessed, overlap: 0.67)
     row_drop(3)
     row_add(3)
     row_edit(2, changes: 1)
@@ -112,7 +112,7 @@ fn falls_back_to_row_position_when_nothing_can_be_guessed() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([#row], basis: fallback)
+    table_key([#row], basis: fallback)
     col_edit(id, changes: 2)
     ");
 }
@@ -149,7 +149,7 @@ fn an_implausible_guess_is_retracted_and_reported() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     key_retracted([a], reason: excessive_change)
     ----
-    col_key([b], basis: guessed, overlap: 1.00)
+    table_key([b], basis: guessed, overlap: 1.00)
     col_edit(a, changes: 4)
     ");
 }
@@ -182,7 +182,7 @@ fn wholesale_change_without_a_key_reports_a_regeneration() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([#row], basis: fallback)
+    table_key([#row], basis: fallback)
     table_regenerate()
     ");
 }
@@ -205,7 +205,7 @@ fn declaring_row_position_reaches_the_same_key_deliberately() {
     // asked for and the other was arrived at.
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([#row], basis: declared)
+    table_key([#row], basis: declared)
     col_edit(id, changes: 2)
     ");
 }
@@ -279,7 +279,7 @@ fn reports_mixed_changes_in_human_format() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_drop(drop)
     col_add(add)
     col_order(value, 2 -> 1)
@@ -315,7 +315,7 @@ fn reports_a_bounded_fanout() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     row_fanout(4 -> [4, 5], changes: 1)
     ");
 }
@@ -347,7 +347,7 @@ fn infers_a_rename_from_the_values() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(amount -> total, basis: exact)
     row_edit(2, changes: 1)
     ");
@@ -380,7 +380,7 @@ fn infers_a_rename_that_carried_an_edit() {
     // The columns disagree in one row, which exact inference read as proof
     // that they were unrelated. The rename now absorbs the row it explains.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(amount -> total, basis: approximate)
     row_edit(7, changes: 1)
     ");
@@ -415,7 +415,7 @@ fn infers_a_swap_between_two_rewritten_columns() {
     // Two columns that each changed in every row become one exchange, and the
     // move falls out of it: the column holding the prices is now second.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(price -> cost, basis: swapped)
     col_rename(cost -> price, basis: swapped)
     col_order(price, 3 -> 2)
@@ -447,7 +447,7 @@ fn accepts_a_paired_key_component() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([customer_id -> id], basis: declared)
+    table_key([customer_id -> id], basis: declared)
     col_rename(customer_id -> id, basis: declared)
     row_edit(2, changes: 1)
     ");
@@ -477,7 +477,7 @@ fn guesses_a_key_that_fans_out() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: guessed, overlap: 1.00)
+    table_key([id], basis: guessed, overlap: 1.00)
     row_fanout(4 -> [4, 5], changes: 1)
     ");
 }
@@ -504,7 +504,7 @@ fn reports_a_declared_key_that_fans_out_too_broadly() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     key_invalid([id], reason: excessive_fanout)
     ----
-    col_key([#row], basis: fallback)
+    table_key([#row], basis: fallback)
     row_add(3)
     row_edit(2, changes: 1)
     ");
@@ -534,7 +534,7 @@ fn empty_files_still_report_type_only_schema_changes() {
 
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_edit(id, type: Int32 -> Int64)
     col_edit(value, type: Int32 -> Int64)
     ");
@@ -566,7 +566,7 @@ fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
     col_edit(markdown, changes: 3)
     ");
@@ -605,7 +605,7 @@ fn reads_hints_from_a_file_with_comments_and_blank_lines() {
 
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
     col_rename(note -> comment, basis: hinted)
     row_edit(1, changes: 2)
@@ -644,7 +644,7 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     hint_ignored(col_rename(discount -> mrkdown), missing: mrkdown)
     ----
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_rename(note -> comment, basis: hinted)
     col_drop(discount)
     col_add(markdown)
@@ -681,7 +681,7 @@ fn chooses_replacement_over_a_rename_when_told_to() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_drop(region)
     col_add(zone)
     ");
@@ -716,7 +716,7 @@ fn withdraws_a_swap_when_told_the_column_was_edited() {
     // as an exchange and prints two col_rename() lines.
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_edit(price, changes: 2)
     col_edit(cost, changes: 2)
     ");
@@ -756,7 +756,7 @@ fn reports_an_edit_hint_the_data_does_not_bear_out() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     hint_ignored(col_edit(value), reason: unchanged)
     ----
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_edit(note, changes: 1)
     ");
 }
@@ -789,7 +789,101 @@ fn a_boolean_retype_is_a_diff_rather_than_an_error() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    col_key([id], basis: declared)
+    table_key([id], basis: declared)
     col_edit(paid, type: Boolean -> Int64)
+    ");
+}
+
+#[test]
+fn a_missing_side_summarizes_the_file_that_exists() {
+    let dir = common::TempDir::new();
+    let path = dir.path().join("file.parquet");
+    let table = table! {
+        "id" => [1, 2],
+        "label" => ["a", "b"],
+    };
+    common::write_parquet(&path, &table);
+
+    let added = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .arg("#missing")
+        .arg(path.as_os_str())
+        .output()
+        .unwrap();
+    assert!(added.status.success());
+    assert!(added.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(added.stdout).unwrap(), @"
+    table_add(rows: 2)
+    col_add(id)
+    col_add(label)
+    ");
+
+    let removed = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .arg(path.as_os_str())
+        .arg("#missing")
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    assert!(removed.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(removed.stdout).unwrap(), @"
+    table_drop(rows: 2)
+    col_drop(id)
+    col_drop(label)
+    ");
+}
+
+#[test]
+fn contradictory_one_sided_instructions_are_refused() {
+    let dir = common::TempDir::new();
+    let path = dir.path().join("file.parquet");
+    common::write_parquet(&path, &table! { "id" => [1] });
+
+    let both = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args(["#missing", "#missing"])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+    insta::assert_snapshot!(String::from_utf8(both.stderr).unwrap(), @r##"both sides are "#missing", so there is nothing to compare"##);
+
+    let keyed = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .arg("#missing")
+        .arg(path.as_os_str())
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+    assert!(!keyed.status.success());
+    insta::assert_snapshot!(String::from_utf8(keyed.stderr).unwrap(), @r##"a key cannot apply when one side is "#missing""##);
+
+    let hinted = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .arg(path.as_os_str())
+        .arg("#missing")
+        .args(["--hint", "col_drop(id)"])
+        .output()
+        .unwrap();
+    assert!(!hinted.status.success());
+    insta::assert_snapshot!(String::from_utf8(hinted.stderr).unwrap(), @r##"hints cannot apply when one side is "#missing""##);
+}
+
+#[test]
+fn a_file_actually_named_missing_is_reachable_with_a_path() {
+    let dir = common::TempDir::new();
+    let sentinel_named = dir.path().join("#missing");
+    let other = dir.path().join("other.parquet");
+    let table = table! { "id" => [1] };
+    common::write_parquet(&sentinel_named, &table);
+    common::write_parquet(&other, &table);
+
+    // Only the exact bare argument is the sentinel; `./#missing` has a
+    // separator in it and is an ordinary file.
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .current_dir(dir.path())
+        .args(["./#missing"])
+        .arg(other.as_os_str())
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    table_key([id], basis: declared)
+    no_changes()
     ");
 }

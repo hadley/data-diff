@@ -20,7 +20,7 @@ The commands below use that installed `data-diff` binary. Every one is shown wit
 
 ```console
 $ data-diff demo/basic-old.parquet demo/basic-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 row_edit(2, changes: 2)
 ```
 
@@ -28,7 +28,7 @@ But if you don't supply it, `data-diff` will guess, looking for columns that hav
 
 ```console
 $ data-diff demo/basic-old.parquet demo/basic-new.parquet
-col_key([id], basis: guessed, overlap: 1.00)
+table_key([id], basis: guessed, overlap: 1.00)
 row_edit(2, changes: 2)
 ```
 
@@ -36,7 +36,7 @@ You can also match keys that have been renamed, by naming both sides as a pair:
 
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet --key customer_id/id
-col_key([customer_id -> id], basis: declared)
+table_key([customer_id -> id], basis: declared)
 col_rename(customer_id -> id, basis: declared)
 row_edit(2, changes: 1)
 ```
@@ -45,7 +45,7 @@ The pair is not required, however. If we don't supply it, `data-dict` goes to wo
 
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
-col_key([customer_id -> id], basis: guessed, overlap: 1.00)
+table_key([customer_id -> id], basis: guessed, overlap: 1.00)
 col_rename(customer_id -> id, basis: exact)
 row_edit(2, changes: 1)
 ```
@@ -58,7 +58,7 @@ Both columns here repeat a value, so neither can be a key. Rather than give up, 
 
 ```console
 $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet
-col_key([#row], basis: fallback)
+table_key([#row], basis: fallback)
 row_edit(2, changes: 1)
 ```
 
@@ -66,7 +66,7 @@ You can also specify this manually
 
 ```console
 $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key '#row'
-col_key([#row], basis: declared)
+table_key([#row], basis: declared)
 row_edit(2, changes: 1)
 ```
 
@@ -76,7 +76,7 @@ Positional matching only tells a useful story when most of the file is the same 
 
 ```console
 $ data-diff demo/regenerate-old.parquet demo/regenerate-new.parquet
-col_key([#row], basis: fallback)
+table_key([#row], basis: fallback)
 table_regenerate()
 ```
 
@@ -88,7 +88,7 @@ We can still use a key, even if it's duplicated (up to 10%) in the new table, as
 
 ```console
 $ data-diff demo/fanout-old.parquet demo/fanout-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 row_fanout(4 -> [4, 5], changes: 1)
 ```
 
@@ -98,7 +98,7 @@ When cells change, `data-diff` reports the minimal set of rows and columns that 
 
 ```console
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_edit(c, changes: 2)
 row_edit(1, changes: 2)
 ```
@@ -107,7 +107,7 @@ We'll also report a column whose type changed even when all of its values compar
 
 ```console
 $ data-diff demo/types-old.parquet demo/types-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_edit(id, type: Int32 -> Int64)
 col_edit(amount, type: Int32 -> Float64)
 ```
@@ -118,7 +118,7 @@ If the position of rows and columns changes but the values stay the same, we jus
 
 ```console
 $ data-diff demo/order-old.parquet demo/order-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_order(price, 3 -> 1)
 row_order(3 -> 1)
 ```
@@ -129,7 +129,7 @@ row_order(3 -> 1)
 
 ```console
 $ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_rename(amount -> total, basis: exact)
 row_edit(2, changes: 1)
 ```
@@ -138,7 +138,7 @@ Or if a small fraction of values are different:
 
 ```console
 $ data-diff demo/approx-rename-old.parquet demo/approx-rename-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_rename(amount -> total, basis: approximate)
 row_edit(7, changes: 1)
 ```
@@ -147,7 +147,7 @@ Or if the values in two columns were swapped:
 
 ```console
 $ data-diff demo/swap-old.parquet demo/swap-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_rename(price -> cost, basis: swapped)
 col_rename(cost -> price, basis: swapped)
 col_order(price, 3 -> 2)
@@ -157,7 +157,7 @@ A swap can even explain what looks like two columns changing type at once. Here 
 
 ```console
 $ data-diff demo/swap-types-old.parquet demo/swap-types-new.parquet --key id
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_rename(flag -> count, basis: swapped)
 col_rename(count -> flag, basis: swapped)
 col_order(flag, 3 -> 2)
@@ -168,7 +168,27 @@ Or if you provide an explicit hint:
 ```console
 $ data-diff demo/hint-rename-old.parquet demo/hint-rename-new.parquet --key id \
     --hint 'col_rename(discount -> markdown)'
-col_key([id], basis: declared)
+table_key([id], basis: declared)
 col_rename(discount -> markdown, basis: hinted)
 col_edit(markdown, changes: 3)
+```
+
+## One-sided diffs
+
+A file that was just added, or just deleted, has nothing to compare against. Name the missing side `'#missing'` — quoted, since `#` starts a comment in most shells — and `data-diff` summarizes the file that exists: a table-level headline with the row count, then the columns. Every row is new (or gone) because the file is, so listing them would say nothing the headline doesn't:
+
+```console
+$ data-diff '#missing' demo/basic-new.parquet
+table_add(rows: 3)
+col_add(id)
+col_add(name)
+col_add(score)
+```
+
+```console
+$ data-diff demo/basic-old.parquet '#missing'
+table_drop(rows: 3)
+col_drop(id)
+col_drop(name)
+col_drop(score)
 ```

@@ -1,8 +1,9 @@
 use data_diff::{
-    CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, Coordinate, Diff, DiffOptions,
-    EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis, KeyComponent, KeyDiff,
-    KeyOverlap, KeyRejection, KeyRetraction, KeySubject, RejectionReason, RowEdit, Side,
-    diff_tables, write_human,
+    CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, Coordinate, Diff,
+    DiffError, DiffOptions, EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis,
+    KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
+    OneSidedDiff, RejectionReason, RowEdit, Side, diff_added, diff_removed, diff_tables,
+    write_human, write_human_one_sided,
 };
 use test_support::table;
 
@@ -1499,7 +1500,7 @@ fn a_rejected_pair_keeps_the_identity_it_asserted() {
         String::from_utf8(render(&diff)).unwrap(),
         "key_invalid([customer_id -> id], reason: non_unique_old)\n\
          ----\n\
-         col_key([#row], basis: fallback)\n\
+         table_key([#row], basis: fallback)\n\
          col_rename(customer_id -> id, basis: declared)\n\
          row_edit(2, changes: 1)"
     );
@@ -1596,7 +1597,7 @@ fn an_implausible_guess_is_retracted_for_the_next_candidate() {
         String::from_utf8(render(&diff)).unwrap(),
         "key_retracted([a], reason: excessive_change)\n\
          ----\n\
-         col_key([b], basis: guessed, overlap: 1.00)\n\
+         table_key([b], basis: guessed, overlap: 1.00)\n\
          col_edit(a, changes: 4)"
     );
 
@@ -1667,7 +1668,7 @@ fn an_implausible_fallback_regenerates_without_a_second_pass() {
     assert_eq!(diff.summary.rows.len() + diff.summary.columns.len(), 2);
     assert_eq!(
         String::from_utf8(render(&diff)).unwrap(),
-        "col_key([#row], basis: fallback)\ntable_regenerate()"
+        "table_key([#row], basis: fallback)\ntable_regenerate()"
     );
 
     let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
@@ -1865,4 +1866,80 @@ fn adopting_a_swapped_key_pair_carries_its_companion() {
     let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
     assert_eq!(diff, repeated);
     assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_one_sided_diff_describes_the_file_that_exists() {
+    let table = table! {
+        "id" => [1, 2, 3],
+        "label" => ["a", "b", "c"],
+    };
+
+    let added = diff_added(&table).unwrap();
+    let removed = diff_removed(&table).unwrap();
+
+    // The schema arrives as validation describes it, the rows as a count; no
+    // key, identities, or cells exist to be held.
+    assert_eq!(
+        added,
+        OneSidedDiff {
+            side: Side::New,
+            columns: vec![
+                ColumnSchema {
+                    name: "id".into(),
+                    source_type: "Int64".into(),
+                    normalized_type: NormalizedType::Int64,
+                },
+                ColumnSchema {
+                    name: "label".into(),
+                    source_type: "Utf8".into(),
+                    normalized_type: NormalizedType::String,
+                },
+            ],
+            rows: 3,
+        }
+    );
+    assert_eq!(removed.side, Side::Old);
+    assert_eq!(removed.columns, added.columns);
+    assert_eq!(removed.rows, 3);
+
+    let render = |diff: &OneSidedDiff| {
+        let mut output = Vec::new();
+        write_human_one_sided(&mut output, diff).unwrap();
+        output
+    };
+    let repeated = diff_added(&table).unwrap();
+    assert_eq!(added, repeated);
+    assert_eq!(render(&added), render(&repeated));
+}
+
+#[test]
+fn a_one_sided_diff_validates_like_either_side_of_a_two_sided_one() {
+    let duplicated = table! {
+        "a" => [1],
+        "a" => [2],
+    };
+    assert!(matches!(
+        diff_added(&duplicated),
+        Err(DiffError::DuplicateColumnNames {
+            side: Side::New,
+            ..
+        })
+    ));
+    assert!(matches!(
+        diff_removed(&duplicated),
+        Err(DiffError::DuplicateColumnNames {
+            side: Side::Old,
+            ..
+        })
+    ));
+
+    let unsupported = table! { "bytes" => binary["a"] };
+    assert!(matches!(
+        diff_added(&unsupported),
+        Err(DiffError::UnsupportedColumn {
+            side: Side::New,
+            ..
+        })
+    ));
 }

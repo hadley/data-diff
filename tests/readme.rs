@@ -250,21 +250,22 @@ fn keeps_an_empty_quoted_argument() {
 
 #[test]
 fn reads_a_transcript_and_locates_its_output() {
-    let text = "before\n```console\n$ data-diff a.parquet b.parquet --key id\ncol_key([id])\n```\n";
+    let text =
+        "before\n```console\n$ data-diff a.parquet b.parquet --key id\ntable_key([id])\n```\n";
     let parsed = parse(text);
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].command, "data-diff a.parquet b.parquet --key id");
-    assert_eq!(parsed[0].expected, "col_key([id])");
-    assert_eq!(&text[parsed[0].output.clone()], "col_key([id])\n");
+    assert_eq!(parsed[0].expected, "table_key([id])");
+    assert_eq!(&text[parsed[0].output.clone()], "table_key([id])\n");
 }
 
 #[test]
 fn joins_a_command_continued_across_lines() {
-    let text = "```console\n$ data-diff a.parquet b.parquet \\\n    --key id\ncol_key([id])\n```";
+    let text = "```console\n$ data-diff a.parquet b.parquet \\\n    --key id\ntable_key([id])\n```";
     let parsed = parse(text);
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].command, "data-diff a.parquet b.parquet --key id");
-    assert_eq!(parsed[0].expected, "col_key([id])");
+    assert_eq!(parsed[0].expected, "table_key([id])");
 }
 
 #[test]

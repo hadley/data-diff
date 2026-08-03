@@ -37,6 +37,8 @@ We'll begin by establishing some vocabulary for the semantic changes we want to 
 | `row_fanout()` | One old row corresponds to multiple new rows with the same key |
 | `row_order()` | Minimum set of one-to-one matched rows that must move to explain a change in relative order |
 | `table_regenerate()` | The new file is not usefully described as an edit of the old; the row-level findings are withheld |
+| `table_add(rows: n)` | The whole file is new; the headline of a one-sided diff |
+| `table_drop(rows: n)` | The whole file is gone; the headline of a one-sided diff |
 
 Note that rows and columns are not exactly symmetrical. You can add, remove, and edit both rows and columns, but you can't rename a row or fan out a column.
 
@@ -55,7 +57,7 @@ pair      := value " -> " value
 list      := "[" [ value { ", " value } ] "]"
 ```
 
-Two rules keep it regular, and both are load-bearing rather than stylistic. Every field carries a colon, so a keyword is never mistakable for a bare value. Field names are drawn from a fixed set — `basis`, `changes`, `missing`, `overlap`, `type` — rather than varying with what they describe, so `col_key(["id"], basis: guessed, overlap: 0.67)` rather than putting the basis in the name position.
+Two rules keep it regular, and both are load-bearing rather than stylistic. Every field carries a colon, so a keyword is never mistakable for a bare value. Field names are drawn from a fixed set — `basis`, `changes`, `missing`, `overlap`, `rows`, `type` — rather than varying with what they describe, so `table_key(["id"], basis: guessed, overlap: 0.67)` rather than putting the basis in the name position.
 
 A `pair` always reads old to new, whether its sides are names, positions, or one position and a list of them. A `quoted` value is a JSON string, so any column name can be spelled exactly, including one holding a comma, a bracket, an arrow, or a newline. A `word` is an unquoted identifier, used for enumerated values such as the `declared` in `basis: declared`, and for names that need nothing more.
 
@@ -65,7 +67,7 @@ Both spellings are legal for a name, and the writer chooses between them by one 
 
 The grammar is written down because the format is not only an output. Hints let a user assert what reconciliation could not work out, and the notation they use is this one: a user resolving an ambiguity is reading the operation they want on their screen, and a generated hint has one grammar to target rather than two. Only a small subset is ever supplied — a kind applied to a name, or to a pair of names — but a format with one irregular verb is a reader with a permanent special case, which is why the two exceptions above were removed rather than documented.
 
-A printed line therefore has to be readable back as the hint it looks like, and printed lines carry more than a claim: `col_rename(a -> b, basis: exact)` and `col_edit(price, changes: 3)` are both things the format writes. So a hint's claim is its first argument, and every argument after it is detail about the operation rather than part of what is asserted, and is ignored. None of it is the user's to assert in any case — supplying a basis does not establish one, it makes the identity `hinted`. Ignored is not unchecked: a later argument must be a field, so that `col_rename(a -> b, c -> d)` is refused rather than read as its first half. That is one rule with no vocabulary in it, which is what every detail being a field buys. This makes the round trip a property of every printed line whose operation is one of the four hint kinds. It is not a property of the whole format and is not meant to become one: `col_key()` and the row operations describe what the data is rather than an identity a user could assert, and are rejected by kind.
+A printed line therefore has to be readable back as the hint it looks like, and printed lines carry more than a claim: `col_rename(a -> b, basis: exact)` and `col_edit(price, changes: 3)` are both things the format writes. So a hint's claim is its first argument, and every argument after it is detail about the operation rather than part of what is asserted, and is ignored. None of it is the user's to assert in any case — supplying a basis does not establish one, it makes the identity `hinted`. Ignored is not unchecked: a later argument must be a field, so that `col_rename(a -> b, c -> d)` is refused rather than read as its first half. That is one rule with no vocabulary in it, which is what every detail being a field buys. This makes the round trip a property of every printed line whose operation is one of the four hint kinds. It is not a property of the whole format and is not meant to become one: `table_key()` and the row operations describe what the data is rather than an identity a user could assert, and are rejected by kind.
 
 This vocabulary allows a single physical change to be described by multiple possible semantic changes. Here are a few examples of such ambiguities:
 
@@ -179,6 +181,16 @@ Row emptiness and schema emptiness are independent. We always compare schemas no
 If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist. No key can be guessed when either side is empty because there are no shared values.
 
 With no matched rows, value-based rename and swap inference are skipped as described below. Column order can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
+
+## One-sided diffs
+
+A dataset's history contains additions and deletions of whole files, and those have no other side to compare against. Absence is spelled, not synthesized: the reserved path `#missing` names the absent side in its ordinary argument position — `data-diff '#missing' new.parquet` for an added file, `data-diff old.parquet '#missing'` for a removed one — following `#row`'s precedent for names the tool reserves rather than looks up. The token is recognized only as the exact bare argument, so a real file named `#missing` is still reachable as `./#missing`. An empty table is deliberately not a spelling of absence: it is a file that exists with nothing in it, and the empty-inputs section above gives it real semantics that absence must not share. The null device is not accepted either; aliasing `/dev/null` to `#missing` would ease use as a git difftool and can be added when that integration is pursued.
+
+In the library the two situations are two entry points, `diff_added` and `diff_removed`, rather than an optional pair of tables, which would make comparing nothing to nothing representable. Both return a `OneSidedDiff` holding the side that exists, the schema as input validation describes it — the same validation either side of a two-sided comparison gets — and the row count. Nothing else is held because nothing else is known: no reconciliation ran, so a key, an identity map, or a cell set would claim one had. The count is a count rather than positions, which for a wholly one-sided file are `1..=n` by construction.
+
+The rendering is a table-level headline, `table_add(rows: 3)` or `table_drop(rows: 3)`, followed by one `col_add()` or `col_drop()` line per column in file order. The headline plays the role the key line plays in a two-sided diff — context that orients everything under it — and everything further is withheld as enumeration without information: every row of a one-sided file is added or dropped by the file being one-sided. `rows` is its own field rather than a reuse of `changes`, whose meaning is a cell count everywhere it appears; it is omitted at zero, following the rule that every count the format writes is positive. The column lines carry no types, because their two-sided counterparts carry none and one vocabulary line should not have two shapes; the types stay in the model's schema for a consumer that wants them. Like `table_key()` and the row operations, the table operations are not hint kinds and are rejected as hints by kind.
+
+At the command line, two combinations are refused as faults in the instruction, fatal before anything is read: both sides `#missing`, which asks no answerable question, and a `--key` or hint beside a missing side, which instructs a reconciliation that cannot run.
 
 ## Initial hint processing
 

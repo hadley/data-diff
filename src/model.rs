@@ -548,6 +548,20 @@ pub enum IssueKind {
     HintNoChange,
 }
 
+/// A brief description of a file with nothing to compare it against.
+///
+/// `side` is the side that exists: `New` for an added file, `Old` for a
+/// removed one. Nothing else is held because nothing else is known — no
+/// reconciliation ran, so a key, an identity map, or a cell set here would
+/// claim one had. The rows are a count rather than positions: a wholly
+/// one-sided file's positions are `1..=n` by construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneSidedDiff {
+    pub side: Side,
+    pub columns: Vec<ColumnSchema>,
+    pub rows: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diff {
     pub schemas: Schemas,

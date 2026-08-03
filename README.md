@@ -7,7 +7,7 @@ operation-oriented summary.
 
 ```console
 data-diff old.parquet new.parquet
-> col_key([id], basis: guessed, overlap: 1.00)
+> table_key([id], basis: guessed, overlap: 1.00)
 > col_drop(product)
 > col_add(stock)
 > col_edit(price, changes: 4)
@@ -17,7 +17,7 @@ If you know what the primary key is (i.e. the set of variables that uniquely ide
 
 ```console
 data-diff old.parquet new.parquet --key customer_id,date
-> col_key([customer_id, date], basis: declared)
+> table_key([customer_id, date], basis: declared)
 > row_drop(4)
 > row_add(9)
 > row_edit(2, changes: 3)
@@ -33,18 +33,27 @@ A key you declare can turn out not to identify rows --- it repeats a value, name
 data-diff old.parquet new.parquet --key customer_id/id
 > key_invalid([customer_id -> id], reason: non_unique_old)
 > ----
-> col_key([#row], basis: fallback)
+> table_key([#row], basis: fallback)
 > col_rename(customer_id -> id, basis: declared)
 > row_edit(2, changes: 1)
 ```
 
 A paired component asserts two things --- that the two columns are one, and that the column identifies rows --- and the first survives the second failing.
 
+When a file is new or was deleted there is nothing to compare it against. Name the missing side `'#missing'` and the file that exists is summarized: a table-level headline with the row count, then its columns. Only the exact bare argument is the sentinel, so a real file named `#missing` is still reachable as `./#missing`; a `--key` or hint cannot be combined with a missing side, there being no reconciliation for them to instruct.
+
+```console
+data-diff '#missing' new.parquet
+> table_add(rows: 3)
+> col_add(id)
+> col_add(price)
+```
+
 Use a pair when the key column itself was renamed:
 
 ```console
 data-diff old.parquet new.parquet --key customer_id/id
-> col_key([customer_id -> id], basis: declared)
+> table_key([customer_id -> id], basis: declared)
 > col_rename(customer_id -> id, basis: declared)
 > row_edit(2, changes: 1)
 ```
@@ -55,7 +64,7 @@ When a change can't be worked out from the data --- e.g. a column renamed and re
 
 ```console
 data-diff old.parquet new.parquet --key id --hint 'col_rename(discount -> markdown)'
-> col_key([id], basis: declared)
+> table_key([id], basis: declared)
 > col_rename(discount -> markdown, basis: hinted)
 > col_edit(markdown, changes: 3)
 ```
@@ -87,6 +96,7 @@ Output goes to stdout, one operation per line:
 | `row_fanout(old_idx -> [new_idx, ...])` | one old row that several new rows share a key with |
 | `row_order(old_idx -> new_idx)` | the fewest rows that must move to explain the new order |
 | `table_regenerate()` | the new file is not usefully described as an edit of the old |
+| `table_add(rows: n)`, `table_drop(rows: n)` | a one-sided diff: the whole file is new or gone |
 | `key_invalid(subject, reason: why)` | a declared key this data could not support |
 | `key_retracted([column], reason: why)` | a guessed key withdrawn after the diff it produced |
 | `hint_ignored(hint, reason: why)` | an instruction that was declined |

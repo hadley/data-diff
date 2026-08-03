@@ -1,106 +1,110 @@
 ---
-title: Booleans join the numeric domain
+title: One-sided diffs
 ---
 
 # Todo
 
-- [x] **Extend the matrix.** `Domain` in `src/compare.rs` gains `BoolInt` and `BoolDouble`. Canonicalization reads `true` as `1` and `false` as `0` in those domains — a boolean canonicalizes to `Int`, and a double follows the existing `IntDouble` exact rule, so `true` equals `1.0` through `Int(1)`. The `(Kind, Kind)` match becomes exhaustive: every pair of supported kinds now has a domain.
-- [x] **Make `ComparisonPlan::new` infallible.** It returns `Self`, with `kind()` resolved by an `expect` naming the contract: `validate_tables` admits only the kinds the plans cover. Every arm that handled `None` disappears — the guess-candidate skip in `src/key.rs`, the `is_some_and` chains through `plan_for` in `src/rename.rs` and `src/swap.rs`, and the `expect`s in `src/cells.rs` and `src/swap.rs` that pointed at schema reconciliation.
-- [x] **Retire the incompatible vocabulary.** `DiffError::IncompatibleColumns` and its `Display` arm, the whole-map check in `reconcile_schema`, `RejectionReason::IncompatibleTypes` and its rejection path in `declared_key`, `IssueKind::HintIncompatibleTypes` and its check in `hint::endpoints`, the `incompatible:` rendering arm in `src/human.rs`, and `incompatible` from the line grammar's fixed field set. None of them is constructible once every pair compares.
-- [x] **Let the ripple simplify `src/lib.rs`.** `reconcile_schema` returns `()`, `run_pass` returns `Pass`, and the testing helper in `src/schema.rs` returns `ColumnMap`, its call sites losing their `unwrap()`s.
-- [x] **Update `design.md`.** The comparison matrix gains its two boolean rows and loses the `Incompatible` row; comparison semantics records the exact-encoding rule and the non-transitive triangles it accepts; the rejected broadening of boolean string parsing is recorded so it is not re-proposed; the normalized-types section records the settled meaning of an incomparable pair for the types that will reintroduce one; and the sweep below removes compatibility language that no longer gates anything — key comparison, key rejection reasons, guessed-key eligibility, rename inference, and the hint issue kinds.
-- [x] **Update `README.md`.** `incompatible_types` leaves the `key_invalid()` reasons list. (A sentence on cross-type value comparison was drafted for the output section and cut in review; the demo and the matrix in `design.md` carry the story.)
-- [x] **Refresh the demo.** A new cross-type swap pair, written by `examples/generate_demo.rs`, joins the swaps section showing two apparent retypes resolved as an exchange. The value-edits section stays exactly as it was, by owner instruction; the plain retype case is covered by the integration and CLI tests instead. Transcripts verified by `cargo test --test readme`, prose written by hand, no orphaned fixtures.
-- [x] **Cover it.** Unit tests for the new domains' canonicalization and edges; flipped tests where incompatibility was asserted; integration coverage in `tests/diff.rs` for each path under Verification; CLI snapshots in `tests/cli.rs` including the exit-status flip; determinism checks.
+- [x] **Add the model.** `OneSidedDiff { side: Side, columns: Vec<ColumnSchema>, rows: usize }` in `src/model.rs`: which side exists, the schema as validation already describes it, and the row count. Nothing else — a one-sided diff has no key, no identities, no cells, and holding empty versions of those would claim a reconciliation that never ran.
+- [x] **Add the library entry points.** `diff_added(new: &RecordBatch)` and `diff_removed(old: &RecordBatch)` in `src/lib.rs`, thin wrappers over one internal constructor, each returning `Result<OneSidedDiff, DiffError>`. Validation is the same `validate_table` the two-sided path runs, on the one side that exists; that function is private to `src/input.rs` today and becomes `pub(crate)`, the constructor staying in `src/lib.rs` beside the other entry points rather than moving into the input module.
+- [x] **Render it.** `write_human_one_sided` in `src/human.rs`: a `table_add(rows: n)` or `table_drop(rows: n)` headline — the field omitted when the count is zero, as every count the format writes is positive — followed by one `col_add()` or `col_drop()` line per column in file order. No key line, no separator: nothing was matched and nothing can go wrong.
+- [x] **Extend the grammar's fixed field set.** `rows` joins `basis`, `changes`, `missing`, `overlap`, `reason`, `type` in `design.md`'s line grammar, and the fixed-set test in `src/human.rs` gains a one-sided rendering so the new field is reached.
+- [x] **Wire up the CLI.** The reserved path `#missing` names an absent side: `data-diff '#missing' new.parquet` is an added file and `data-diff old.parquet '#missing'` a removed one. The token is `pub const MISSING_FILE` in `src/input.rs` — it names an input path, so the input module owns it, as `src/key.rs` owns `POSITIONAL_COMPONENT` — re-exported from `src/lib.rs` so the two reserved names sit beside each other in the public API; no shared constants module. It is recognized only as the exact bare argument — a real file of that name is still reachable as `./#missing` — and `src/main.rs` refuses both sides missing, and a `--key` or hint beside a missing side, as faults in the instruction: fatal, on stderr, before anything is read.
+- [x] **Update `design.md`.** The vocabulary table gains `table_add()` and `table_drop()`; a new "One-sided diffs" section records the entry points, the model, the rendering, and the decisions argued below — same validation as two-sided, no types on the column lines, count rather than positions.
+- [x] **Update `README.md`.** The usage section shows `'#missing'` in each position, and the output table gains the two lines.
+- [x] **Refresh the demo.** A "One-sided diffs" section in `demo/README.md` running `'#missing'` in each position over the existing `basic-*.parquet` fixtures, so no new fixture is written and none is orphaned. Transcripts held to real output by `tests/readme.rs`, prose written by hand.
+- [x] **Cover it.** Unit tests for the renderer including the zero-row and zero-column edges; integration tests in `tests/diff.rs` for both entry points and validation failures; CLI snapshots in `tests/cli.rs` for both sentinel positions, the updated `--help`, and the refused combinations; determinism checks.
+- [x] **Rename `col_key()` to `table_key()`.** Added in review: the key line is context about the whole table, not a change to a column — the positional key's `col_key([#row])` named no column at all — and the `table_` family this step created is its natural home. Purely a rendering rename; `KeyDiff` and every model name stay. `key_invalid()` and `key_retracted()` remain the key's problem lines, so the key's problems and its answer now wear different prefixes on either side of the separator.
 - [x] **Complete the acceptance pass.** `cargo build --workspace --all-targets`, `cargo test --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, and byte-identical repeated runs.
 
 # Goal
 
-Changing a column from boolean to integer kills the whole comparison today: `reconcile_schema` pairs the two columns by name, finds no comparison plan for boolean ↔ numeric, and returns the fatal `DiffError::IncompatibleColumns`. One retyped column costs the user every other finding in the diff — and the retype it punishes is a common, well-defined representation change, the 0/1 encoding that `astype(int)`, SQL bit columns, and plenty of writers produce.
+A dataset's history contains more than modifications: files appear and files go away, and a review of "how did the AI change my data" has to say something about those too. Today the tool has no way to be asked. Both CLI positionals are required, `diff_tables` takes two tables, and even if a caller synthesized an empty old side, the output would enumerate every row of the new file as its own `row_add()` line and open with a `table_key([#row], basis: fallback)` that describes a matching that never meaningfully ran.
 
-This step extends the comparison matrix instead: `true` compares equal to `1` and `false` to `0`, exactly, across both boolean ↔ int64 and boolean ↔ double. That is the same species of rule the matrix already applies everywhere else — `1` equals `1.0`, `"1"` equals `1`, `"true"` equals `true` — and it turns both of the queue item's motivating cases from fatal errors into their true descriptions. A faithful re-encoding is a type-only `col_edit(paid, type: Boolean -> Int64)` and nothing more, and two columns of those types whose contents were exchanged — which today reads as two impossible retypes and dies — resolve through the ordinary machinery: the same-name pairs form identities, both measure as rewritten, the crossings agree on identical source types, and swap inference reports the exchange exactly as it does for same-typed columns:
+This step gives the absent side a first-class spelling — the reserved path `#missing`, following `#row`'s precedent for names the tool reserves — and a brief answer:
 
 ```console
-$ data-diff demo/swap-types-old.parquet demo/swap-types-new.parquet --key id
-col_key([id], basis: declared)
-col_rename(flag -> count, basis: swapped)
-col_rename(count -> flag, basis: swapped)
-col_order(flag, 3 -> 2)
+$ data-diff '#missing' demo/basic-new.parquet
+table_add(rows: 3)
+col_add(id)
+col_add(name)
+col_add(score)
 ```
 
-With the extension in place, every pair of supported kinds is comparable, so the *incompatible pair* ceases to exist in the MVP. The code that handled one — the fatal error, the `incompatible_types` key rejection, the `hint_incompatible_types` issue — becomes unconstructible and is removed rather than left as untestable arms. The question the queue item asked, what an incomparable pair *means*, is settled in `design.md` prose for the post-MVP types that will make one constructible again: identity requires comparability, and a same-named pair the matrix cannot relate reads as a drop and an addition.
+```console
+$ data-diff demo/basic-old.parquet '#missing'
+table_drop(rows: 3)
+col_drop(id)
+col_drop(name)
+col_drop(score)
+```
+
+The headline says what happened and how much of it, the column lines say the shape, and that is the whole of it: brief because everything else — every row added, every cell "new" — is implied by the file being one-sided and would be enumeration without information.
 
 # Scope
 
 ## What changes
 
-- `src/compare.rs`: two new domains, their canonicalization, and an infallible `ComparisonPlan::new` over an exhaustive kind match.
-- `src/schema.rs`: the post-hoc compatibility check goes; `reconcile_schema` becomes infallible.
-- `src/key.rs`: the `IncompatibleTypes` rejection path and the guess-candidate compatibility skip go.
-- `src/hint.rs`: the rename-hint compatibility check goes.
-- `src/model.rs`, `src/human.rs`: the three retired vocabulary items and their rendering.
-- `src/lib.rs`: `run_pass` loses its `Result`.
-- `design.md`, `README.md`, `demo/README.md`, `examples/generate_demo.rs`, and the test suites.
+- `src/model.rs` gains `OneSidedDiff`.
+- `src/lib.rs` gains `diff_added` and `diff_removed`.
+- `src/human.rs` gains `write_human_one_sided` and renders the two table lines.
+- `src/input.rs` exports `MISSING_FILE`; `src/main.rs` recognizes it and routes to the one-sided path.
+- `design.md`, `README.md`, `demo/README.md`, and the test suites.
 
 ## What stays and why
 
-- **Normalization.** Booleans keep their own normalized type; nothing about how a column is read or displayed changes. Only comparability across the boolean/numeric boundary is new, and the domain decides canonicalization per pair as it always has.
-- **String ↔ boolean parsing.** `bool::from_str` still accepts only `"true"` and `"false"`; `"1"` still does not equal `true`. The reasoning is in the design section, and the rejection is recorded in `design.md` so it is not re-proposed.
-- **Swap inference's identical-source-type crossings.** The bar for an exchange is unchanged; the cross-type swap case passes it because the crossed columns *are* identically typed — that is what reveals the apparent retypes as a swap.
-- **Input validation.** An unsupported column type remains fatal. Softening that is the broader-types step now queued in `plan-next.md`, which owns the unknown-type fallback.
-- **Rename inference and thresholds.** Boolean/integer candidate pairs become measurable, and the existing $p_o$ and $\kappa$ thresholds judge them like any other low-cardinality pair; nothing is tuned here.
+- **`diff_tables` and everything under it.** A one-sided diff runs no reconciliation, so nothing in the pipeline changes. In particular, comparing against a genuinely empty table — zero rows, or zero columns — behaves exactly as the empty-inputs section already specifies; emptiness is a property of a file that exists, not a way of spelling absence.
+- **Validation.** The one present side passes through the same `validate_table` as either side of a two-sided comparison: duplicate names would break the output's own naming, and keeping one rule for what the tool reads is worth more than tolerating, in the summary, a file the comparison would refuse. Relaxing this is noted below.
+- **The two-sided rendering of many added rows.** A two-sided diff that appends a thousand rows still prints a thousand `row_add()` lines. That is a real problem, but it is a rendering-budget problem the benchmarking step owns; solving it here for the one file-level case would leave the general case inconsistent with it.
 
 ## Explicitly deferred
 
-- **Broader parquet types and the unknown-type fallback.** Now a `plan-next.md` item: temporal, decimal, and binary types, nested data behind them, and a defined degradation for types the tool does not know, replacing today's fatal `UnsupportedColumn`. That step also revives the incomparable-pair machinery this one retires, per the reading recorded in `design.md`.
-- **Accepting `"1"`/`"0"` as boolean strings.** Considered and rejected, see the design section; recorded in `design.md` as settled.
-- **Interactive resolution of any of this.** The UI item owns overrides, as ever.
+- **Types on the one-sided column lines.** `col_add(id, type: Int64)` would make the summary a fuller schema description, but two-sided `col_add()` lines carry no type either, and one vocabulary line should not have two shapes. The model's `ColumnSchema` holds source and normalized types for the UI to show; if the format ever grows types on unmatched columns, it should do so for both arities at once.
+- **Relaxed validation for summaries.** A removed-file summary failing because the departed file holds a timestamp column is defensible but unhelpful; tolerating unsupported types in a summary that never compares values is a plausible loosening. It waits for the broader-types step, which owns what an unsupported column even is.
+- **Directory-level pairing.** Deciding *which* files were added, removed, or renamed across two directories is the caller's problem (git already solves it); the tool takes one file and a direction.
+- **Accepting the null device as an alias.** Git invokes difftools with `/dev/null` (or `NUL`) standing for an absent side; treating those paths as `#missing` would let `data-diff` serve as a difftool unconfigured. It is one platform-aware equality check when wanted, and it waits until git integration is actually pursued.
+- **A machine-readable result.** `OneSidedDiff` is library-public like `Diff`; anything beyond that is the UI item's business.
 
 # Design
 
-## The rule
+## An absence is spelled, not synthesized
 
-`true` ≡ `1` and `false` ≡ `0`, exactly; every other number is unequal to both. This is encoding equality, not truthiness — `2` does not equal `true`, and neither does `-1` — mirroring the matrix's one existing cross-numeric rule, int64 ↔ double, where a double equals an integer only when it represents it exactly. Truthiness would import a language convention the data never asserted; the 0/1 encoding is the one convention writers actually emit. Mechanically, a boolean canonicalizes to `Int` in the two new domains, and the `BoolDouble` domain reuses the `IntDouble` arm's double handling, so `true` meets `1.0` at `Int(1)` and `false` meets `-0.0` at `Int(0)` without a new equality rule anywhere.
+The absent side keeps its argument position and is named there: `#missing`, a reserved path following `#row`'s precedent for names the tool reserves rather than looks up. The command's shape never changes — old then new, always — and the direction falls out of which position is missing instead of being restated in a flag, so `data-diff a.parquet b.parquet` and `data-diff a.parquet '#missing'` differ only in the one fact that differs. The token is reserved only as the exact bare argument: since it never contains a separator, a real file named `#missing` is still reachable as `./#missing`, and the quoting the shell requires is the same the documented `--key '#row'` already carries.
 
-## Why extension, not the drop-and-add reading
+Two other spellings of absence are rejected. An empty table is a file that exists with nothing in it — the empty-inputs section gives it real semantics (schema comparison still runs, a declared key must still resolve) — and overloading it to mean "no file" would make those two situations indistinguishable in the model and in the output. The null device (`/dev/null`, the convention git passes to difftools) is platform-dependent and reads as a real path while never being one this tool could parse; accepting it as an alias for `#missing` would ease git integration and is noted below as deferred rather than taken on here.
 
-The queue item offered three readings of an incompatible same-name pair: fatal, a drop and an addition, or an edit. Fatal fails on proportionality — every other defect of this shape is reported and worked around, and a retyped column is more ordinary than a broken key. The drop-and-add reading is the honest fallback *when values genuinely cannot be compared*: an identity is used — by cells, agreement, swap inference, change mass — so a pair no plan can serve has nothing to be an identity with. But for boolean ↔ numeric the premise is the tool's own choice rather than a fact about the data: the values compare perfectly well under the encoding every real writer uses, and refusing them was the decision actually up for review. Extending the matrix dissolves the case instead of styling its failure, and it reaches the descriptions the other readings approximate — the faithful retype is a type-only `col_edit()`, the true value change is a measured `col_edit()`, and the exchange is a swap, each on evidence the tool actually examined. The design's own preference for the most parsimonious reading decides this: one type change beats a drop plus an addition wherever both fit, and now both fit.
+The library API is not the sentinel's business. `diff_tables(Option<&RecordBatch>, Option<&RecordBatch>)` would make `(None, None)` representable and turn every caller's two arguments into puzzles; `diff_added` and `diff_removed` name the two real situations and cannot express the impossible one. Both delegate to one internal constructor taking the present `Side`, so the pair costs no duplication; the CLI maps the sentinel's position onto the right one.
 
-## What becomes structural
+## A dedicated model, not a hollowed-out `Diff`
 
-After the extension the `(Kind, Kind)` domain match is exhaustive — sixteen pairs, sixteen domains — so the compiler proves what the retired checks used to assert: every pair of supported kinds is comparable. `ComparisonPlan::new` returning `Self` makes the remaining fallibility explicit as a contract with `validate_tables`, which is the one place unsupported types are refused; the `expect` names it. Everything downstream simplifies honestly: no caller branches on a `None` that cannot occur, no error variant models a state that cannot arise, and `reconcile_schema` — whose only error this was — becomes infallible, taking `run_pass`'s `Result` with it.
+A `Diff` asserts things a one-sided comparison never established: a resolved key with a basis, a column bijection, a set of matched rows, a cell-level change set. Reusing it with those fields empty would make every consumer ask "is this a real emptiness or an absence?" — the same conflation the sentinel was rejected for, moved into the result. `OneSidedDiff` holds exactly what is known: which side exists, the validated schema, and the row count. The design invariants hold vacuously and honestly: nothing is inferred (every event is read directly off the file), and no cell-level evidence is withheld because none exists — there is nothing to compare a cell against.
 
-Retiring the vocabulary is the honest half of that simplification. `RejectionReason::IncompatibleTypes` and `IssueKind::HintIncompatibleTypes` become unconstructible, and keeping them would mean documented reasons no run can produce and match arms no test can reach. They go now and return with the broader-types step, whose queue entry says so; the alternative — carrying them dormant — was considered and rejected because a vocabulary the format cannot emit is a promise the tests cannot hold.
+The row count is a count, not positions. A wholly added file's row positions are `1..=n` by construction; storing them would be manufacturing coordinates to fill a field, and rendering them is the enumeration this step exists to avoid.
 
-## The triangles, owned
+## The rendering
 
-Comparison is defined per column pair, and with booleans in the numeric domain that pairwise definition stops composing: `"true"` equals `true` and `true` equals `1`, but `"true"` does not equal `1`, because string ↔ int parsing reads digits; `"1"` equals `1` and `1` equals `true`, but `"1"` does not equal `true`, because `bool::from_str` reads words. The current matrix has no such triangle, and this step accepts two. They are harmless mechanically — no stage ever chains comparisons across pairs — but `design.md` must own them as deliberate: each string domain parses by its partner column's spelling rules, and that is the whole of the definition.
+`table_add(rows: 3)` then `col_add()` per column, in file order. The table line comes first because it plays the role the key line plays in a two-sided diff: context that orients everything under it, and the reason there *is* no key line. `rows` is a new field in the grammar's fixed set — `changes` was considered and rejected, because a `changes:` that counts rows on one line and cells on every other would make the field's meaning depend on the line it sits on, which the fixed set exists to prevent. The field is omitted at zero, following the rule that every count the format writes is positive; `table_add()` followed by column lines reads correctly as an empty file with a schema, and `table_add()` alone as a file with neither rows nor columns.
 
-Broadening boolean string parsing to accept `"1"`/`"0"` was considered as a patch and rejected. It closes one triangle while leaving the other — `"true"` versus `1` has no coherent fix at all — and it would read genuine digit strings as booleans in columns where `"1"` means one, inviting exactly the false equivalence the exact parsers exist to avoid. Pairwise incoherence at the corners is the cost of pragmatic per-pair semantics, and it is recorded rather than half-fixed.
+`table_add()` and `table_drop()` join the vocabulary beside `table_regenerate()`: the subject is the table, so the line has no name argument. They are not hint kinds and are rejected as hints by the existing by-kind rule, like `table_key()` and the row operations.
 
-## The reading on record
+## The CLI contract
 
-Post-MVP types will make incomparable pairs constructible again — `design.md` already sketches their regime: comparable only between identical source types, excluded from cross-type rename inference, hintable into identity. For when that happens, this step records the settled meaning the queue item asked for, as design prose beside that sketch: identity requires comparability, whoever proposes the pair — a name match, a declared component, a hint — so a same-named pair the matrix cannot relate is declined where it would be claimed and reads as a drop and an addition, never a fatal error and never an edit with unmeasurable counts. The broader-types step implements it when there is something real to implement against.
-
-## Ripples accepted
-
-A boolean column may now pair with a numeric one anywhere compatibility used to gate: as a declared key component (lawful, and useless past two rows for the same uniqueness reasons as any two-valued column), as a guess candidate (same), and as a rename-inference candidate, where a dropped boolean against an added 0/1 integer column is measured by the same $p_o$ and $\kappa$ thresholds as every other low-cardinality pair — chance correction is what those thresholds are for. Change mass, ordering, summarization, and reconsideration consume identities and cells as before and need no changes. Hash stability holds because canonicalization decides the hash: a boolean canonicalized to `Int(1)` hashes as the integer it now equals.
+Two combinations are refused as faults in the instruction, fatal on stderr before anything is read, following the precedent that a fault in the instruction is fatal while a fault in the data is reported. `data-diff '#missing' '#missing'` compares nothing to nothing and asks no answerable question. A `--key` or hint beside a missing side is an instruction about a reconciliation that cannot run — the same reasoning that had the flags conflict in an earlier draft, enforced in `src/main.rs` now that clap cannot see it in a positional's value. The refusals and the updated `--help` text, whose `<OLD>`/`<NEW>` descriptions now document the sentinel the way `--key`'s documents `#row`, are snapshot-tested.
 
 # Verification
 
-- Unit tests in `src/compare.rs`: `true`/`1`, `false`/`0`, `true`/`1.0`, `false`/`-0.0` equal; `2`, `-1`, and `NaN` unequal to both booleans; null/null agrees and null/present disagrees across the new domains; the matrix test flips to assert every supported pair constructs a plan; the triangle facts (`"true"` ≠ `1`, `"1"` ≠ `true`) asserted so the recorded incoherence is pinned.
-- Flipped unit tests: the incompatible-pair test in `src/schema.rs` becomes an identified boolean/integer pair whose equal-encoded values produce a type-only edit; the two `IncompatibleTypes` rejection tests in `src/key.rs` are replaced by a boolean/integer declared pair that validates; the hint and rendering tests for `hint_incompatible_types` are removed.
-- Integration coverage in `tests/diff.rs`: a faithful bool→int retype diffs as a type-only `col_edit()` with no changed cells; an unfaithful one reports its changed cells; the cross-type exchange resolves as two `basis: swapped` renames with the expected `col_order()`; a boolean/integer pair declared as the key validates on a small fixture; rename inference relates a dropped boolean to an added 0/1 integer column on exact evidence.
-- CLI snapshots in `tests/cli.rs`: the retype case exits zero with the diff on stdout, where it previously exited non-zero with an error on stderr.
-- The demo held to real output by `tests/readme.rs`: the new cross-type swap pair, written by `examples/generate_demo.rs` and read by its section's command, with every pre-existing section byte-for-byte unchanged.
-- Determinism: repeated runs byte-identical on every new path.
+- Unit tests in `src/human.rs`: an added and a removed rendering; the zero-row file omitting `rows:`; the zero-column file rendering the bare table line; quoting on a column name that needs it; and the fixed-field-set test extended with a one-sided rendering so `rows` is reached.
+- Integration tests in `tests/diff.rs`: `diff_added` and `diff_removed` return the validated schema and count; a duplicate-name and an unsupported-type file fail with the same errors the two-sided path gives; repeated runs are equal and render byte-identically.
+- CLI snapshots in `tests/cli.rs`: an added and a removed transcript with exit zero; the updated `--help`; `#missing` on both sides, and `#missing` beside `--key` and beside `--hint`, each refused with a non-zero exit; and a file literally named `#missing` reached as `./#missing`.
+- `tests/readme.rs` holds the new demo section to real output, with both commands reading existing fixtures and no fixture orphaned.
+- Determinism: repeated one-sided runs byte-identical.
 
 # Definition of done
 
 This step is complete when:
 
-- `true` compares equal to `1` and `false` to `0` across boolean ↔ int64 and boolean ↔ double, exactly and only;
-- a faithful boolean re-encoding diffs as a type-only `col_edit()` and a cross-type exchange as a swap, with no pair of supported columns able to make `diff_tables` fail;
-- `DiffError::IncompatibleColumns`, `RejectionReason::IncompatibleTypes`, and `IssueKind::HintIncompatibleTypes` are gone, `reconcile_schema` is infallible, and the every-pair-comparable fact is structural in the exhaustive domain match;
-- `design.md` carries the extended matrix, the exact-encoding rule, the owned triangles, the rejected parsing broadening, and the recorded drop-and-add reading for future incomparable pairs; `README.md` matches; the demo shows both cases and `tests/readme.rs` holds it to real output; and
+- `data-diff '#missing' file.parquet` and `data-diff file.parquet '#missing'` print a `table_add(rows: n)` / `table_drop(rows: n)` headline and one column line per column, and exit zero;
+- `diff_added` and `diff_removed` are public library entry points returning `OneSidedDiff`, validated exactly as the two-sided path validates a side;
+- the impossible states are unrepresentable in the library: no sentinel table, no optional pair of tables, no `Diff` with a fabricated key;
+- contradictory instructions — both sides missing, or a missing side beside `--key` or hints — are refused at the command line;
+- `design.md` carries the vocabulary additions, the `rows` field, and the one-sided section; `README.md` matches; the demo shows both directions over existing fixtures and `tests/readme.rs` holds it to real output; and
 - the full test suite, strict Clippy, formatting, and diff checks pass across the workspace.

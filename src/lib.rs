@@ -18,14 +18,14 @@ mod swap;
 
 use arrow_array::RecordBatch;
 
-pub use human::write_human;
-pub use input::{read_parquet, validate_tables};
+pub use human::{write_human, write_human_one_sided};
+pub use input::{MISSING_FILE, read_parquet, validate_tables};
 pub use key::POSITIONAL_COMPONENT;
 pub use model::{
     CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff, Coordinate,
     Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim,
     HintKind, HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyComponent, KeyDiff,
-    KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType, OrderDiff,
+    KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType, OneSidedDiff, OrderDiff,
     RejectionReason, RowEdit, RowsDiff, Schemas, Side,
 };
 
@@ -36,6 +36,28 @@ use crate::order::OrderMatches;
 use crate::rows::RowMatches;
 use crate::schema::ColumnMap;
 use crate::summary::SummaryChanges;
+
+/// Describe a table that was added, with no old side to compare against.
+pub fn diff_added(new: &RecordBatch) -> Result<OneSidedDiff, DiffError> {
+    one_sided(new, Side::New)
+}
+
+/// Describe a table that was removed, with no new side to compare against.
+pub fn diff_removed(old: &RecordBatch) -> Result<OneSidedDiff, DiffError> {
+    one_sided(old, Side::Old)
+}
+
+/// Two named entry points rather than one taking a side, so a caller cannot
+/// pass the wrong one; two rather than an optional pair of tables in
+/// `diff_tables`, which would make comparing nothing to nothing representable.
+/// Validation is the same the two-sided path runs on this side.
+fn one_sided(table: &RecordBatch, side: Side) -> Result<OneSidedDiff, DiffError> {
+    Ok(OneSidedDiff {
+        side,
+        columns: input::validate_table(table, side)?,
+        rows: table.num_rows(),
+    })
+}
 
 /// Compare two in-memory tables.
 ///

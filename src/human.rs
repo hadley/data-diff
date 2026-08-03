@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crate::{
     ColumnSchema, Diff, HintClaim, HintNames, Issue, IssueKind, KeyBasis, KeyComponent,
-    KeyRejection, KeyRetraction, KeySubject, POSITIONAL_COMPONENT,
+    KeyRejection, KeyRetraction, KeySubject, OneSidedDiff, POSITIONAL_COMPONENT, Side,
 };
 
 const SEPARATOR: &str = "----";
@@ -174,6 +174,31 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     writer.write_all(operations.join("\n").as_bytes())
 }
 
+/// Write the brief summary of a one-sided comparison.
+///
+/// A table-level headline, then the schema, and nothing else. Every row of a
+/// one-sided file is added or dropped by the file being one-sided, so
+/// enumerating them would be length without information; the headline's count
+/// carries the magnitude, omitted at zero like every other count the format
+/// declines to write. There is no key line because no rows were matched, and
+/// no problems block because no instruction can apply.
+pub fn write_human_one_sided(mut writer: impl Write, diff: &OneSidedDiff) -> io::Result<()> {
+    let (table, column) = match diff.side {
+        Side::New => ("table_add", "col_add"),
+        Side::Old => ("table_drop", "col_drop"),
+    };
+    let mut operations = Vec::new();
+    if diff.rows > 0 {
+        operations.push(format!("{table}(rows: {})", diff.rows));
+    } else {
+        operations.push(format!("{table}()"));
+    }
+    for schema in &diff.columns {
+        operations.push(format!("{column}({})", value(&schema.name)));
+    }
+    writer.write_all(operations.join("\n").as_bytes())
+}
+
 /// Render the resolved key as a bracketed component list.
 ///
 /// A guessed key is single-column today, but it is still bracketed so the
@@ -205,8 +230,8 @@ fn key_context(diff: &Diff) -> String {
             .join(", ")
     };
     match diff.key.basis {
-        KeyBasis::Declared => format!("col_key([{components}], basis: declared)"),
-        KeyBasis::Fallback => format!("col_key([{components}], basis: fallback)"),
+        KeyBasis::Declared => format!("table_key([{components}], basis: declared)"),
+        KeyBasis::Fallback => format!("table_key([{components}], basis: fallback)"),
         KeyBasis::Guessed => {
             // Rounded to two digits for display; `KeyOverlap` keeps the exact
             // shared and possible counts for anything that needs them.
@@ -215,7 +240,7 @@ fn key_context(diff: &Diff) -> String {
                 .overlap
                 .map(|overlap| overlap.ratio())
                 .unwrap_or(0.0);
-            format!("col_key([{components}], basis: guessed, overlap: {overlap:.2})")
+            format!("table_key([{components}], basis: guessed, overlap: {overlap:.2})")
         }
     }
 }
@@ -229,7 +254,7 @@ fn key_context(diff: &Diff) -> String {
 ///
 /// A component is named the way the key line names it, `customer_id -> id`
 /// rather than the `customer_id/id` it was declared as, so that a rejection and
-/// the `col_key()` line it explains describe one component one way.
+/// the `table_key()` line it explains describe one component one way.
 fn key_rejection(rejection: &KeyRejection) -> String {
     let subject = match &rejection.subject {
         KeySubject::Component(component) => component_name(component),
@@ -349,8 +374,8 @@ fn column_type(schema: &[ColumnSchema], one_based_position: usize) -> String {
 
 /// Write a string as the grammar's `word` where that reads back as itself.
 ///
-/// Quoting everything is never wrong and always noisy: `col_key([id], basis:
-/// declared)` says exactly what `col_key(["id"], basis: declared)` says, and
+/// Quoting everything is never wrong and always noisy: `table_key([id], basis:
+/// declared)` says exactly what `table_key(["id"], basis: declared)` says, and
 /// most column names are ordinary identifiers. So a name is left bare when it
 /// is unmistakably one, and quoted otherwise.
 ///
@@ -389,8 +414,8 @@ mod tests {
     use arrow_array::RecordBatch;
     use test_support::table;
 
-    use super::write_human;
-    use crate::{DiffOptions, diff_tables};
+    use super::{write_human, write_human_one_sided};
+    use crate::{DiffOptions, OneSidedDiff, diff_added, diff_removed, diff_tables};
 
     fn render_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> String {
         let diff = diff_tables(
@@ -412,6 +437,12 @@ mod tests {
 
     fn render(old: &RecordBatch, new: &RecordBatch) -> String {
         render_with(old, new, &["id"])
+    }
+
+    fn render_one_sided(diff: &OneSidedDiff) -> String {
+        let mut output = Vec::new();
+        write_human_one_sided(&mut output, diff).unwrap();
+        String::from_utf8(output).unwrap()
     }
 
     fn render_hinted(old: &RecordBatch, new: &RecordBatch, hints: &[&str]) -> String {
@@ -530,6 +561,9 @@ mod tests {
                 &table! { "tag" => ["b", "b"], "value" => [3, 4] },
                 &[],
             ),
+            // A one-sided diff is the format's other entry point, and its
+            // headline carries the one field nothing above can reach.
+            render_one_sided(&diff_added(&old).unwrap()),
         ]
         .join("\n");
 
@@ -542,13 +576,16 @@ mod tests {
             "reason: unresolved",
             "reason: excessive_change",
             "table_regenerate()",
+            "table_add(rows:",
         ] {
             assert!(rendered.contains(reason), "{reason}");
         }
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from(["basis", "changes", "missing", "overlap", "reason", "type"])
+            BTreeSet::from([
+                "basis", "changes", "missing", "overlap", "reason", "rows", "type"
+            ])
         );
     }
 
@@ -566,7 +603,7 @@ mod tests {
         };
 
         insta::assert_snapshot!(render(&old, &new), @"
-        col_key([id], basis: declared)
+        table_key([id], basis: declared)
         col_drop(drop)
         col_add(add)
         col_order(value, 3 -> 1)
@@ -586,7 +623,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &["group", "id"]),
-            "col_key([group, id], basis: declared)\nno_changes()"
+            "table_key([group, id], basis: declared)\nno_changes()"
         );
     }
 
@@ -602,7 +639,7 @@ mod tests {
         };
 
         insta::assert_snapshot!(render_with(&old, &new, &[]), @"
-        col_key([id], basis: guessed, overlap: 0.67)
+        table_key([id], basis: guessed, overlap: 0.67)
         row_drop(2)
         row_add(3)
         row_order(3 -> 1)
@@ -616,7 +653,7 @@ mod tests {
 
         assert_eq!(
             render_with(&old, &old, &[]),
-            "col_key([\"line\\n\\\"quoted\\\"\"], basis: guessed, overlap: 1.00)\nno_changes()"
+            "table_key([\"line\\n\\\"quoted\\\"\"], basis: guessed, overlap: 1.00)\nno_changes()"
         );
     }
 
@@ -632,7 +669,7 @@ mod tests {
         };
 
         insta::assert_snapshot!(render(&old, &new), @"
-        col_key([id], basis: declared)
+        table_key([id], basis: declared)
         row_drop(11)
         row_add(12)
         row_fanout(4 -> [4, 5], changes: 1)
@@ -654,7 +691,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([id], basis: declared)\nrow_fanout(4 -> [4, 5])"
+            "table_key([id], basis: declared)\nrow_fanout(4 -> [4, 5])"
         );
     }
 
@@ -747,7 +784,7 @@ mod tests {
         // operation about a surviving column names it as "new" does; only the
         // dropped column keeps its old name, having no other.
         insta::assert_snapshot!(render_with(&old, &new, &["customer_id/id"]), @"
-        col_key([customer_id -> id], basis: declared)
+        table_key([customer_id -> id], basis: declared)
         col_rename(customer_id -> id, basis: declared)
         col_drop(gone)
         col_add(fresh)
@@ -771,7 +808,7 @@ mod tests {
         // compound key over two, so the two must not render alike.
         assert_eq!(
             render_with(&old, &new, &["a/b"]),
-            "col_key([a -> b], basis: declared)\n\
+            "table_key([a -> b], basis: declared)\n\
              col_rename(a -> b, basis: declared)\n\
              col_drop(b)\ncol_add(a)"
         );
@@ -792,7 +829,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([id], basis: declared)\nrow_edit(2, changes: 2)"
+            "table_key([id], basis: declared)\nrow_edit(2, changes: 2)"
         );
     }
 
@@ -814,7 +851,7 @@ mod tests {
         // changed in two of its three rows, and every count the format writes is
         // positive like this one.
         insta::assert_snapshot!(render(&old, &new), @"
-        col_key([id], basis: declared)
+        table_key([id], basis: declared)
         col_edit(id, type: Int32 -> Int64)
         col_edit(rewritten, changes: 2)
         ");
@@ -840,7 +877,7 @@ mod tests {
         // count describes its own row or column, and the cell where they cross
         // is a changed cell of both.
         insta::assert_snapshot!(render(&old, &new), @"
-        col_key([id], basis: declared)
+        table_key([id], basis: declared)
         col_edit(c, changes: 3)
         row_edit(1, changes: 3)
         ");
@@ -860,8 +897,57 @@ mod tests {
             render_hinted(&table, &table, &["col_rename(value -> absent)"]),
             "hint_ignored(col_rename(value -> absent), missing: absent)\n\
              ----\n\
-             col_key([id], basis: declared)\n\
+             table_key([id], basis: declared)\n\
              no_changes()"
+        );
+    }
+
+    #[test]
+    fn a_one_sided_diff_leads_with_the_table_and_lists_the_schema() {
+        let table = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+
+        assert_eq!(
+            render_one_sided(&diff_added(&table).unwrap()),
+            "table_add(rows: 2)\ncol_add(id)\ncol_add(value)"
+        );
+        assert_eq!(
+            render_one_sided(&diff_removed(&table).unwrap()),
+            "table_drop(rows: 2)\ncol_drop(id)\ncol_drop(value)"
+        );
+    }
+
+    #[test]
+    fn a_one_sided_file_without_rows_omits_the_count() {
+        let table = table! { "id" => [1] }.slice(0, 0);
+
+        // Every count the format writes is positive, so an empty file's
+        // headline has no field and the schema alone says what the file holds.
+        assert_eq!(
+            render_one_sided(&diff_added(&table).unwrap()),
+            "table_add()\ncol_add(id)"
+        );
+    }
+
+    #[test]
+    fn a_one_sided_file_without_columns_is_the_bare_headline() {
+        let table = table! {};
+
+        assert_eq!(
+            render_one_sided(&diff_removed(&table).unwrap()),
+            "table_drop()"
+        );
+    }
+
+    #[test]
+    fn a_one_sided_column_name_is_quoted_by_the_usual_rule() {
+        let table = table! { "total sales" => [1] };
+
+        assert_eq!(
+            render_one_sided(&diff_added(&table).unwrap()),
+            "table_add(rows: 1)\ncol_add(\"total sales\")"
         );
     }
 
@@ -874,7 +960,7 @@ mod tests {
 
         assert_eq!(
             render(&table, &table),
-            "col_key([id], basis: declared)\nno_changes()"
+            "table_key([id], basis: declared)\nno_changes()"
         );
     }
 
@@ -888,7 +974,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "col_key([id], basis: declared)\ncol_drop(\"line\\n\\\"quoted\\\"\")"
+            "table_key([id], basis: declared)\ncol_drop(\"line\\n\\\"quoted\\\"\")"
         );
     }
 
@@ -913,7 +999,7 @@ mod tests {
         // a leading digit could be a number, and everything below it carries
         // the grammar's own punctuation, a space, or a character outside it.
         insta::assert_snapshot!(render(&old, &new), @r#"
-        col_key([id], basis: declared)
+        table_key([id], basis: declared)
         col_drop(snake_case)
         col_drop(CamelCase)
         col_drop(_private)
@@ -934,7 +1020,7 @@ mod tests {
         // Nothing can identify a row, so the chain reaches its last resort.
         assert_eq!(
             render_with(&old, &new, &[]),
-            "col_key([#row], basis: fallback)\nrow_edit(2, changes: 1)"
+            "table_key([#row], basis: fallback)\nrow_edit(2, changes: 1)"
         );
     }
 
@@ -948,7 +1034,7 @@ mod tests {
 
         assert_eq!(
             declared,
-            "col_key([#row], basis: declared)\nrow_edit(2, changes: 1)"
+            "table_key([#row], basis: declared)\nrow_edit(2, changes: 1)"
         );
         // The two routes reach one key: only the line saying how differs.
         assert_eq!(
@@ -1002,7 +1088,7 @@ mod tests {
 
         assert_eq!(
             render_with(&table, &table, &["id"]),
-            "col_key([id], basis: declared)\nno_changes()"
+            "table_key([id], basis: declared)\nno_changes()"
         );
     }
 
@@ -1028,7 +1114,7 @@ mod tests {
         key_invalid(absent, reason: missing_column)
         key_retracted([a], reason: excessive_change)
         ----
-        col_key([#row], basis: fallback)
+        table_key([#row], basis: fallback)
         col_edit(a, changes: 4)
         ");
     }
@@ -1049,7 +1135,7 @@ mod tests {
         // The type change survives, being a fact about the schemas, but its
         // value count goes with the story it was part of.
         insta::assert_snapshot!(render_with(&old, &new, &[]), @"
-        col_key([#row], basis: fallback)
+        table_key([#row], basis: fallback)
         col_edit(value, type: Int32 -> Int64)
         table_regenerate()
         ");

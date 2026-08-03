@@ -9,6 +9,13 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::{ColumnSchema, DiffError, DuplicateColumnName, NormalizedType, Schemas, Side};
 
+/// The reserved path that names an absent side of a comparison.
+///
+/// Reserved rather than looked up, like the key's `#row`, and only as the
+/// exact bare argument: a real file with this name is still reachable as
+/// `./#missing`, since the token never contains a separator.
+pub const MISSING_FILE: &str = "#missing";
+
 /// Read a Parquet file into one logical in-memory table.
 pub fn read_parquet(path: &Path) -> Result<RecordBatch, DiffError> {
     let file = File::open(path).map_err(|error| read_error(path, error))?;
@@ -49,7 +56,10 @@ pub fn validate_tables(old: &RecordBatch, new: &RecordBatch) -> Result<Schemas, 
     })
 }
 
-fn validate_table(table: &RecordBatch, side: Side) -> Result<Vec<ColumnSchema>, DiffError> {
+pub(crate) fn validate_table(
+    table: &RecordBatch,
+    side: Side,
+) -> Result<Vec<ColumnSchema>, DiffError> {
     validate_names(table, side)?;
     table
         .schema()
