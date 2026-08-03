@@ -307,12 +307,6 @@ fn issue_context(issue: &Issue) -> String {
                 hints.join(", ")
             )
         }
-        IssueKind::HintIncompatibleTypes { old_type, new_type } => format!(
-            "hint_ignored({}, incompatible: {} -> {})",
-            hints.join(", "),
-            value(old_type),
-            value(new_type)
-        ),
         IssueKind::HintUnresolvedIdentity => {
             format!("hint_ignored({}, reason: unresolved)", hints.join(", "))
         }
@@ -490,14 +484,6 @@ mod tests {
             "id" => [1, 2, 3],
             "renamed" => [9, 8, 7],
         };
-        let flagged_old = table! {
-            "id" => [1, 2, 3],
-            "flag" => [true, false, true],
-        };
-        let flagged_new = table! {
-            "id" => [1, 2, 3],
-            "count" => [1, 0, 1],
-        };
 
         // Every line kind the renderer can write, so a field introduced
         // anywhere in the format has to show up in this set.
@@ -524,10 +510,6 @@ mod tests {
             ),
             render_hinted(&renamed_old, &renamed_old, &["col_edit(amount)"]),
             render_hinted(&renamed_old, &hinted_new, &["col_edit(amount)"]),
-            // A boolean and an integer cannot be compared, so this hint is
-            // declined rather than obeyed — and its reason is the one field the
-            // fixtures above never reached.
-            render_hinted(&flagged_old, &flagged_new, &["col_rename(flag -> count)"]),
             // A retracted guess and a regenerated table are lines of the format
             // too, one with a reason field and one with no arguments at all.
             render_with(
@@ -558,7 +540,6 @@ mod tests {
             "reason: contradictory",
             "reason: unchanged",
             "reason: unresolved",
-            "incompatible:",
             "reason: excessive_change",
             "table_regenerate()",
         ] {
@@ -567,15 +548,7 @@ mod tests {
 
         assert_eq!(
             field_names(&rendered),
-            BTreeSet::from([
-                "basis",
-                "changes",
-                "incompatible",
-                "missing",
-                "overlap",
-                "reason",
-                "type"
-            ])
+            BTreeSet::from(["basis", "changes", "missing", "overlap", "reason", "type"])
         );
     }
 

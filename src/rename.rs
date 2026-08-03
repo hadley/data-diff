@@ -82,8 +82,8 @@ fn exact_pairs(
         .map(|&old_index| {
             eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
-                    plan_for(old, new, old_index, new_index)
-                        .is_some_and(|plan| values.agree(plan, old_index, new_index))
+                    let plan = plan_for(old, new, old_index, new_index);
+                    values.agree(plan, old_index, new_index)
                 })
                 .map(|(position, _)| position)
                 .collect::<Vec<_>>()
@@ -104,8 +104,7 @@ fn exact_pairs(
                 continue;
             }
             let new_index = added[position];
-            let plan =
-                plan_for(old, new, old_index, new_index).expect("a match implies a plan exists");
+            let plan = plan_for(old, new, old_index, new_index);
             let unambiguous = candidates.len() == 1 && claims[position] == 1;
             if !unambiguous && !values.measure(plan, old_index, new_index).informative() {
                 continue;
@@ -157,8 +156,8 @@ fn approximate_pairs(
         .map(|&old_index| {
             eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
-                    plan_for(old, new, old_index, new_index)
-                        .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
+                    let plan = plan_for(old, new, old_index, new_index);
+                    values.measure(plan, old_index, new_index).is_close()
                 })
                 .map(|(position, _)| position)
                 .collect::<Vec<_>>()
@@ -199,7 +198,7 @@ fn plan_for(
     new: &RecordBatch,
     old_index: usize,
     new_index: usize,
-) -> Option<ComparisonPlan> {
+) -> ComparisonPlan {
     ComparisonPlan::new(
         old.column(old_index).data_type(),
         new.column(new_index).data_type(),
@@ -228,7 +227,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(old, new, &key).unwrap();
+        let mut schema = reconcile_schema(old, new, &key);
         infer(old, new, &mut schema, &rows);
         schema
     }
@@ -290,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_with_incompatible_types_are_left_alone() {
+    fn a_dropped_boolean_relates_to_its_integer_encoding() {
         let old = table! {
             "id" => [1, 2],
             "flag" => [true, false],
@@ -300,11 +299,13 @@ mod tests {
             "count" => [1, 0],
         };
 
+        // These candidates were once incomparable and stayed a drop and an
+        // addition. Booleans now compare in the numeric domains, so the 0/1
+        // encoding is exact evidence like any other.
         let schema = infer_renames(&old, &new);
 
-        assert!(renames(&schema).is_empty());
-        assert_eq!(schema.dropped(), [1]);
-        assert_eq!(schema.added(), [1]);
+        assert_eq!(renames(&schema), [(1, 1)]);
+        assert_eq!(basis(&schema, 1), IdentityBasis::Exact);
     }
 
     #[test]
@@ -414,7 +415,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(&old, &new, &key).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key);
         let mut values = Aligned::with_digest(&old, &new, &rows, |_: &[CanonicalValue]| 0);
         infer_with(&old, &new, &mut schema, &rows, &mut values);
 

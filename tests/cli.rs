@@ -760,3 +760,36 @@ fn reports_an_edit_hint_the_data_does_not_bear_out() {
     col_edit(note, changes: 1)
     ");
 }
+
+#[test]
+fn a_boolean_retype_is_a_diff_rather_than_an_error() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "paid" => [true, false, true],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "paid" => [1, 0, 1],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // This comparison once died on stderr with "incompatible types". Booleans
+    // now compare in the numeric domains, so the faithful re-encoding is an
+    // ordinary type-only edit and the exit status says the comparison ran.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    col_key([id], basis: declared)
+    col_edit(paid, type: Boolean -> Int64)
+    ");
+}

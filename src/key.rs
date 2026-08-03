@@ -150,14 +150,7 @@ fn declared_key(
         let (old_index, new_index) = component_endpoints(old, new, component, hinted)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
-        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
-            || {
-                component.rejected(RejectionReason::IncompatibleTypes {
-                    old_type: format!("{:?}", old_values.data_type()),
-                    new_type: format!("{:?}", new_values.data_type()),
-                })
-            },
-        )?;
+        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
         old_components.push(plan.canonicalize_old(old_values.as_ref()));
         new_components.push(plan.canonicalize_new(new_values.as_ref()));
         columns.push(KeyColumn {
@@ -388,9 +381,7 @@ pub(crate) fn guess_key(
         }
         let old_column = old.column(old_index);
         let new_column = new.column(new_index);
-        let Some(plan) = ComparisonPlan::new(old_column.data_type(), new_column.data_type()) else {
-            continue;
-        };
+        let plan = ComparisonPlan::new(old_column.data_type(), new_column.data_type());
         let old_values = plan.canonicalize_old(old_column.as_ref());
         let new_values = plan.canonicalize_new(new_column.as_ref());
         let Some(overlap) = candidate_overlap(&old_values, &new_values, stable_hash) else {
@@ -946,20 +937,16 @@ mod tests {
     }
 
     #[test]
-    fn an_incompatible_pair_names_the_component_as_written() {
-        let old = table! { "customer_id" => [true] };
-        let new = table! { "id" => [1] };
+    fn a_boolean_and_a_numeric_component_pair_validates() {
+        let old = table! { "customer_id" => [true, false] };
+        let new = table! { "id" => [1, 0] };
 
-        assert_eq!(
-            rejection(&old, &new, &["customer_id/id"]),
-            Some(KeyRejection {
-                subject: KeySubject::Component(paired("customer_id", "id")),
-                reason: RejectionReason::IncompatibleTypes {
-                    old_type: "Boolean".into(),
-                    new_type: "Int64".into(),
-                },
-            })
-        );
+        // Once rejected as incompatible; the encoding now compares, so the
+        // declared pair identifies both rows.
+        let key = resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap();
+
+        assert_eq!(key.rejection, None);
+        assert_eq!(key.old, key.new);
     }
 
     #[test]
@@ -990,19 +977,6 @@ mod tests {
                 reason: RejectionReason::MissingColumn { side: Side::New },
             })
         );
-    }
-
-    #[test]
-    fn rejects_incompatible_key_types() {
-        let old = table! { "id" => [true] };
-        let new = table! { "id" => [1] };
-        assert!(matches!(
-            rejection(&old, &new, &["id"]),
-            Some(KeyRejection {
-                reason: RejectionReason::IncompatibleTypes { .. },
-                ..
-            })
-        ));
     }
 
     #[test]
@@ -1388,7 +1362,6 @@ mod tests {
             "nan" => [1.0, f64::NAN],
             "dup_old" => [1, 1],
             "dup_new" => [1, 2],
-            "mismatch" => [true, false],
             "disjoint" => [1, 2],
             "missing" => [1, 2],
         };
@@ -1397,7 +1370,6 @@ mod tests {
             "nan" => [1.0, 2.0],
             "dup_old" => [1, 2],
             "dup_new" => [1, 1],
-            "mismatch" => [1, 2],
             "disjoint" => [3, 4],
         };
 

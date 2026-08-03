@@ -85,8 +85,7 @@ pub(crate) fn compare_cells(
         if !identity.is_key {
             let old_values = old.column(identity.old);
             let new_values = new.column(identity.new);
-            let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type())
-                .expect("schema reconciliation accepted the type pair");
+            let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
             let old_values = plan.canonicalize_old(old_values.as_ref());
             let new_values = plan.canonicalize_new(new_values.as_ref());
             for &(old_row, new_row) in &rows.matched {
@@ -159,7 +158,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let schema = reconcile_schema(old, new, &key).unwrap();
+        let schema = reconcile_schema(old, new, &key);
         compare_cells(old, new, &schema, &rows)
     }
 

@@ -55,7 +55,7 @@ pair      := value " -> " value
 list      := "[" [ value { ", " value } ] "]"
 ```
 
-Two rules keep it regular, and both are load-bearing rather than stylistic. Every field carries a colon, so a keyword is never mistakable for a bare value. Field names are drawn from a fixed set — `basis`, `changes`, `incompatible`, `missing`, `overlap`, `type` — rather than varying with what they describe, so `col_key(["id"], basis: guessed, overlap: 0.67)` rather than putting the basis in the name position.
+Two rules keep it regular, and both are load-bearing rather than stylistic. Every field carries a colon, so a keyword is never mistakable for a bare value. Field names are drawn from a fixed set — `basis`, `changes`, `missing`, `overlap`, `type` — rather than varying with what they describe, so `col_key(["id"], basis: guessed, overlap: 0.67)` rather than putting the basis in the name position.
 
 A `pair` always reads old to new, whether its sides are names, positions, or one position and a list of them. A `quoted` value is a JSON string, so any column name can be spelled exactly, including one holding a comma, a bracket, an arrow, or a newline. A `word` is an unquoted identifier, used for enumerated values such as the `declared` in `basis: declared`, and for names that need nothing more.
 
@@ -137,6 +137,8 @@ For value comparison, we normalize the source types to a smaller set of flexible
 
 Source types outside these categories, such as binary or nested values, are comparable only when their source types are identical. They are not candidates for inferred cross-type renames, although a rename hint can establish their identity.
 
+Within the four normalized types, every pair is comparable, so no supported pair of columns can fail the comparison. When later steps admit types that reintroduce incomparable pairs, the settled reading is already decided: identity requires comparability, whoever proposes the pair — a name match, a declared component, a hint — because an identity is used for cell comparison and there would be nothing to use. Such a pair is declined where it would be claimed and reads as a drop and an addition, never a fatal error and never an edit whose counts nothing could measure. The `incompatible_types` rejection and hint vocabulary retired when booleans joined the numeric domain return with it.
+
 ### Comparison semantics
 
 The MVP comparison matrix is:
@@ -148,12 +150,17 @@ The MVP comparison matrix is:
 | `double` ↔ `double` | Exact; all `NaN` values agree and signed zeros agree |
 | `string` ↔ `string` | Exact bytes |
 | `int64` ↔ `double` | Equal only when the double represents the integer exactly |
+| `boolean` ↔ `int64` | `true` is `1` and `false` is `0`, exactly |
+| `boolean` ↔ `double` | `true` is `1` and `false` is `0`, exactly |
 | `string` ↔ `boolean` | Parse with `bool::from_str`, then compare exactly |
 | `string` ↔ `int64` | Parse with the exact integral parser, then compare exactly |
 | `string` ↔ `double` | Parse with `f64::from_str`, then compare exactly |
-| `boolean` ↔ numeric | Incompatible |
 
-Null/null agrees across compatible types, while null/present disagrees. All `NaN` values agree with one another but are distinct from null. Positive and negative zero agree. Both null and `NaN` invalidate keys; elsewhere they participate in hashing, agreement, and frequency calculations as distinct categories.
+The boolean rows are encoding equality, not truthiness: `2` and `-1` equal neither boolean, mirroring the int64 ↔ double rule, and the 0/1 encoding is the one real writers emit when a boolean column is retyped. The matrix has no incompatible row — every pair of normalized types compares — which is why a retyped boolean column is an ordinary `col_edit()` rather than a failure, and why two such columns whose contents were exchanged are an ordinary swap.
+
+Comparison is defined per column pair, and the pairwise definitions do not compose into one equality: `"true"` equals `true` and `true` equals `1`, but `"true"` does not equal `1`, because the string ↔ int64 parser reads digits; `"1"` equals `1` and `1` equals `true`, but `"1"` does not equal `true`, because `bool::from_str` reads words. No stage ever chains comparisons across pairs, so the triangles are harmless, and they are deliberate: each string domain parses by its partner column's spelling rules, and that is the whole of the definition. Broadening boolean string parsing to accept `"1"`/`"0"` was considered as a patch and rejected (2026-08-03); it closes one triangle while the other has no coherent fix at all, and it would read genuine digit strings as booleans in columns where `"1"` means one. Do not re-propose it.
+
+Null/null agrees across every pair of normalized types, while null/present disagrees. All `NaN` values agree with one another but are distinct from null. Positive and negative zero agree. Both null and `NaN` invalidate keys; elsewhere they participate in hashing, agreement, and frequency calculations as distinct categories.
 
 Decimal, temporal, binary, and nested types are unsupported by the MVP.
 
@@ -169,7 +176,7 @@ Thousands separators, underscores, currency symbols, locale-specific forms, and 
 
 Row emptiness and schema emptiness are independent. We always compare schemas normally regardless of row count; columns are added or dropped only when absent from the corresponding schema.
 
-If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist and have compatible types. No key can be guessed when either side is empty because there are no shared values.
+If `old` has zero rows, every new row is a `row_add()`. If `new` has zero rows, every old row is a `row_drop()`. If both have zero rows, there are no row events or cell changes. Key uniqueness on an empty side is vacuously true, although declared key columns must still exist. No key can be guessed when either side is empty because there are no shared values.
 
 With no matched rows, value-based rename and swap inference are skipped as described below. Column order can still be determined from resolved schema identities. The cell diff and row/column edit summary are empty.
 
@@ -186,7 +193,7 @@ We detect conflicts across the complete hint set before mutating the identity ma
 
 Valid rename identities are applied before key resolution. Valid add/drop reservations later remove their endpoints from rename-inference candidates. A `col_add(new.b)` plus `col_drop(old.a)` is not contradictory: together they explicitly choose replacement rather than rename. Edit hints are validated after schema and cell changes are known and may coexist with renames. If an edited identity has neither a type nor value change, we ignore the hint.
 
-Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_incompatible_types`, `hint_no_change`, and `hint_unresolved_identity`. A hint claiming an identity between columns whose types cannot be compared is declined like any other hint the data does not support, rather than failing the comparison: an accepted identity is used for cell comparison, which would otherwise abort on a pair it cannot compare. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
+Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_no_change`, and `hint_unresolved_identity`. There is no incompatible-types kind to decline a rename with: every pair of supported types is comparable, so a rename hint that resolves is one cell comparison can honour. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
 
 ## Key resolution
 
@@ -194,11 +201,11 @@ We resolve a stable row identifier from a declared key, a guessed key, or finall
 
 ### Key comparison
 
-Key columns need not have identical source or normalized types, but every old/new key-column pair must have compatible types. For a compound key, reconciliation constructs one comparison plan per corresponding column pair and hashes the tuple of canonicalized components.
+Key columns need not have identical source or normalized types: every old/new pair of supported columns has a comparison plan. For a compound key, reconciliation constructs one plan per corresponding column pair and hashes the tuple of canonicalized components.
 
 Missing values and `NaN` invalidate the key. Uniqueness is checked independently on each side after values have been canonicalized by these cross-side comparison plans. This ensures that values such as string `"1.0"` and integer `1` do not create ambiguous row identities.
 
-A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally. An incompatible type pair invalidates a declared key; compatibility follows the matrix above.
+A string that cannot be parsed under its comparison plan remains a distinct, tagged string value. It cannot match a typed value on the other side, but it does not by itself invalidate the key. It may therefore produce a dropped or added row. If multiple unparseable strings are byte-for-byte identical, they still violate uniqueness normally.
 
 ### Declared key
 
@@ -219,7 +226,7 @@ $$
 
 We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to key guessing. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
 
-A `--key` string that cannot be read at all — an empty component, more than two names in one component, or a column claimed twice — is a fault in the instruction rather than in the data, and remains fatal. Everything below that is a well-formed key this pair of files cannot support: a component absent on one side, an incompatible type pair, two components resolving onto one column, a null or `NaN`, duplication in `old`, or fanout above the limit. Each of these is recorded as a `key_invalid` rejection and reconciliation continues to key guessing and, if necessary, to row position. The fallback basis is recorded as `guessed` or `fallback`, and the rejection remains visible. A replacement key reruns validation and all downstream stages.
+A `--key` string that cannot be read at all — an empty component, more than two names in one component, or a column claimed twice — is a fault in the instruction rather than in the data, and remains fatal. Everything below that is a well-formed key this pair of files cannot support: a component absent on one side, two components resolving onto one column, a null or `NaN`, duplication in `old`, or fanout above the limit. Each of these is recorded as a `key_invalid` rejection and reconciliation continues to key guessing and, if necessary, to row position. The fallback basis is recorded as `guessed` or `fallback`, and the rejection remains visible. A replacement key reruns validation and all downstream stages.
 
 The rejection carries the one reason that stopped validation rather than every reason that might apply. The reasons are not independent: the fanout rate is only defined once `old` is known unique, so a rate computed over a non-unique old side would be a number that means nothing. Its subject follows its reason. Resolving a component can fail on its own account and names that component, as the user spelled it; uniqueness and fanout are properties of the whole tuple and name the declared key entire.
 
@@ -229,7 +236,7 @@ Fanout is intentionally one-directional: a unique old row can be compared unambi
 
 ### Guessed key
 
-If no declared key survives, we consider compatible, identified single columns that contain no missing values, are unique in `old`, and share at least one value. A candidate may be duplicated in `new` under the same affected-key rate that admits a declared key, and is ineligible above it. We select the candidate with the most shared key values, preferring one that does not fan out when two candidates tie, and then the earlier column in `old`.
+If no declared key survives, we consider identified single columns that contain no missing values, are unique in `old`, and share at least one value. A candidate may be duplicated in `new` under the same affected-key rate that admits a declared key, and is ineligible above it. We select the candidate with the most shared key values, preferring one that does not fan out when two candidates tie, and then the earlier column in `old`.
 
 Selection follows the evidence rather than the absence of fanout: a true key that duplicated one row identifies more rows than a column that is unique by coincidence, and is the better guess. Duplicated values whose key is absent from `old` are additions rather than fanout, so they neither count against a candidate nor make it ineligible.
 
@@ -299,7 +306,7 @@ We create `old_matching` and `new_matching` from the one-to-one common rows. Mat
 
 ## Rename inference
 
-Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. We compare only columns with compatible types. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
+Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. Every candidate pair is measurable under its own comparison plan, so a dropped boolean column can be related to an added 0/1 integer column on the same evidence as any other pair. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
 
 We first generate candidate lists of adds, drops, and edits, excluding the endpoints reserved by valid add/drop hints and the identities protected by valid edit hints. Rename identities from initial hint processing have already been applied before key matching.
 
@@ -341,7 +348,7 @@ We accept only mutually unique candidates; overlapping candidates remain for the
 
 We test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when both same-name pairs have $p_o < 0.5$, both cross-pairs have identical source types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
 
-The type requirement is stricter than rename inference's, which asks only for compatibility, and deliberately so. A cross-type rename relates two columns that would otherwise be a drop and an addition, related not at all; a swap instead overrides an identity that schema normalization already established, so it answers to a higher bar, and an exchange evidenced by values compared in their own representation is the cleaner claim. A swap therefore never carries a type change: columns that were both exchanged and retyped remain two `col_edit()` events, which describes them truthfully if less specifically.
+The type requirement is stricter than rename inference's, which accepts any pair the matrix can compare, and deliberately so. A cross-type rename relates two columns that would otherwise be a drop and an addition, related not at all; a swap instead overrides an identity that schema normalization already established, so it answers to a higher bar, and an exchange evidenced by values compared in their own representation is the cleaner claim. A swap therefore never carries a type change: columns that were both exchanged and retyped remain two `col_edit()` events, which describes them truthfully if less specifically.
 
 Rename inference consumes unmatched columns and produces identities; a swap consumes two identities and exchanges their ends. The two therefore cannot interact: an added column and a dropped column never share a name, because schema normalization matches equal names first, so an identity established by rename inference is never a same-name one and can never be a swap candidate. That both stages express their result as a `col_rename()` is a fact about the vocabulary, not about what they consume.
 

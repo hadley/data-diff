@@ -97,7 +97,7 @@ A rename's `basis` is one of five: `declared` for a paired `--key` component, `h
 
 A key's `basis` is one of three: `declared` for a `--key` you supplied, `guessed` where a column was chosen for you, and `fallback` where nothing could identify a row and they were matched by position.
 
-`key_invalid()` names one component where resolving it failed on its own account, and the whole declared key, bracketed, where uniqueness or fanout failed --- those being properties of the tuple rather than of any column in it. The reason is one of `missing_column`, `incompatible_types`, `duplicate_column`, `invalid_value`, `non_unique_old`, and `excessive_fanout`, and it is the one that stopped validation rather than every one that might apply.
+`key_invalid()` names one component where resolving it failed on its own account, and the whole declared key, bracketed, where uniqueness or fanout failed --- those being properties of the tuple rather than of any column in it. The reason is one of `missing_column`, `duplicate_column`, `invalid_value`, `non_unique_old`, and `excessive_fanout`, and it is the one that stopped validation rather than every one that might apply.
 
 When more than half of the cells change under a guessed or fallback key, the row story is withheld and `table_regenerate()` stands in for it: row events and value counts would describe a matching the tool no longer believes, so only what follows from schemas and identities is kept --- the key line, renames, column adds, drops, order, and type changes. A declared key is exempt: you vouched for the matching, so the edits are reported in full.
 

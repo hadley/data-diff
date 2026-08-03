@@ -21,6 +21,8 @@ enum Domain {
     Double,
     String,
     IntDouble,
+    BoolInt,
+    BoolDouble,
     StringBoolean,
     StringInt,
     StringDouble,
@@ -56,21 +58,30 @@ impl CanonicalValue {
 }
 
 impl ComparisonPlan {
-    pub(crate) fn new(old: &DataType, new: &DataType) -> Option<Self> {
-        let old = kind(old)?;
-        let new = kind(new)?;
+    /// Plan the comparison for a pair of column types.
+    ///
+    /// Infallible: the domain match below is exhaustive over the supported
+    /// kinds, so every pair of columns `validate_tables` admits is comparable.
+    /// The `expect` states that contract; a type outside the kinds is refused
+    /// as an input error before any plan is asked for.
+    pub(crate) fn new(old: &DataType, new: &DataType) -> Self {
+        let supported =
+            |data_type| kind(data_type).expect("validate_tables admits only supported types");
+        let old = supported(old);
+        let new = supported(new);
         let domain = match (old, new) {
             (Kind::Boolean, Kind::Boolean) => Domain::Boolean,
             (Kind::Int, Kind::Int) => Domain::Int,
             (Kind::Double, Kind::Double) => Domain::Double,
             (Kind::String, Kind::String) => Domain::String,
             (Kind::Int, Kind::Double) | (Kind::Double, Kind::Int) => Domain::IntDouble,
+            (Kind::Boolean, Kind::Int) | (Kind::Int, Kind::Boolean) => Domain::BoolInt,
+            (Kind::Boolean, Kind::Double) | (Kind::Double, Kind::Boolean) => Domain::BoolDouble,
             (Kind::String, Kind::Boolean) | (Kind::Boolean, Kind::String) => Domain::StringBoolean,
             (Kind::String, Kind::Int) | (Kind::Int, Kind::String) => Domain::StringInt,
             (Kind::String, Kind::Double) | (Kind::Double, Kind::String) => Domain::StringDouble,
-            _ => return None,
         };
-        Some(Self { old, new, domain })
+        Self { old, new, domain }
     }
 
     pub(crate) fn canonicalize_old(&self, values: &dyn Array) -> Vec<CanonicalValue> {
@@ -202,13 +213,18 @@ fn string_values(values: &dyn Array) -> Vec<RawValue> {
 fn canonicalize(value: RawValue, domain: Domain) -> CanonicalValue {
     match value {
         RawValue::Null => CanonicalValue::Null,
-        RawValue::Boolean(value) => CanonicalValue::Boolean(value),
+        // Encoding equality, not truthiness: `true` is `1` and `false` is `0`,
+        // exactly, so every other number stays unequal to both.
+        RawValue::Boolean(value) => match domain {
+            Domain::BoolInt | Domain::BoolDouble => CanonicalValue::Int(i64::from(value)),
+            _ => CanonicalValue::Boolean(value),
+        },
         RawValue::Int(value) => match domain {
             Domain::Double | Domain::StringDouble => canonical_double(value as f64),
             _ => CanonicalValue::Int(value),
         },
         RawValue::Double(value) => match domain {
-            Domain::IntDouble => exact_double_to_i64(value)
+            Domain::IntDouble | Domain::BoolDouble => exact_double_to_i64(value)
                 .map(CanonicalValue::Int)
                 .unwrap_or_else(|| canonical_double(value)),
             _ => canonical_double(value),
@@ -443,7 +459,7 @@ mod tests {
     };
 
     fn values(array: ArrayRef, other: ArrayRef) -> (Vec<CanonicalValue>, Vec<CanonicalValue>) {
-        let plan = ComparisonPlan::new(array.data_type(), other.data_type()).unwrap();
+        let plan = ComparisonPlan::new(array.data_type(), other.data_type());
         (
             plan.canonicalize_old(array.as_ref()),
             plan.canonicalize_new(other.as_ref()),
@@ -451,24 +467,70 @@ mod tests {
     }
 
     #[test]
-    fn comparison_matrix_accepts_only_compatible_pairs() {
+    fn every_pair_of_supported_types_is_comparable() {
         use arrow_schema::DataType::{Boolean, Float64, Int64, Utf8};
 
-        for (old, new) in [
-            (Boolean, Boolean),
-            (Int64, Int64),
-            (Float64, Float64),
-            (Utf8, Utf8),
-            (Int64, Float64),
-            (Utf8, Boolean),
-            (Utf8, Int64),
-            (Utf8, Float64),
-        ] {
-            assert!(ComparisonPlan::new(&old, &new).is_some(), "{old:?}/{new:?}");
-            assert!(ComparisonPlan::new(&new, &old).is_some(), "{new:?}/{old:?}");
+        // The domain match is exhaustive, so construction is the whole of the
+        // claim; the pairs are spelled out so a kind losing its domain would
+        // name itself here.
+        for old in [Boolean, Int64, Float64, Utf8] {
+            for new in [Boolean, Int64, Float64, Utf8] {
+                ComparisonPlan::new(&old, &new);
+            }
         }
-        assert!(ComparisonPlan::new(&Boolean, &Int64).is_none());
-        assert!(ComparisonPlan::new(&Boolean, &Float64).is_none());
+    }
+
+    #[test]
+    fn booleans_compare_as_their_exact_encoding() {
+        let (old, new) = values(
+            column!([true, false, true, true, true]),
+            column!([1, 0, 2, -1, i64::MIN]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+        assert_ne!(old[2], new[2]);
+        assert_ne!(old[3], new[3]);
+        assert_ne!(old[4], new[4]);
+
+        let (old, new) = values(
+            column!([true, false, true, false, true]),
+            column!([1.0, -0.0, 1.5, f64::NAN, f64::INFINITY]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+        assert_ne!(old[2], new[2]);
+        assert_ne!(old[3], new[3]);
+        assert_ne!(old[4], new[4]);
+    }
+
+    #[test]
+    fn nulls_follow_the_usual_rules_in_the_boolean_domains() {
+        let (old, new) = values(
+            column!([None::<bool>, Some(true)]),
+            column!([None::<i64>, None]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+    }
+
+    #[test]
+    fn equality_does_not_compose_across_type_triangles() {
+        // Each pair compares under its own domain, and the corners disagree:
+        // "true" equals true equals 1, but "true" is not 1, and "1" equals 1
+        // equals true, but "1" is not true. Deliberate — each string domain
+        // parses by its partner's spelling rules — and pinned so the
+        // incoherence stays a decision rather than becoming a surprise.
+        let (old, new) = values(column!(["true", "1"]), column!([true, true]));
+        assert_eq!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+
+        let (old, new) = values(column!(["true", "1"]), column!([1, 1]));
+        assert_ne!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+
+        let (old, new) = values(column!([true, true]), column!([1, 1]));
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
     }
 
     #[test]

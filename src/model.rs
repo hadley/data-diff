@@ -52,11 +52,6 @@ pub enum DiffError {
         hint: String,
         kind: String,
     },
-    IncompatibleColumns {
-        column: String,
-        old_type: String,
-        new_type: String,
-    },
 }
 
 impl std::fmt::Display for DiffError {
@@ -113,14 +108,6 @@ impl std::fmt::Display for DiffError {
             DiffError::UnknownHintKind { hint, kind } => {
                 write!(f, "hint {hint:?} names {kind:?}, which is not an operation")
             }
-            DiffError::IncompatibleColumns {
-                column,
-                old_type,
-                new_type,
-            } => write!(
-                f,
-                "column {column:?} has incompatible types {old_type} and {new_type}"
-            ),
         }
     }
 }
@@ -425,7 +412,6 @@ pub struct KeyComponent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectionReason {
     MissingColumn { side: Side },
-    IncompatibleTypes { old_type: String, new_type: String },
     DuplicateColumn { side: Side },
     InvalidValue { side: Side, row: usize },
     NonUniqueOld { first_row: usize, row: usize },
@@ -436,7 +422,6 @@ impl RejectionReason {
     pub fn name(&self) -> &'static str {
         match self {
             RejectionReason::MissingColumn { .. } => "missing_column",
-            RejectionReason::IncompatibleTypes { .. } => "incompatible_types",
             RejectionReason::DuplicateColumn { .. } => "duplicate_column",
             RejectionReason::InvalidValue { .. } => "invalid_value",
             RejectionReason::NonUniqueOld { .. } => "non_unique_old",
@@ -557,8 +542,6 @@ pub enum IssueKind {
     HintMissingTarget { side: Side, column: String },
     /// Hints made claims that cannot all hold, so none of them was applied.
     ContradictoryHints,
-    /// A hint claimed two columns are one, but their values cannot be compared.
-    HintIncompatibleTypes { old_type: String, new_type: String },
     /// An edit hint named an identity that reconciliation did not establish.
     HintUnresolvedIdentity,
     /// An edit hint named an identity that changed in neither type nor value.

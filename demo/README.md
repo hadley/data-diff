@@ -153,6 +153,16 @@ col_rename(cost -> price, basis: swapped)
 col_order(price, 3 -> 2)
 ```
 
+A swap can even explain what looks like two columns changing type at once. Here `flag` appears to have become an integer column and `count` a boolean one, but each new column holds the other's old values, so the account that fits is an exchange — each column keeps its own type and its contents moved:
+
+```console
+$ data-diff demo/swap-types-old.parquet demo/swap-types-new.parquet --key id
+col_key([id], basis: declared)
+col_rename(flag -> count, basis: swapped)
+col_rename(count -> flag, basis: swapped)
+col_order(flag, 3 -> 2)
+```
+
 Or if you provide an explicit hint:
 
 ```console

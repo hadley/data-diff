@@ -1,9 +1,8 @@
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use crate::compare::ComparisonPlan;
 use crate::key::ResolvedKey;
-use crate::{DiffError, IdentityBasis, KeyBasis, Side};
+use crate::{IdentityBasis, KeyBasis, Side};
 
 /// The partial bijection between old and new columns.
 ///
@@ -17,6 +16,11 @@ use crate::{DiffError, IdentityBasis, KeyBasis, Side};
 /// about hints: a reserved column is passed over by name matching because the
 /// map refuses to pair it, and falls out as a drop or an addition because the
 /// map has no pair for it.
+///
+/// Every pair the map holds is comparable. The map does not enforce that —
+/// it never sees a type — but no claimant can break it: every pair of
+/// supported types has a comparison plan, and `validate_tables` refuses the
+/// rest before reconciliation begins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnMap {
     /// Ascending by old position, which is what `detect_order` requires of the
@@ -198,7 +202,7 @@ pub(crate) fn reconcile_schema(
     new: &RecordBatch,
     key: &ResolvedKey,
     map: &mut ColumnMap,
-) -> Result<(), DiffError> {
+) {
     let old_schema = old.schema();
     let new_schema = new.schema();
 
@@ -225,19 +229,6 @@ pub(crate) fn reconcile_schema(
             map.claim(old_index, new_index, IdentityBasis::Name);
         }
     }
-
-    for pair in map.pairs() {
-        let old_field = old_schema.field(pair.old);
-        let new_field = new_schema.field(pair.new);
-        if ComparisonPlan::new(old_field.data_type(), new_field.data_type()).is_none() {
-            return Err(DiffError::IncompatibleColumns {
-                column: old_field.name().clone(),
-                old_type: format!("{:?}", old_field.data_type()),
-                new_type: format!("{:?}", new_field.data_type()),
-            });
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -245,7 +236,6 @@ pub(crate) mod testing {
     use arrow_array::RecordBatch;
 
     use super::ColumnMap;
-    use crate::DiffError;
     use crate::key::ResolvedKey;
 
     /// Reconcile the two schemas with no hints in play.
@@ -257,10 +247,10 @@ pub(crate) mod testing {
         old: &RecordBatch,
         new: &RecordBatch,
         key: &ResolvedKey,
-    ) -> Result<ColumnMap, DiffError> {
+    ) -> ColumnMap {
         let mut map = ColumnMap::new(old.schema_ref(), new.schema_ref());
-        super::reconcile_schema(old, new, key, &mut map)?;
-        Ok(map)
+        super::reconcile_schema(old, new, key, &mut map);
+        map
     }
 }
 
@@ -272,14 +262,14 @@ mod tests {
     use super::ColumnMap;
     use super::testing::reconcile_schema;
     use crate::key::testing::resolve_key;
-    use crate::{DiffError, DiffOptions, IdentityBasis, Side};
+    use crate::{DiffOptions, IdentityBasis, Side};
 
-    fn reconcile(old: &RecordBatch, new: &RecordBatch) -> Result<ColumnMap, DiffError> {
+    fn reconcile(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: Vec::new(),
         };
-        let key = resolve_key(old, new, &options)?;
+        let key = resolve_key(old, new, &options).unwrap();
         reconcile_schema(old, new, &key)
     }
 
@@ -307,7 +297,7 @@ mod tests {
             "add" => [1],
         };
 
-        let map = reconcile(&old, &new).unwrap();
+        let map = reconcile(&old, &new);
 
         assert_eq!(
             pairs(&map),
@@ -337,7 +327,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
 
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
         assert_eq!(pairs(&map), [(0, 1, IdentityBasis::Declared, true)]);
         assert_eq!(map.dropped(), [1]);
@@ -360,7 +350,7 @@ mod tests {
             hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
         assert_eq!(
             pairs(&map),
@@ -386,7 +376,7 @@ mod tests {
 
         let options = DiffOptions::default();
         let key = resolve_key(&old, &new, &options).unwrap();
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
         assert_eq!(
             pairs(&map),
@@ -492,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incompatible_same_name_columns() {
+    fn a_boolean_and_a_numeric_column_pair_like_any_other() {
         let old = table! {
             "id" => [1],
             "flag" => [true],
@@ -502,13 +492,18 @@ mod tests {
             "flag" => [1],
         };
 
+        // Once fatal as incompatible; booleans now compare in the numeric
+        // domains, so the pair is an ordinary same-name identity.
+        let map = reconcile(&old, &new);
+
         assert_eq!(
-            reconcile(&old, &new).unwrap_err(),
-            DiffError::IncompatibleColumns {
-                column: "flag".into(),
-                old_type: "Boolean".into(),
-                new_type: "Int64".into(),
-            }
+            pairs(&map),
+            [
+                (0, 0, IdentityBasis::Declared, true),
+                (1, 1, IdentityBasis::Name, false),
+            ]
         );
+        assert!(map.dropped().is_empty());
+        assert!(map.added().is_empty());
     }
 }

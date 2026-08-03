@@ -473,6 +473,200 @@ fn a_swap_replaces_two_edits_with_two_renames() {
 }
 
 #[test]
+fn a_faithful_boolean_reencoding_is_a_type_change_and_nothing_more() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "paid" => [true, false, true],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "paid" => [1, 0, 1],
+    };
+    let options = declared("id");
+
+    // Once fatal as incompatible. The 0/1 encoding compares equal value by
+    // value, so the retype reads like any other faithful conversion: a type
+    // change with no cells behind it.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Name),
+        ]
+    );
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_unfaithful_boolean_reencoding_reports_its_changed_cells() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "paid" => [true, false, true],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "paid" => [1, 1, 1],
+    };
+    let options = declared("id");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // Row 2 genuinely flipped — false is 0, not any nonzero — so the retype
+    // carries a measured value change beside it.
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 1,
+        }]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 1, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_cross_type_exchange_is_a_swap_rather_than_two_impossible_retypes() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "flag" => [
+            true, false, true, false, true, false, true, false, true, false, true
+        ],
+        "count" => [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "flag" => [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000],
+        "count" => [
+            true, false, true, false, true, false, true, false, true, false, true
+        ],
+    };
+    let options = declared("id");
+
+    // Each same-name pair once failed the comparison outright; now each is an
+    // ordinary identity whose values disagree everywhere, and the crossings
+    // agree perfectly on identical source types, which is the exchange's own
+    // bar. The apparent retypes dissolve: each final identity keeps its type.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
+        ]
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+    assert!(diff.columns.edited.is_empty());
+    assert!(diff.cells.is_empty());
+    assert_eq!(diff.order.columns, vec![Coordinate::from_zero_based(2, 1)]);
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_boolean_column_relates_to_its_integer_encoding_by_value() {
+    let old = table! {
+        "id" => [1, 2],
+        "flag" => [true, false],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "count" => [1, 0],
+    };
+    let options = declared("id");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // A drop and an addition until rename inference measures them: the 0/1
+    // encoding is exact agreement, so the identity forms across the types and
+    // the retype rides on it.
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Exact),
+        ]
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_boolean_and_a_numeric_pair_may_be_declared_as_the_key() {
+    let old = table! {
+        "flag" => [true, false],
+        "value" => [10, 20],
+    };
+    let new = table! {
+        "count" => [0, 1],
+        "value" => [21, 10],
+    };
+    let options = DiffOptions {
+        key: vec!["flag/count".into()],
+        hints: Vec::new(),
+    };
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    // The declared pair validates on the encoding and identifies both rows
+    // across the reversal.
+    assert_eq!(diff.key.basis, KeyBasis::Declared);
+    assert_eq!(diff.key.rejection, None);
+    assert_eq!(
+        diff.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 0),
+        ]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 0, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
 fn a_renamed_key_identifies_rows_across_both_files() {
     let old = table! {
         "customer_id" => [1, 2, 3],
