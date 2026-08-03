@@ -62,10 +62,6 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 /// Read one hint per line, ignoring blanks and comments.
-///
-/// Comments earn their place because a hints file is the form a generated or
-/// committed set takes, where saying why a rename was asserted is worth more
-/// than the line it costs.
 fn read_hints(path: &PathBuf) -> Result<Vec<String>, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;

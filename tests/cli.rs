@@ -224,8 +224,6 @@ fn row_position_cannot_be_compounded_with_a_column() {
         .output()
         .unwrap();
 
-    // A fault in the --key string itself, which stays fatal: there is no key to
-    // fall back from.
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_eq!(
@@ -348,8 +346,6 @@ fn infers_a_rename_from_the_values() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    // No new rendering was needed: the rename falls out of an identity whose
-    // two ends carry different names.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(amount -> total, basis: exact)
@@ -569,8 +565,6 @@ fn accepts_a_hint_for_a_rename_no_evidence_could_show() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    // The hint is written the way this very output prints it, and asserts
-    // identity only: the values that changed are still reported.
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     col_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
@@ -645,8 +639,6 @@ fn reports_an_ignored_hint_beside_one_that_applied() {
         .output()
         .unwrap();
 
-    // A hint the data contradicts is reported and skipped; it is not a failure,
-    // so the status stays zero and the rest of the run stands.
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"

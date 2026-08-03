@@ -183,7 +183,6 @@ mod tests {
         schema
     }
 
-    /// The `(old, new)` pairs of every identity that is not the key.
     fn pairs(schema: &ColumnMap) -> Vec<(usize, usize)> {
         schema
             .pairs()
@@ -204,7 +203,6 @@ mod tests {
             .any(|pair| old.column(pair.old).data_type() != new.column(pair.new).data_type())
     }
 
-    /// What the map says established the identity holding this old column.
     fn basis(schema: &ColumnMap, old: usize) -> IdentityBasis {
         schema
             .pairs()

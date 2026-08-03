@@ -5,7 +5,6 @@ use crate::{
     KeyRejection, KeyRetraction, KeySubject, POSITIONAL_COMPONENT,
 };
 
-/// The line dividing what went wrong from what was found.
 const SEPARATOR: &str = "----";
 
 /// Write a compact, operation-oriented description of a diff.
@@ -127,9 +126,6 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     }
 
     if regenerated {
-        // No arguments: the subject is the table itself, and the measurement
-        // lives in `Diff::regeneration` as a rejection's detail lives in its
-        // variant.
         operations.push("table_regenerate()".to_owned());
     } else {
         for &position in &diff.rows.dropped {
@@ -439,7 +435,7 @@ mod tests {
         String::from_utf8(output).unwrap()
     }
 
-    /// The `name` of every `name: value` field in some rendered output.
+    /// Every field name in rendered output.
     ///
     /// Fields are the one place the grammar could drift, so they are read back
     /// out of the rendering rather than trusted. Column names are not allowed

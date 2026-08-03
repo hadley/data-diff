@@ -46,7 +46,6 @@ pub enum Kind {
     Text,
 }
 
-/// One fixture value, separated from the Rust type it was written as.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cell {
     Null,
@@ -115,7 +114,6 @@ impl CellValue for &str {
     }
 }
 
-/// A missing value keeps the kind of the type it is missing from.
 impl<T: CellValue> CellValue for Option<T> {
     const KIND: Kind = T::KIND;
 
@@ -127,7 +125,6 @@ impl<T: CellValue> CellValue for Option<T> {
     }
 }
 
-/// Build one column from its values. Called through [`column!`] and [`table!`].
 pub fn column<T: CellValue, const N: usize>(
     values: [T; N],
     annotation: &str,
@@ -138,13 +135,11 @@ pub fn column<T: CellValue, const N: usize>(
     build(cells, &data_type, annotation, context)
 }
 
-/// Build a column with no values, whose type comes from its annotation alone.
 pub fn empty_column(annotation: &str, context: Option<&str>) -> ArrayRef {
     let data_type = resolve(annotation, None, context);
     build(Vec::new(), &data_type, annotation, context)
 }
 
-/// Assemble named columns into a table. Called through [`table!`].
 pub fn table_from_columns(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
     let fields = columns
         .iter()
@@ -154,12 +149,10 @@ pub fn table_from_columns(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).expect("fixture columns agree")
 }
 
-/// A table with no columns and no rows. Called through [`table!`].
 pub fn empty_table() -> RecordBatch {
     RecordBatch::new_empty(Arc::new(Schema::empty()))
 }
 
-/// A table whose rows carry no columns, which no column list can express.
 pub fn rows_without_columns(rows: usize) -> RecordBatch {
     RecordBatch::try_new_with_options(
         Arc::new(Schema::empty()),
@@ -253,7 +246,6 @@ fn build(
     }
 }
 
-/// Encode text values as a dictionary, numbering values as they first appear.
 fn dictionary(values: Vec<Option<String>>) -> ArrayRef {
     let mut distinct: Vec<String> = Vec::new();
     let mut keys: Vec<Option<i8>> = Vec::new();
@@ -316,7 +308,6 @@ fn texts(cells: Vec<Cell>) -> Vec<Option<String>> {
         .collect()
 }
 
-/// Fit integer values to the width the column was resolved to.
 fn narrow<T: TryFrom<i128>>(
     cells: Vec<Cell>,
     label: &str,
@@ -353,7 +344,6 @@ fn default_label(data_type: &DataType) -> &'static str {
     }
 }
 
-/// Report a misuse, naming the column when the caller knows it.
 fn fail(context: Option<&str>, message: String) -> ! {
     match context {
         Some(name) => panic!("column {name:?}: {message}"),
@@ -403,7 +393,6 @@ macro_rules! table {
     };
 }
 
-/// The shared column form, carrying the column name where there is one.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __column {
@@ -508,7 +497,6 @@ mod tests {
         assert!(ids.is_null(1));
         assert_eq!(ids.value(2), 3);
 
-        // A column of nothing but nulls still knows what it is.
         assert_eq!(column_type(&table, 1), &DataType::Utf8);
         assert!(table.column(1).is_null(0));
     }

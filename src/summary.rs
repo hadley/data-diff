@@ -328,8 +328,6 @@ mod tests {
     use super::{BipartiteGraph, SummaryChanges, SummaryColumn, SummaryRow, VertexCover};
     use crate::cells::{CellChanges, ColumnChanges};
 
-    /// Summarize with nothing forced, which is every test whose subject is the
-    /// optimizer rather than a hint.
     fn summarize(changes: &CellChanges) -> SummaryChanges {
         super::summarize(changes, &[])
     }

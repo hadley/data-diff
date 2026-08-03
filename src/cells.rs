@@ -124,8 +124,6 @@ pub(crate) fn compare_cells(
         .iter()
         .zip(fanout_cells)
         .map(|(group, mut cells)| {
-            // The old row is constant within an event, so grouping by new row
-            // reads as each new row's differences from the old one.
             cells.sort_by_key(|cell| (cell.new_row, cell.old_column, cell.new_column));
             FanoutChanges {
                 old: group.old,
@@ -239,8 +237,6 @@ mod tests {
             "value" => [10, 21],
         };
 
-        // "id" shares both values and "value" only one, so guessing selects
-        // "id"; the selected column is excluded whatever the basis.
         assert_eq!(
             changes_with(&old, &new, &[]).changed_cells(),
             [ChangedCell {
@@ -334,8 +330,6 @@ mod tests {
 
         let changes = changes(&old, &new);
 
-        // Separation partitions a column's cells rather than suppressing the
-        // column: the matched change is still an ordinary changed cell.
         assert_eq!(
             changes.columns,
             [ColumnChanges {
@@ -354,7 +348,6 @@ mod tests {
                 new_column: 1,
             }]
         );
-        // The fanout change is reachable only through its event.
         assert_eq!(
             changes.fanout,
             [FanoutChanges {
@@ -383,7 +376,6 @@ mod tests {
 
         let changes = changes(&old, &new);
 
-        // The fanout itself is the event, whether or not values differ.
         assert_eq!(
             changes.fanout,
             [FanoutChanges {
@@ -406,8 +398,6 @@ mod tests {
             "add" => [0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0],
         };
 
-        // The key agrees by construction and neither other column is
-        // identified, so the event has nothing comparable to report.
         assert!(changes(&old, &new).fanout[0].cells.is_empty());
     }
 

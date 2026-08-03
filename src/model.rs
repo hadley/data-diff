@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-/// Options that influence reconciliation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
     /// Components of the declared compound key.
@@ -18,39 +17,41 @@ pub struct DiffOptions {
 /// An error that prevents a complete diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffError {
-    /// A Parquet input could not be opened or decoded.
-    ReadParquet { path: PathBuf, message: String },
-    /// Top-level column names are not unique.
+    ReadParquet {
+        path: PathBuf,
+        message: String,
+    },
     DuplicateColumnNames {
         side: Side,
         duplicates: Vec<DuplicateColumnName>,
     },
-    /// A column is outside the MVP type set.
     UnsupportedColumn {
         side: Side,
         column: String,
         source_type: String,
     },
-    /// An unsigned value cannot be represented as an `int64`.
     IntegerOutOfRange {
         side: Side,
         column: String,
         source_type: String,
         row: usize,
     },
-    /// A comma-separated key contained an empty component.
     EmptyKeyComponent,
-    /// A key component named more than one column per side.
-    MalformedKeyComponent { component: String },
-    /// More than one key component claimed the same column.
-    DuplicateKeyColumn { side: Side, column: String },
-    /// `#row` was compounded with a real component.
+    MalformedKeyComponent {
+        component: String,
+    },
+    DuplicateKeyColumn {
+        side: Side,
+        column: String,
+    },
     CompoundPositionalKey,
-    /// A hint could not be read as a line of the format's grammar.
-    MalformedHint { hint: String },
-    /// A hint named an operation that cannot be asserted.
-    UnknownHintKind { hint: String, kind: String },
-    /// Same-name non-key columns cannot be compared.
+    MalformedHint {
+        hint: String,
+    },
+    UnknownHintKind {
+        hint: String,
+        kind: String,
+    },
     IncompatibleColumns {
         column: String,
         old_type: String,
@@ -160,7 +161,6 @@ enum CoordinateRepr {
 }
 
 impl Coordinate {
-    /// Construct a coordinate from zero-based positions in the input tables.
     pub fn from_zero_based(old: usize, new: usize) -> Self {
         let old = old + 1;
         let new = new + 1;
@@ -190,7 +190,6 @@ enum CellCoordinateRepr {
 }
 
 impl CellCoordinate {
-    /// Construct a cell coordinate from zero-based row and column positions.
     pub fn from_zero_based(
         old_row: usize,
         old_column: usize,
@@ -216,7 +215,6 @@ pub enum NormalizedType {
     String,
 }
 
-/// One column in an input schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnSchema {
     pub name: String,
@@ -224,7 +222,6 @@ pub struct ColumnSchema {
     pub normalized_type: NormalizedType,
 }
 
-/// The original and normalized input schemas.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Schemas {
     pub old: Vec<ColumnSchema>,
@@ -370,9 +367,7 @@ pub struct KeyDiff {
 /// `key_retracted()` line omits, as a rejection's variants hold their detail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRetraction {
-    /// The retracted key's components, named as the key line named them.
     pub columns: Vec<KeyComponent>,
-    /// The measurement that condemned it.
     pub mass: ChangeMass,
 }
 
@@ -438,7 +433,6 @@ pub enum RejectionReason {
 }
 
 impl RejectionReason {
-    /// The stable identifier the format writes.
     pub fn name(&self) -> &'static str {
         match self {
             RejectionReason::MissingColumn { .. } => "missing_column",
@@ -451,7 +445,6 @@ impl RejectionReason {
     }
 }
 
-/// Row matching events.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RowsDiff {
     pub added: Vec<usize>,
@@ -474,7 +467,6 @@ pub struct FanoutEvent {
     pub cells: Vec<CellCoordinate>,
 }
 
-/// Minimal relative-order changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OrderDiff {
     pub columns: Vec<Coordinate>,
@@ -523,27 +515,20 @@ pub struct HintClaim {
 /// is the hint's own rather than something its kind determines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HintNames {
-    /// One name, whose side the kind settles.
     Single(String),
-    /// An old-to-new pair.
     Pair(String, String),
 }
 
 /// The kind of claim a hint makes against column identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintKind {
-    /// Both endpoints are one column.
     Rename,
-    /// The new endpoint has no partner.
     Add,
-    /// The old endpoint has no partner.
     Drop,
-    /// An identity changed, claiming no endpoint of its own.
     Edit,
 }
 
 impl HintKind {
-    /// The operation name this kind is written and printed as.
     pub fn name(&self) -> &'static str {
         match self {
             HintKind::Rename => "col_rename",
@@ -562,7 +547,6 @@ impl HintKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
     pub kind: IssueKind,
-    /// The hints the issue concerns, in the order they were supplied.
     pub hints: Vec<HintClaim>,
 }
 
@@ -581,7 +565,6 @@ pub enum IssueKind {
     HintNoChange,
 }
 
-/// An inspectable, coordinate-only table diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diff {
     pub schemas: Schemas,

@@ -233,7 +233,6 @@ mod tests {
         schema
     }
 
-    /// The `(old, new)` pairs of every identity that is not the key.
     fn renames(schema: &ColumnMap) -> Vec<(usize, usize)> {
         schema
             .pairs()
@@ -243,7 +242,6 @@ mod tests {
             .collect()
     }
 
-    /// What the map says established the identity holding this old column.
     fn basis(schema: &ColumnMap, old: usize) -> IdentityBasis {
         schema
             .pairs()
