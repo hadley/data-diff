@@ -41,17 +41,16 @@ col_rename(customer_id -> id, basis: declared)
 row_edit(2, changes: 1)
 ```
 
-Without the pair the rows no longer line up. Key guessing only pairs candidates with the same name in both files, so it cannot see this one and settles on `amount` instead:
+The pair is not required, however. If we don't supply it, `data-dict` goes to work. First it looks at all pairs of identically named columns, looking for potential keys that overlap between the two columns. In this case it settles on `amount`, but then rename inference identifies `customer_id` and `id` as one column, so key is reconsidered once with that identity in hand. The renamed pair wins on the evidence, so we reconstruct the correct key:
 
 ```console
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
-col_key([amount], basis: guessed, overlap: 0.67)
+col_key([customer_id -> id], basis: guessed, overlap: 1.00)
 col_rename(customer_id -> id, basis: exact)
-row_drop(2)
-row_add(2)
+row_edit(2, changes: 1)
 ```
 
-The rename is still found, but only after the key has been resolved and the rows matched by it, which is too late to be any use.
+The result is the same diff the explicit pair produces, with `basis: guessed` recording that the tool arrived at it rather than being told.
 
 ### When nothing can identify a row
 
@@ -70,6 +69,18 @@ $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key '#row'
 col_key([#row], basis: declared)
 row_edit(2, changes: 1)
 ```
+
+### When the whole file changed
+
+Positional matching only tells a useful story when most of the file is the same file. Here nothing can identify a row *and* every cell disagrees, so enumerating edits would describe the matching rather than the data. When more than half of the cells change under a key `data-diff` chose itself, it says what the evidence actually supports — the file was regenerated:
+
+```console
+$ data-diff demo/regenerate-old.parquet demo/regenerate-new.parquet
+col_key([#row], basis: fallback)
+table_regenerate()
+```
+
+A key you declare is never second-guessed this way: with an explicit `--key`, the edits are reported in full however many there are.
 
 ## Fanout
 
