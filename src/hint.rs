@@ -312,8 +312,10 @@ pub(crate) fn validate_edits(
 
 /// Resolve a hint's names to the endpoints they claim.
 ///
-/// Existence is the whole of the check: every pair of supported types is
-/// comparable, so a hint that resolves is one the comparison can honour.
+/// Existence is the whole of the check. Identity does not require
+/// comparability — an asserted pair whose types have no comparison plan is
+/// still one column, with a type change for its whole story — so there is
+/// nothing about the columns' values for resolution to refuse.
 fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issue> {
     let issue = |kind: IssueKind| Issue {
         kind,

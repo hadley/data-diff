@@ -173,6 +173,17 @@ col_rename(discount -> markdown, basis: hinted)
 col_edit(markdown, changes: 3)
 ```
 
+## Beyond the core types
+
+Dates, timestamps, decimals, binary, and nested values all participate: but a column outside the core types can only be compared exactly to its own type. Here the `when` dates are diffed like any other column, while `flag` changed from an integer to a date — two types with no comparison between them — so its type change is the whole of its report: the values are never compared, so no `changes:` count is ever claimed:
+
+```console
+$ data-diff demo/temporal-old.parquet demo/temporal-new.parquet
+table_key([id], basis: guessed, overlap: 1.00)
+col_edit(flag, type: Int64 -> Date32)
+row_edit(2, changes: 1)
+```
+
 ## One-sided diffs
 
 A file that was just added, or just deleted, has nothing to compare against. Name the missing side `'#missing'` — quoted, since `#` starts a comment in most shells — and `data-diff` summarizes the file that exists: a table-level headline with the row count, then the columns. Every row is new (or gone) because the file is, so listing them would say nothing the headline doesn't:

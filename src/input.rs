@@ -141,7 +141,13 @@ fn normalized_type(data_type: &DataType) -> Option<NormalizedType> {
         {
             Some(NormalizedType::String)
         }
-        _ => None,
+        // Outside the matrix, admission is probed rather than listed: a column
+        // participates exactly when the canonical row encoding can represent
+        // it, so the admitted set grows with the encoding rather than with a
+        // second list here.
+        other => arrow_row::RowConverter::new(vec![arrow_row::SortField::new(other.clone())])
+            .is_ok()
+            .then_some(NormalizedType::Opaque),
     }
 }
 
@@ -272,39 +278,57 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_types() {
+    fn admits_a_column_outside_the_matrix_as_opaque() {
         let old = table! { "bytes" => binary["a"] };
 
-        assert_eq!(
-            validate_tables(&old, &table! {}),
-            Err(DiffError::UnsupportedColumn {
-                side: Side::Old,
-                column: "bytes".into(),
-                source_type: "Binary".into(),
-            })
-        );
+        // Once rejected as unsupported; admission is now probed against the
+        // row encoding, and binary values are well within it.
+        let schemas = validate_tables(&old, &table! {}).unwrap();
+
+        assert_eq!(schemas.old[0].source_type, "Binary");
+        assert_eq!(schemas.old[0].normalized_type, NormalizedType::Opaque);
     }
 
     #[test]
-    fn rejects_every_unsupported_type_family() {
+    fn admits_the_common_type_families_and_refuses_the_unencodable() {
         let item = Arc::new(Field::new("item", DataType::Int64, true));
-        let unsupported = [
+        let admitted = [
             DataType::Binary,
             DataType::FixedSizeBinary(4),
             DataType::Date32,
             DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             DataType::Duration(TimeUnit::Microsecond),
             DataType::Decimal128(10, 2),
             DataType::List(item.clone()),
-            DataType::Struct(Fields::from(vec![item])),
+            DataType::Struct(Fields::from(vec![item.clone()])),
             DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Int64)),
         ];
+        for data_type in admitted {
+            assert_eq!(
+                normalized_type(&data_type),
+                Some(NormalizedType::Opaque),
+                "{data_type:?} should be admitted"
+            );
+        }
 
-        for data_type in unsupported {
+        // The set the probe refuses is the row encoding's, not this crate's;
+        // these pin that refusal still exists rather than which types are in
+        // it.
+        for data_type in [
+            DataType::FixedSizeList(item.clone(), 2),
+            DataType::Union(
+                arrow_schema::UnionFields::new(
+                    vec![0],
+                    vec![Field::new("a", DataType::Int64, true)],
+                ),
+                arrow_schema::UnionMode::Dense,
+            ),
+        ] {
             assert_eq!(
                 normalized_type(&data_type),
                 None,
-                "{data_type:?} should be unsupported"
+                "{data_type:?} should be refused"
             );
         }
     }

@@ -136,10 +136,13 @@ For value comparison, we normalize the source types to a smaller set of flexible
 | `int64` | Integers that fit in a signed 64-bit integer |
 | `double` | Floating-point numbers and other real numbers that can be represented as doubles |
 | `string` | Strings, factors, categoricals, dictionaries, and enums, using their logical values rather than their underlying codes |
+| `opaque` | Everything else the canonical row encoding can represent, compared only against its identical source type |
 
-Source types outside these categories, such as binary or nested values, are comparable only when their source types are identical. They are not candidates for inferred cross-type renames, although a rename hint can establish their identity.
+Source types outside these categories are *opaque*: admitted whenever the canonical row encoding can represent them — dates, timestamps, decimals, binary, lists, structs, and more — and normalized to `opaque`. Admission is probed against the encoder rather than listed here, so the admitted set grows with the encoding, and what it refuses (unions and a few other exotics) remains a fatal `UnsupportedColumn`. An opaque column is comparable only against its *identical* source type, timezone, unit, precision, and scale included: its values canonicalize to their row-format bytes, equal exactly when the values are, with nulls taken out before encoding so the null rules below stay uniform. The encoding hydrates dictionaries to their underlying values, so two files interning the same values differently still compare equal; that property is load-bearing and pinned by a test.
 
-Within the four normalized types, every pair is comparable, so no supported pair of columns can fail the comparison. When later steps admit types that reintroduce incomparable pairs, the settled reading is already decided: identity requires comparability, whoever proposes the pair — a name match, a declared component, a hint — because an identity is used for cell comparison and there would be nothing to use. Such a pair is declined where it would be claimed and reads as a drop and an addition, never a fatal error and never an edit whose counts nothing could measure. The `incompatible_types` rejection and hint vocabulary retired when booleans joined the numeric domain return with it.
+Within the four normalized types, every pair is comparable; with opaque types in the schema, incomparable pairs exist again, and the line falls where the two kinds of claim divide. *Identity* does not require comparability: a same-named pair, an asserted rename, or a declared component whose types have no comparison plan is still one column, because identity is a claim about what the column is, not about what its values can be measured against. What incomparability removes is the value story. Such a pair's values are never compared — not claimed changed and not claimed equal — so its report is a type-only `col_edit()`, and its cells appear nowhere: no `changes:` count, no changed-cell coordinates, no contribution to edit summarization or change mass. *Everything that needs values* does require a plan: an incomparable pair cannot be a key, cannot be guessed, and is never proposed by rename inference, which has no evidence to propose it on. (An earlier revision read an incomparable same-name pair as a drop and an addition; the owner reversed that — the same name is better evidence about identity than incomparability is against it, and drop-plus-add asserted two events where one column stood.)
+
+A `Timestamp(ms)` beside a `Timestamp(ns)` is very likely the same instants retyped, and here that reads as exactly what is known: one column whose type changed, values uncompared. "Very likely equal" is a semantic judgement the promotion step should make with unit-conversion exactness in hand, not something byte comparison should shrug at, and the output is honest in the meantime — never wrongly equal and never wrongly changed.
 
 ### Comparison semantics
 
@@ -164,7 +167,7 @@ Comparison is defined per column pair, and the pairwise definitions do not compo
 
 Null/null agrees across every pair of normalized types, while null/present disagrees. All `NaN` values agree with one another but are distinct from null. Positive and negative zero agree. Both null and `NaN` invalidate keys; elsewhere they participate in hashing, agreement, and frequency calculations as distinct categories.
 
-Decimal, temporal, binary, and nested types are unsupported by the MVP.
+An `opaque` column pairs with its identical source type and nothing else; the pair compares exactly, by canonical bytes. Cross-type rules for the common opaque families — timestamps across units and timezones, date against timestamp, decimal against the numerics — are the promotion step's business, each replacing incomparability with a decided rule.
 
 ### String parsing
 
@@ -205,7 +208,7 @@ We detect conflicts across the complete hint set before mutating the identity ma
 
 Valid rename identities are applied before key resolution. Valid add/drop reservations later remove their endpoints from rename-inference candidates. A `col_add(new.b)` plus `col_drop(old.a)` is not contradictory: together they explicitly choose replacement rather than rename. Edit hints are validated after schema and cell changes are known and may coexist with renames. If an edited identity has neither a type nor value change, we ignore the hint.
 
-Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_no_change`, and `hint_unresolved_identity`. There is no incompatible-types kind to decline a rename with: every pair of supported types is comparable, so a rename hint that resolves is one cell comparison can honour. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
+Hint problems use stable issue kinds: `hint_missing_target`, `contradictory_hints`, `hint_no_change`, and `hint_unresolved_identity`. There is no incompatible-types kind: a rename hint asserts identity, identity does not require comparability, and an asserted pair without a comparison plan reports its type change and nothing else, exactly as a same-named one does. A valid rename hint establishes identity but does not assert that the column's type or values are unchanged.
 
 ## Key resolution
 
@@ -213,7 +216,7 @@ We resolve a stable row identifier from a declared key, a guessed key, or finall
 
 ### Key comparison
 
-Key columns need not have identical source or normalized types: every old/new pair of supported columns has a comparison plan. For a compound key, reconciliation constructs one plan per corresponding column pair and hashes the tuple of canonicalized components.
+Key columns need not have identical source or normalized types, but every old/new key-column pair must have a comparison plan — which an opaque column has only against its identical type. For a compound key, reconciliation constructs one plan per corresponding column pair and hashes the tuple of canonicalized components. An incomparable pair invalidates a declared key with reason `incompatible_types`: a key matches rows by value, and there are no comparable values to match by. The identity the component asserted survives the rejection like any other, with a type change for its whole story.
 
 Missing values and `NaN` invalidate the key. Uniqueness is checked independently on each side after values have been canonicalized by these cross-side comparison plans. This ensures that values such as string `"1.0"` and integer `1` do not create ambiguous row identities.
 
@@ -238,7 +241,7 @@ $$
 
 We define $f = 0$ when there are no shared key values. We retain the declared key when $f \le 0.10$, treating the affected values as isolated `row_fanout()` groups. Otherwise, we treat the key as broken and continue to key guessing. Each affected key counts once regardless of how many new rows it produces. New-only duplicated keys do not contribute because they are additions rather than fanouts.
 
-A `--key` string that cannot be read at all — an empty component, more than two names in one component, or a column claimed twice — is a fault in the instruction rather than in the data, and remains fatal. Everything below that is a well-formed key this pair of files cannot support: a component absent on one side, two components resolving onto one column, a null or `NaN`, duplication in `old`, or fanout above the limit. Each of these is recorded as a `key_invalid` rejection and reconciliation continues to key guessing and, if necessary, to row position. The fallback basis is recorded as `guessed` or `fallback`, and the rejection remains visible. A replacement key reruns validation and all downstream stages.
+A `--key` string that cannot be read at all — an empty component, more than two names in one component, or a column claimed twice — is a fault in the instruction rather than in the data, and remains fatal. Everything below that is a well-formed key this pair of files cannot support: a component absent on one side, an incomparable type pair, two components resolving onto one column, a null or `NaN`, duplication in `old`, or fanout above the limit. Each of these is recorded as a `key_invalid` rejection and reconciliation continues to key guessing and, if necessary, to row position. The fallback basis is recorded as `guessed` or `fallback`, and the rejection remains visible. A replacement key reruns validation and all downstream stages.
 
 The rejection carries the one reason that stopped validation rather than every reason that might apply. The reasons are not independent: the fanout rate is only defined once `old` is known unique, so a rate computed over a non-unique old side would be a number that means nothing. Its subject follows its reason. Resolving a component can fail on its own account and names that component, as the user spelled it; uniqueness and fanout are properties of the whole tuple and name the declared key entire.
 
@@ -248,7 +251,7 @@ Fanout is intentionally one-directional: a unique old row can be compared unambi
 
 ### Guessed key
 
-If no declared key survives, we consider identified single columns that contain no missing values, are unique in `old`, and share at least one value. A candidate may be duplicated in `new` under the same affected-key rate that admits a declared key, and is ineligible above it. We select the candidate with the most shared key values, preferring one that does not fan out when two candidates tie, and then the earlier column in `old`.
+If no declared key survives, we consider comparable, identified single columns that contain no missing values, are unique in `old`, and share at least one value. A candidate may be duplicated in `new` under the same affected-key rate that admits a declared key, and is ineligible above it. We select the candidate with the most shared key values, preferring one that does not fan out when two candidates tie, and then the earlier column in `old`.
 
 Selection follows the evidence rather than the absence of fanout: a true key that duplicated one row identifies more rows than a column that is unique by coincidence, and is the better guess. Duplicated values whose key is absent from `old` are additions rather than fanout, so they neither count against a candidate nor make it ineligible.
 
@@ -318,7 +321,7 @@ We create `old_matching` and `new_matching` from the one-to-one common rows. Mat
 
 ## Rename inference
 
-Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. Every candidate pair is measurable under its own comparison plan, so a dropped boolean column can be related to an added 0/1 integer column on the same evidence as any other pair. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
+Next we resolve column identity by interpreting addition/removal or edit pairs as renames. Rename inference uses only the aligned, one-to-one matched rows; fanout groups are excluded. A candidate pair is measured under its comparison plan where one exists — which relates a dropped boolean to an added 0/1 integer column, or a dropped timestamp column to an added one of the same type, on the same evidence as any other pair — and a pair with no plan is never a candidate. If there are no matched rows, we cannot infer renames from values, so we skip this step and leave the columns as additions and removals.
 
 We first generate candidate lists of adds, drops, and edits, excluding the endpoints reserved by valid add/drop hints and the identities protected by valid edit hints. Rename identities from initial hint processing have already been applied before key matching.
 
@@ -358,7 +361,7 @@ We accept only mutually unique candidates; overlapping candidates remain for the
 
 ## Swap inference
 
-We test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when both same-name pairs have $p_o < 0.5$, both cross-pairs have identical source types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$.
+We test whether two heavily edited same-name columns were swapped. Columns `a` and `b` form a candidate when both same-name pairs have $p_o < 0.5$, both cross-pairs have identical source types, and each cross-pair has $p_o > 0.9$ and $\kappa > 0.8$. A same-name pair with no comparison plan counts as rewritten vacuously — columns of incomparable types certainly do not hold each other's values under their own names — which is how an exchange that also traded two columns' types is recovered: the same-name pairs cannot be measured, but the crossings are identical-typed and can be.
 
 The type requirement is stricter than rename inference's, which accepts any pair the matrix can compare, and deliberately so. A cross-type rename relates two columns that would otherwise be a drop and an addition, related not at all; a swap instead overrides an identity that schema normalization already established, so it answers to a higher bar, and an exchange evidenced by values compared in their own representation is the cleaner claim. A swap therefore never carries a type change: columns that were both exchanged and retyped remain two `col_edit()` events, which describes them truthfully if less specifically.
 
@@ -392,7 +395,7 @@ Key columns are excluded from the top-level changed-cell set because unequal key
 
 ### Column edit events
 
-`col_edit()` records independent type and value aspects for an identified column, written `type: old -> new` and `changes: n`. Schemas and cells remain the underlying evidence. A type-only change has no changed cells and appears only in the schema display; source-type changes never manufacture cells. Rename and edit are independent facts.
+`col_edit()` records independent type and value aspects for an identified column, written `type: old -> new` and `changes: n`. Schemas and cells remain the underlying evidence. A type-only change has no changed cells and appears only in the schema display; source-type changes never manufacture cells. Rename and edit are independent facts. A type-only edit means one of two things, and the line's own types say which: between comparable types, the values all compared equal after normalization; between incomparable ones, the values were never compared at all, that pair having no value story to tell.
 
 Every edit event says how much changed. `col_edit()` counts the matched rows in which its column differs, `row_edit()` counts the identified columns in which its row differs, and `row_fanout()` counts the differing comparisons inside the event, one old row against each of its new rows. A type-only edit carries no count, having no changed cells to count, so every count the format writes is positive.
 

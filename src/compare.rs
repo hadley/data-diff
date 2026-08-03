@@ -1,8 +1,9 @@
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, make_array,
 };
 use arrow_cast::cast;
+use arrow_row::{RowConverter, SortField};
 use arrow_schema::DataType;
 use xxhash_rust::xxh3::xxh3_128_with_seed;
 
@@ -12,6 +13,8 @@ enum Kind {
     Int,
     Double,
     String,
+    /// Any admitted type outside the matrix, compared only against itself.
+    Opaque,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -26,6 +29,7 @@ enum Domain {
     StringBoolean,
     StringInt,
     StringDouble,
+    Opaque,
 }
 
 /// A type-pair-specific equality and hashing plan.
@@ -48,6 +52,11 @@ pub(crate) enum CanonicalValue {
     Double(u64),
     String(Vec<u8>),
     UnparsedString(Vec<u8>),
+    /// Canonical row-format bytes of a value outside the matrix.
+    ///
+    /// Equal exactly when the values are, for two arrays of one type, which is
+    /// the only pairing the `Opaque` domain admits.
+    Opaque(Vec<u8>),
 }
 
 impl CanonicalValue {
@@ -58,18 +67,17 @@ impl CanonicalValue {
 }
 
 impl ComparisonPlan {
-    /// Plan the comparison for a pair of column types.
+    /// Plan the comparison for a pair of column types, where one exists.
     ///
-    /// Infallible: the domain match below is exhaustive over the supported
-    /// kinds, so every pair of columns `validate_tables` admits is comparable.
-    /// The `expect` states that contract; a type outside the kinds is refused
-    /// as an input error before any plan is asked for.
-    pub(crate) fn new(old: &DataType, new: &DataType) -> Self {
-        let supported =
-            |data_type| kind(data_type).expect("validate_tables admits only supported types");
-        let old = supported(old);
-        let new = supported(new);
-        let domain = match (old, new) {
+    /// The four normalized types compare across the whole matrix. Outside it,
+    /// identity of type is the whole of comparability: a pair of one admitted
+    /// type gets the `Opaque` domain, and every other pair — opaque against a
+    /// different opaque, opaque against a normalized type — has no plan and is
+    /// declined wherever an identity would be claimed.
+    pub(crate) fn new(old: &DataType, new: &DataType) -> Option<Self> {
+        let old_kind = kind(old);
+        let new_kind = kind(new);
+        let domain = match (old_kind, new_kind) {
             (Kind::Boolean, Kind::Boolean) => Domain::Boolean,
             (Kind::Int, Kind::Int) => Domain::Int,
             (Kind::Double, Kind::Double) => Domain::Double,
@@ -80,8 +88,14 @@ impl ComparisonPlan {
             (Kind::String, Kind::Boolean) | (Kind::Boolean, Kind::String) => Domain::StringBoolean,
             (Kind::String, Kind::Int) | (Kind::Int, Kind::String) => Domain::StringInt,
             (Kind::String, Kind::Double) | (Kind::Double, Kind::String) => Domain::StringDouble,
+            (Kind::Opaque, Kind::Opaque) if old == new => Domain::Opaque,
+            _ => return None,
         };
-        Self { old, new, domain }
+        Some(Self {
+            old: old_kind,
+            new: new_kind,
+            domain,
+        })
     }
 
     pub(crate) fn canonicalize_old(&self, values: &dyn Array) -> Vec<CanonicalValue> {
@@ -93,11 +107,43 @@ impl ComparisonPlan {
     }
 
     fn canonicalize(&self, values: &dyn Array, kind: Kind) -> Vec<CanonicalValue> {
+        if kind == Kind::Opaque {
+            return opaque_values(values);
+        }
         raw_values(values, kind)
             .into_iter()
             .map(|value| canonicalize(value, self.domain))
             .collect()
     }
+}
+
+/// Encode a column outside the matrix as canonical row-format bytes.
+///
+/// The converter is built per side from the column's own type. The two sides'
+/// types are identical whenever a plan exists, and the row encoding hydrates
+/// dictionaries to their underlying values, so equal values arrive at equal
+/// bytes with no state shared between the sides. Nulls are taken out first so
+/// the null rules stay the matrix's own.
+fn opaque_values(values: &dyn Array) -> Vec<CanonicalValue> {
+    let converter = RowConverter::new(vec![SortField::new(values.data_type().clone())])
+        .expect("validate_tables admits only encodable types");
+    let rows = converter
+        .convert_columns(&[make_array(values.to_data())])
+        .expect("the converter was built for this column's own type");
+    // Logical nulls rather than `is_null`, which for a dictionary reads only
+    // the key buffer: a valid key pointing at a null value is a null of the
+    // column, and it has to reach `CanonicalValue::Null` like every other so
+    // the null rules stay uniform.
+    let nulls = values.logical_nulls();
+    (0..values.len())
+        .map(|row| {
+            if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row)) {
+                CanonicalValue::Null
+            } else {
+                CanonicalValue::Opaque(rows.row(row).as_ref().to_vec())
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -109,9 +155,9 @@ enum RawValue {
     String(Vec<u8>),
 }
 
-fn kind(data_type: &DataType) -> Option<Kind> {
+fn kind(data_type: &DataType) -> Kind {
     match data_type {
-        DataType::Boolean => Some(Kind::Boolean),
+        DataType::Boolean => Kind::Boolean,
         DataType::Int8
         | DataType::Int16
         | DataType::Int32
@@ -119,15 +165,15 @@ fn kind(data_type: &DataType) -> Option<Kind> {
         | DataType::UInt8
         | DataType::UInt16
         | DataType::UInt32
-        | DataType::UInt64 => Some(Kind::Int),
-        DataType::Float32 | DataType::Float64 => Some(Kind::Double),
-        DataType::Utf8 | DataType::LargeUtf8 => Some(Kind::String),
+        | DataType::UInt64 => Kind::Int,
+        DataType::Float32 | DataType::Float64 => Kind::Double,
+        DataType::Utf8 | DataType::LargeUtf8 => Kind::String,
         DataType::Dictionary(_, value)
             if matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8) =>
         {
-            Some(Kind::String)
+            Kind::String
         }
-        _ => None,
+        _ => Kind::Opaque,
     }
 }
 
@@ -139,6 +185,7 @@ fn raw_values(values: &dyn Array, kind: Kind) -> Vec<RawValue> {
         Kind::Int => integer_values(values),
         Kind::Double => double_values(values),
         Kind::String => string_values(values),
+        Kind::Opaque => unreachable!("opaque columns canonicalize as row bytes"),
     }
 }
 
@@ -428,6 +475,7 @@ fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
         }
         CanonicalValue::String(value) => encode_bytes(4, value, &mut bytes),
         CanonicalValue::UnparsedString(value) => encode_bytes(5, value, &mut bytes),
+        CanonicalValue::Opaque(value) => encode_bytes(6, value, &mut bytes),
     }
     hasher.hash(&bytes)
 }
@@ -459,7 +507,7 @@ mod tests {
     };
 
     fn values(array: ArrayRef, other: ArrayRef) -> (Vec<CanonicalValue>, Vec<CanonicalValue>) {
-        let plan = ComparisonPlan::new(array.data_type(), other.data_type());
+        let plan = ComparisonPlan::new(array.data_type(), other.data_type()).unwrap();
         (
             plan.canonicalize_old(array.as_ref()),
             plan.canonicalize_new(other.as_ref()),
@@ -467,17 +515,102 @@ mod tests {
     }
 
     #[test]
-    fn every_pair_of_supported_types_is_comparable() {
+    fn every_pair_of_normalized_types_is_comparable() {
         use arrow_schema::DataType::{Boolean, Float64, Int64, Utf8};
 
-        // The domain match is exhaustive, so construction is the whole of the
-        // claim; the pairs are spelled out so a kind losing its domain would
-        // name itself here.
         for old in [Boolean, Int64, Float64, Utf8] {
             for new in [Boolean, Int64, Float64, Utf8] {
-                ComparisonPlan::new(&old, &new);
+                assert!(ComparisonPlan::new(&old, &new).is_some(), "{old:?}/{new:?}");
             }
         }
+    }
+
+    #[test]
+    fn outside_the_matrix_only_the_identical_type_has_a_plan() {
+        use arrow_schema::{DataType, TimeUnit};
+
+        let date = DataType::Date32;
+        let aware = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+        let naive = DataType::Timestamp(TimeUnit::Millisecond, None);
+
+        assert!(ComparisonPlan::new(&date, &date).is_some());
+        assert!(ComparisonPlan::new(&aware, &aware).is_some());
+
+        // A different opaque type, a different unit's worth of the same
+        // family, and a normalized type are all incomparable: identity of type
+        // is the whole of comparability out here.
+        assert!(ComparisonPlan::new(&date, &aware).is_none());
+        assert!(ComparisonPlan::new(&aware, &naive).is_none());
+        assert!(ComparisonPlan::new(&date, &DataType::Int64).is_none());
+        assert!(ComparisonPlan::new(&DataType::Int32, &date).is_none());
+    }
+
+    #[test]
+    fn opaque_values_compare_and_hash_by_their_encoding() {
+        let (old, new) = values(
+            column!(date32[Some(1), Some(2), None, None]),
+            column!(date32[Some(1), Some(3), None, Some(4)]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+        // Nulls leave the encoding before it happens, so the null rules stay
+        // the matrix's own: null agrees with null and disagrees with present.
+        assert_eq!(old[2], new[2]);
+        assert_eq!(old[2], CanonicalValue::Null);
+        assert_ne!(old[3], new[3]);
+
+        assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+        assert_ne!(stable_hash(&old[1]), stable_hash(&new[1]));
+    }
+
+    #[test]
+    fn a_valid_key_pointing_at_a_null_dictionary_value_is_null() {
+        use arrow_array::Int64Array;
+
+        // The null lives in the dictionary's values, behind a valid key, so
+        // only the logical null mask can see it; reading the key buffer alone
+        // would encode it as an opaque value and let it slip past the null
+        // rules, key invalidation included.
+        let hidden = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![0, 1]),
+            std::sync::Arc::new(Int64Array::from(vec![Some(10), None])),
+        )
+        .unwrap();
+        let keyed = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![Some(0), None]),
+            std::sync::Arc::new(Int64Array::from(vec![10])),
+        )
+        .unwrap();
+
+        let (old, new) = values(std::sync::Arc::new(hidden), std::sync::Arc::new(keyed));
+        assert_eq!(old, new);
+        assert_eq!(old[1], CanonicalValue::Null);
+        assert!(old[1].invalid_key());
+    }
+
+    #[test]
+    fn differently_interned_dictionaries_encode_equal_values_equally() {
+        use arrow_array::Int64Array;
+
+        // The same logical values with the dictionaries built in opposite
+        // orders, so equal bytes can only come from the encoding hydrating
+        // values rather than reading keys. This property is load-bearing:
+        // each side builds its own converter, and nothing else makes their
+        // bytes agree.
+        let old = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![0, 1]),
+            std::sync::Arc::new(Int64Array::from(vec![10, 20])),
+        )
+        .unwrap();
+        let new = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![1, 0]),
+            std::sync::Arc::new(Int64Array::from(vec![20, 10])),
+        )
+        .unwrap();
+
+        let (old, new) = values(std::sync::Arc::new(old), std::sync::Arc::new(new));
+        assert_eq!(old, new);
+        assert!(matches!(old[0], CanonicalValue::Opaque(_)));
     }
 
     #[test]

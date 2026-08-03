@@ -82,12 +82,18 @@ pub(crate) fn compare_cells(
         let type_changed =
             old.column(identity.old).data_type() != new.column(identity.new).data_type();
         let mut changed_rows = Vec::new();
-        if !identity.is_key {
-            let old_values = old.column(identity.old);
-            let new_values = new.column(identity.new);
-            let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
-            let old_values = plan.canonicalize_old(old_values.as_ref());
-            let new_values = plan.canonicalize_new(new_values.as_ref());
+        // An identity without a plan has values that are never compared: its
+        // type change, which such a pair always has, is its whole story. That
+        // is what "the same name does not make the values comparable" cashes
+        // out to — no cells are claimed changed or unchanged.
+        if !identity.is_key
+            && let Some(plan) = ComparisonPlan::new(
+                old.column(identity.old).data_type(),
+                new.column(identity.new).data_type(),
+            )
+        {
+            let old_values = plan.canonicalize_old(old.column(identity.old).as_ref());
+            let new_values = plan.canonicalize_new(new.column(identity.new).as_ref());
             for &(old_row, new_row) in &rows.matched {
                 if old_values[old_row] != new_values[new_row] {
                     changed_rows.push((old_row, new_row));

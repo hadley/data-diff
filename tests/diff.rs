@@ -1934,7 +1934,24 @@ fn a_one_sided_diff_validates_like_either_side_of_a_two_sided_one() {
         })
     ));
 
-    let unsupported = table! { "bytes" => binary["a"] };
+    // Binary was the unsupported example here until opaque columns admitted
+    // it; a fixed-size list is one of the few types the row encoding still
+    // refuses.
+    let field = std::sync::Arc::new(arrow_schema::Field::new(
+        "item",
+        arrow_schema::DataType::Int64,
+        true,
+    ));
+    let nested = arrow_array::FixedSizeListArray::new(
+        field,
+        2,
+        std::sync::Arc::new(arrow_array::Int64Array::from(vec![1, 2])),
+        None,
+    );
+    let unsupported = test_support::table_from_columns(vec![(
+        "nested",
+        std::sync::Arc::new(nested) as arrow_array::ArrayRef,
+    )]);
     assert!(matches!(
         diff_added(&unsupported),
         Err(DiffError::UnsupportedColumn {
@@ -1942,4 +1959,327 @@ fn a_one_sided_diff_validates_like_either_side_of_a_two_sided_one() {
             ..
         })
     ));
+}
+
+#[test]
+fn an_opaque_column_is_edited_like_any_other() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "when" => date32[100, 200, 300],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "when" => date32[100, 250, 300],
+    };
+    let options = DiffOptions::default();
+
+    // A date column was fatal before opaque columns; now it is an ordinary
+    // identity whose values compare exactly, under a key guessed beside it.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 1, 1)]
+    );
+    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_opaque_column_can_be_the_key() {
+    let old = table! {
+        "when" => date32[100, 200, 300],
+        "value" => [1, 1, 2],
+    };
+    let new = table! {
+        "when" => date32[300, 100, 200],
+        "value" => [2, 1, 1],
+    };
+
+    // Declared: the pair validates on its canonical bytes.
+    let declared = diff_tables(&old, &new, &declared("when")).unwrap();
+    assert_eq!(declared.key.basis, KeyBasis::Declared);
+    assert_eq!(
+        declared.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+    assert!(declared.cells.is_empty());
+
+    // Guessed: "value" repeats in old, so the date column is the one
+    // candidate that can identify rows, and it wins on ordinary evidence.
+    let guessed = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(guessed.key.basis, KeyBasis::Guessed);
+    assert_eq!(guessed.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(guessed, repeated);
+    assert_eq!(render(&guessed), render(&repeated));
+}
+
+#[test]
+fn a_renamed_opaque_column_is_recovered_on_exact_evidence() {
+    let old = table! {
+        "id" => [1, 2],
+        "stamp" => ts_ms[1000, 2000],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "logged" => ts_ms[1000, 2000],
+    };
+
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Exact),
+        ]
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+
+    let repeated = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn two_same_named_opaque_columns_can_swap() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "start" => ts_ms[1000, 2000, 3000],
+        "end" => ts_ms[9000, 8000, 7000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "start" => ts_ms[9000, 8000, 7000],
+        "end" => ts_ms[1000, 2000, 3000],
+    };
+
+    // Identical source types on the crossings, which is the exchange's own
+    // bar, met here by construction.
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
+        ]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_incomparable_same_name_pair_is_a_type_change_with_no_value_story() {
+    let old = table! {
+        "id" => [1, 2],
+        "when" => [100, 200],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "when" => date32[100, 200],
+    };
+    let options = declared("id");
+
+    // The same name still makes an identity; what incomparability removes is
+    // the value story. The values are never compared — not claimed changed and
+    // not claimed equal — so the type change is the column's whole report.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Name),
+        ]
+    );
+    assert!(diff.columns.dropped.is_empty());
+    assert!(diff.columns.added.is_empty());
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_timezone_is_part_of_the_type() {
+    let old = table! {
+        "id" => [1, 2],
+        "at" => ts_ms[1000, 2000],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "at" => ts_ms_naive[1000, 2000],
+    };
+
+    // An instant and a wall-clock reading are different claims, and deciding
+    // how they compare is the promotion step's business; until then the pair
+    // is one column whose type changed, with no value story either way.
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+}
+
+#[test]
+fn an_exchange_that_swapped_types_is_recovered_through_its_crossings() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "when" => date32[100, 200, 300],
+        "count" => [7, 8, 9],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "when" => [7, 8, 9],
+        "count" => date32[100, 200, 300],
+    };
+
+    // Neither same-name pair can be measured, which reads as rewritten
+    // vacuously; the crossings are identical-typed and agree exactly, so the
+    // exchange is recovered and each final identity keeps its own type.
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
+        ]
+    );
+    assert!(diff.columns.edited.is_empty());
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_declared_key_across_an_incomparable_pair_is_rejected_and_the_diff_continues() {
+    let old = table! {
+        "id" => [1, 2],
+        "when" => date32[100, 200],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "when" => [100, 200],
+    };
+    let options = declared("when");
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.key.rejection,
+        Some(KeyRejection {
+            subject: KeySubject::Component(shared("when")),
+            reason: RejectionReason::IncompatibleTypes {
+                old_type: "Date32".into(),
+                new_type: "Int64".into(),
+            },
+        })
+    );
+    // A key needs comparable values, so the declaration is rejected; the
+    // identity it asserted needs none, so it survives, its type change its
+    // whole story. The comparison continues on the guessed key beside it.
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Name),
+            identity(1, 1, IdentityBasis::Declared),
+        ]
+    );
+    assert!(diff.columns.dropped.is_empty());
+    assert!(diff.columns.added.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_rename_hint_across_an_incomparable_pair_is_honoured() {
+    let old = table! {
+        "id" => [1, 2],
+        "when" => date32[100, 200],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "stamp" => [100, 200],
+    };
+    let options = hinted(&["id"], &["col_rename(when -> stamp)"]);
+
+    // The assertion is about identity, which does not require comparability;
+    // the rename prints beside a type-only edit, and no value is ever claimed
+    // changed or unchanged.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert!(diff.issues.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Hinted),
+        ]
+    );
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+}
+
+#[test]
+fn a_one_sided_diff_admits_opaque_columns() {
+    let table = table! {
+        "id" => [1, 2],
+        "at" => ts_ms[1000, 2000],
+    };
+
+    let added = diff_added(&table).unwrap();
+
+    assert_eq!(added.columns[1].normalized_type, NormalizedType::Opaque);
+    assert_eq!(
+        added.columns[1].source_type,
+        "Timestamp(Millisecond, Some(\"UTC\"))"
+    );
+    assert_eq!(added.rows, 2);
 }

@@ -887,3 +887,102 @@ fn a_file_actually_named_missing_is_reachable_with_a_path() {
     no_changes()
     ");
 }
+
+#[test]
+fn a_temporal_file_diffs_end_to_end() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "when" => date32[100, 200, 300],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "when" => date32[100, 250, 300],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // A date column once failed the whole comparison on stderr; it is now an
+    // ordinary column whose values compare exactly within their type.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    table_key([id], basis: declared)
+    row_edit(2, changes: 1)
+    ");
+}
+
+#[test]
+fn an_incomparable_retype_is_a_type_only_edit() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "when" => [100, 200],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "when" => date32[100, 200],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // The same name still makes an identity when no comparison exists between
+    // the types; the type change is the column's whole report, and no value
+    // count is ever claimed.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    table_key([id], basis: declared)
+    col_edit(when, type: Int64 -> Date32)
+    ");
+}
+
+#[test]
+fn an_incomparable_rename_hint_is_honoured_as_a_type_change() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "when" => date32[100, 200],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "stamp" => [100, 200],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .args(["--hint", "col_rename(when -> stamp)"])
+        .output()
+        .unwrap();
+
+    // The hint asserts identity, which needs no comparison plan: the rename is
+    // honoured and the type change is the column's whole report.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    table_key([id], basis: declared)
+    col_rename(when -> stamp, basis: hinted)
+    col_edit(stamp, type: Date32 -> Int64)
+    ");
+}

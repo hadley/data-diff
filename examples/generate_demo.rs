@@ -170,6 +170,28 @@ fn main() {
         },
     );
 
+    // A date column compares exactly within its type, while "flag" changed to
+    // a type the matrix cannot relate to its old one and reads as unrelated
+    // columns.
+    write(
+        &output,
+        "temporal-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "when" => date32[19700, 19701, 19702],
+            "flag" => [0, 1, 0],
+        },
+    );
+    write(
+        &output,
+        "temporal-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "when" => date32[19700, 19725, 19702],
+            "flag" => date32[19800, 19801, 19802],
+        },
+    );
+
     // The key column is called something different in each file, so only a
     // paired --key component can line these rows up.
     write(

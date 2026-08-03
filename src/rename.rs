@@ -82,8 +82,8 @@ fn exact_pairs(
         .map(|&old_index| {
             eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
-                    let plan = plan_for(old, new, old_index, new_index);
-                    values.agree(plan, old_index, new_index)
+                    plan_for(old, new, old_index, new_index)
+                        .is_some_and(|plan| values.agree(plan, old_index, new_index))
                 })
                 .map(|(position, _)| position)
                 .collect::<Vec<_>>()
@@ -104,7 +104,8 @@ fn exact_pairs(
                 continue;
             }
             let new_index = added[position];
-            let plan = plan_for(old, new, old_index, new_index);
+            let plan =
+                plan_for(old, new, old_index, new_index).expect("a match implies a plan exists");
             let unambiguous = candidates.len() == 1 && claims[position] == 1;
             if !unambiguous && !values.measure(plan, old_index, new_index).informative() {
                 continue;
@@ -156,8 +157,8 @@ fn approximate_pairs(
         .map(|&old_index| {
             eligible(map, &added, old_index)
                 .filter(|&(_, new_index)| {
-                    let plan = plan_for(old, new, old_index, new_index);
-                    values.measure(plan, old_index, new_index).is_close()
+                    plan_for(old, new, old_index, new_index)
+                        .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
                 })
                 .map(|(position, _)| position)
                 .collect::<Vec<_>>()
@@ -198,7 +199,7 @@ fn plan_for(
     new: &RecordBatch,
     old_index: usize,
     new_index: usize,
-) -> ComparisonPlan {
+) -> Option<ComparisonPlan> {
     ComparisonPlan::new(
         old.column(old_index).data_type(),
         new.column(new_index).data_type(),
