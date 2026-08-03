@@ -28,11 +28,12 @@ use std::sync::Arc;
 
 use arrow_array::types::Int8Type;
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, LargeStringArray, RecordBatch, RecordBatchOptions,
-    StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, DictionaryArray, Float32Array, Float64Array,
+    Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, RecordBatch,
+    RecordBatchOptions, StringArray, TimestampMillisecondArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
 /// The Arrow type family a Rust value type belongs to.
 ///
@@ -192,6 +193,12 @@ fn resolve(annotation: &str, kind: Option<Kind>, context: Option<&str>) -> DataT
             DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
         ),
         "binary" => (Kind::Text, DataType::Binary),
+        "date32" => (Kind::Int, DataType::Date32),
+        "ts_ms" => (
+            Kind::Int,
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        ),
+        "ts_ms_naive" => (Kind::Int, DataType::Timestamp(TimeUnit::Millisecond, None)),
         unknown => fail(context, format!("unknown type annotation `{unknown}`")),
     };
 
@@ -231,6 +238,11 @@ fn build(
         DataType::UInt16 => Arc::new(UInt16Array::from(narrow(cells, label, context))),
         DataType::UInt32 => Arc::new(UInt32Array::from(narrow(cells, label, context))),
         DataType::UInt64 => Arc::new(UInt64Array::from(narrow(cells, label, context))),
+        DataType::Date32 => Arc::new(Date32Array::from(narrow(cells, label, context))),
+        DataType::Timestamp(TimeUnit::Millisecond, timezone) => Arc::new(
+            TimestampMillisecondArray::from(narrow::<i64>(cells, label, context))
+                .with_timezone_opt(timezone.clone()),
+        ),
         DataType::Float32 => Arc::new(Float32Array::from(
             doubles(cells)
                 .into_iter()

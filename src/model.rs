@@ -200,6 +200,9 @@ pub enum NormalizedType {
     Int64,
     Double,
     String,
+    /// Admitted but outside the matrix: comparable only against the identical
+    /// source type, by canonical row-format bytes.
+    Opaque,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,6 +415,7 @@ pub struct KeyComponent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectionReason {
     MissingColumn { side: Side },
+    IncompatibleTypes { old_type: String, new_type: String },
     DuplicateColumn { side: Side },
     InvalidValue { side: Side, row: usize },
     NonUniqueOld { first_row: usize, row: usize },
@@ -422,6 +426,7 @@ impl RejectionReason {
     pub fn name(&self) -> &'static str {
         match self {
             RejectionReason::MissingColumn { .. } => "missing_column",
+            RejectionReason::IncompatibleTypes { .. } => "incompatible_types",
             RejectionReason::DuplicateColumn { .. } => "duplicate_column",
             RejectionReason::InvalidValue { .. } => "invalid_value",
             RejectionReason::NonUniqueOld { .. } => "non_unique_old",

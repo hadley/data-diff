@@ -17,10 +17,12 @@ use crate::{IdentityBasis, KeyBasis, Side};
 /// map refuses to pair it, and falls out as a drop or an addition because the
 /// map has no pair for it.
 ///
-/// Every pair the map holds is comparable. The map does not enforce that —
-/// it never sees a type — but no claimant can break it: every pair of
-/// supported types has a comparison plan, and `validate_tables` refuses the
-/// rest before reconciliation begins.
+/// A pair the map holds need not be comparable: identity is a claim about
+/// what a column *is*, not about what its values can be measured against, so
+/// a same-named or asserted pair whose types have no comparison plan is still
+/// one column. Such a pair has no value story — cell comparison reports its
+/// type change and nothing else — and every stage that measures values asks
+/// for the plan first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnMap {
     /// Ascending by old position, which is what `detect_order` requires of the

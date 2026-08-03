@@ -150,7 +150,14 @@ fn declared_key(
         let (old_index, new_index) = component_endpoints(old, new, component, hinted)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
-        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
+        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
+            || {
+                component.rejected(RejectionReason::IncompatibleTypes {
+                    old_type: format!("{:?}", old_values.data_type()),
+                    new_type: format!("{:?}", new_values.data_type()),
+                })
+            },
+        )?;
         old_components.push(plan.canonicalize_old(old_values.as_ref()));
         new_components.push(plan.canonicalize_new(new_values.as_ref()));
         columns.push(KeyColumn {
@@ -381,7 +388,9 @@ pub(crate) fn guess_key(
         }
         let old_column = old.column(old_index);
         let new_column = new.column(new_index);
-        let plan = ComparisonPlan::new(old_column.data_type(), new_column.data_type());
+        let Some(plan) = ComparisonPlan::new(old_column.data_type(), new_column.data_type()) else {
+            continue;
+        };
         let old_values = plan.canonicalize_old(old_column.as_ref());
         let new_values = plan.canonicalize_new(new_column.as_ref());
         let Some(overlap) = candidate_overlap(&old_values, &new_values, stable_hash) else {

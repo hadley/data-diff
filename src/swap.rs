@@ -108,16 +108,25 @@ fn exchanged(
 }
 
 /// Whether an identity's own two ends agree in fewer than half their rows.
+///
+/// A pair with no plan is rewritten vacuously: columns of incomparable types
+/// certainly do not hold each other's values under their own names, and
+/// whether they crossed is the crossings' question. This is how an exchange
+/// that also swapped two columns' types — a date column and an integer column
+/// trading places — is recovered: the same-name pairs cannot be measured, but
+/// the crossings are identical-typed and can.
 fn rewritten(
     old: &RecordBatch,
     new: &RecordBatch,
     values: &mut Aligned,
     identity: &ColumnPair,
 ) -> bool {
-    let plan = plan_for(old, new, identity.old, identity.new);
-    values
-        .measure(plan, identity.old, identity.new)
-        .is_distant()
+    match plan_for(old, new, identity.old, identity.new) {
+        Some(plan) => values
+            .measure(plan, identity.old, identity.new)
+            .is_distant(),
+        None => true,
+    }
 }
 
 /// Whether one identity's old end holds the other's new values, unconverted.
@@ -143,7 +152,8 @@ fn crosses(
     old_column.data_type() == new_column.data_type()
         && values
             .measure(
-                plan_for(old, new, old_index, new_index),
+                plan_for(old, new, old_index, new_index)
+                    .expect("an identical admitted type is comparable with itself"),
                 old_index,
                 new_index,
             )
@@ -155,7 +165,7 @@ fn plan_for(
     new: &RecordBatch,
     old_index: usize,
     new_index: usize,
-) -> ComparisonPlan {
+) -> Option<ComparisonPlan> {
     ComparisonPlan::new(
         old.column(old_index).data_type(),
         new.column(new_index).data_type(),

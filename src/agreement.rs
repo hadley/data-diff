@@ -255,7 +255,8 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let plan = ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type());
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
         Aligned::new(old, new, &rows).measure(plan, 1, 1)
     }
 
