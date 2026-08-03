@@ -13,7 +13,6 @@
 use arrow_schema::Schema;
 
 use crate::cells::CellChanges;
-use crate::compare::ComparisonPlan;
 use crate::schema::ColumnMap;
 use crate::{DiffError, HintClaim, HintKind, HintNames, IdentityBasis, Issue, IssueKind, Side};
 
@@ -313,13 +312,8 @@ pub(crate) fn validate_edits(
 
 /// Resolve a hint's names to the endpoints they claim.
 ///
-/// A rename's two columns must exist and their values must be comparable. An
-/// identity between a boolean and an integer would be accepted by everything up
-/// to cell comparison and rejected there, taking the whole diff with it; a hint
-/// the data cannot support is declined like any other, and the rest of the
-/// comparison stands. Nothing else needs the check: a reserved endpoint is never
-/// compared with anything, and an edit attaches to an identity that reconciled
-/// on its own account.
+/// Existence is the whole of the check: every pair of supported types is
+/// comparable, so a hint that resolves is one the comparison can honour.
 fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issue> {
     let issue = |kind: IssueKind| Issue {
         kind,
@@ -333,22 +327,10 @@ fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issu
     };
 
     match (hint.kind, &hint.names) {
-        (HintKind::Rename, HintNames::Pair(old_name, new_name)) => {
-            let old_index = position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?;
-            let new_index = position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?;
-            let old_type = old.field(old_index).data_type();
-            let new_type = new.field(new_index).data_type();
-            if ComparisonPlan::new(old_type, new_type).is_none() {
-                return Err(issue(IssueKind::HintIncompatibleTypes {
-                    old_type: format!("{old_type:?}"),
-                    new_type: format!("{new_type:?}"),
-                }));
-            }
-            Ok(Claim::Identity {
-                old: old_index,
-                new: new_index,
-            })
-        }
+        (HintKind::Rename, HintNames::Pair(old_name, new_name)) => Ok(Claim::Identity {
+            old: position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?,
+            new: position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?,
+        }),
         (HintKind::Drop, HintNames::Single(name)) => Ok(Claim::Unmatched {
             side: Side::Old,
             index: position(old, name).ok_or_else(|| missing(Side::Old, name))?,
@@ -950,22 +932,25 @@ mod tests {
     }
 
     #[test]
-    fn a_claim_the_values_cannot_support_is_declined() {
+    fn a_cross_type_claim_is_honoured_because_every_pair_compares() {
         let old = table! { "id" => [1], "flag" => [true] };
         let new = table! { "id" => [1], "count" => [1] };
 
-        // A boolean and an integer cannot be compared, so this identity would
-        // have been accepted here and then killed the whole diff at cell
-        // comparison. Declining it leaves the rest of the run standing.
+        // This hint was once declined as incompatible. Since booleans joined
+        // the numeric domain there is no pair of supported types a hint could
+        // claim that cell comparison cannot serve, so existence is the whole of
+        // the check.
         let hints = hint_for(&old, &new, &["col_rename(flag -> count)"]);
 
-        assert!(hints.map.pairs().is_empty());
+        assert!(hints.issues.is_empty());
         assert_eq!(
-            hints.issues[0].issue.kind,
-            IssueKind::HintIncompatibleTypes {
-                old_type: "Boolean".into(),
-                new_type: "Int64".into(),
-            }
+            hints
+                .map
+                .pairs()
+                .iter()
+                .map(|pair| (pair.old, pair.new, pair.basis))
+                .collect::<Vec<_>>(),
+            [(1, 1, IdentityBasis::Hinted)]
         );
     }
 

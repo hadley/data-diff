@@ -1,23 +1,14 @@
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use crate::compare::ComparisonPlan;
 use crate::key::ResolvedKey;
-use crate::{DiffError, IdentityBasis, KeyBasis, Side};
+use crate::{IdentityBasis, KeyBasis, Side};
 
-/// The partial bijection between old and new columns, built up in stages.
+/// The partial bijection between old and new columns.
 ///
-/// This is the identity model `design.md` describes, in one place rather than
-/// several: rename hints claim first, key components next, same-named columns
-/// take what is left, and inference fills in from there. Every stage claims
-/// through this, so no endpoint can be spent twice and no stage has to be
-/// trusted to check that for itself.
-///
-/// The map is the whole account of column identity, which is why it knows how
-/// wide the two files are: `identities` is the pairs it holds, and the drops and
-/// additions are the positions it has no pair for. Deriving those rather than
-/// maintaining them is what keeps the stages that mutate the bijection from
-/// having to keep a second list in step with the first.
+/// All reconciliation stages claim through this map, so no endpoint can be
+/// spent twice. Drops and additions are derived from missing pairs rather than
+/// maintained separately.
 ///
 /// An endpoint can also be spent on having no partner at all. `col_drop` and
 /// `col_add` reserve one that way, and holding the reservation here rather than
@@ -25,6 +16,11 @@ use crate::{DiffError, IdentityBasis, KeyBasis, Side};
 /// about hints: a reserved column is passed over by name matching because the
 /// map refuses to pair it, and falls out as a drop or an addition because the
 /// map has no pair for it.
+///
+/// Every pair the map holds is comparable. The map does not enforce that —
+/// it never sees a type — but no claimant can break it: every pair of
+/// supported types has a comparison plan, and `validate_tables` refuses the
+/// rest before reconciliation begins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnMap {
     /// Ascending by old position, which is what `detect_order` requires of the
@@ -42,22 +38,14 @@ pub(crate) struct ColumnMap {
 pub(crate) struct ColumnPair {
     pub old: usize,
     pub new: usize,
-    /// How reconciliation arrived at this pair.
-    ///
-    /// Recorded rather than re-derived, and asked rather than reconstructed: a
-    /// provisional same-name identity, which is what swap inference consumes, is
-    /// exactly a pair whose basis is `Name`.
+    /// Recorded because swap inference needs to distinguish provisional
+    /// same-name identities from stronger claims.
     pub basis: IdentityBasis,
-    /// Whether the resolved key is made of this pair.
-    ///
-    /// Orthogonal to the basis, and not derivable from it: a key column can be
-    /// identified by a declared component, by a hint that renamed it, or by its
-    /// name where the key was guessed.
+    /// Orthogonal to `basis`: several kinds of identity can form a key.
     pub is_key: bool,
 }
 
 impl ColumnMap {
-    /// An empty map over two schemas of the given widths.
     pub(crate) fn new(old: &Schema, new: &Schema) -> Self {
         Self {
             pairs: Vec::new(),
@@ -68,7 +56,7 @@ impl ColumnMap {
         }
     }
 
-    /// Claim a pair, unless either endpoint is already spoken for.
+    /// Claim a pair unless either endpoint is already spoken for.
     ///
     /// Returns whether the map now holds the pair, so a caller that cares can
     /// tell a refusal from a claim it already had. An endpoint reserved as
@@ -85,7 +73,6 @@ impl ColumnMap {
             return false;
         }
         match (self.new_for_old(old), self.old_for_new(new)) {
-            // Both endpoints free.
             (None, None) => {
                 let at = self.pairs.partition_point(|pair| pair.old < old);
                 self.pairs.insert(
@@ -99,10 +86,8 @@ impl ColumnMap {
                 );
                 true
             }
-            // Exactly this pair is already held, so the claim is redundant
-            // rather than contested — two stages agreeing about one column.
+            // Repeating an existing pair is agreement, not a conflict.
             (Some(held_new), Some(held_old)) => held_new == new && held_old == old,
-            // One endpoint is spent on a different partner.
             _ => false,
         }
     }
@@ -126,7 +111,6 @@ impl ColumnMap {
         true
     }
 
-    /// Whether this endpoint is reserved as having no partner.
     pub(crate) fn reserved(&self, side: Side, index: usize) -> bool {
         let reserved = match side {
             Side::Old => &self.unmatched_old,
@@ -156,11 +140,6 @@ impl ColumnMap {
             .map(|pair| pair.old)
     }
 
-    /// Record that the resolved key is made of this pair.
-    ///
-    /// Marking rather than claiming, key-ness being orthogonal to how the pair
-    /// was established. A pair the map does not hold is not marked, which cannot
-    /// arise from a resolved key but keeps the operation total.
     pub(crate) fn mark_key(&mut self, old: usize, new: usize) {
         if let Some(pair) = self
             .pairs
@@ -197,14 +176,12 @@ impl ColumnMap {
         &self.pairs
     }
 
-    /// The old columns with no partner, ascending: every one of them a drop.
     pub(crate) fn dropped(&self) -> Vec<usize> {
         (0..self.old_width)
             .filter(|&index| self.new_for_old(index).is_none())
             .collect()
     }
 
-    /// The new columns with no partner, ascending: every one of them an addition.
     pub(crate) fn added(&self) -> Vec<usize> {
         (0..self.new_width)
             .filter(|&index| self.old_for_new(index).is_none())
@@ -212,7 +189,7 @@ impl ColumnMap {
     }
 }
 
-/// Continue the bijection hints began, by the key and then by name.
+/// Continue the bijection hints began, claiming the key before matching names.
 ///
 /// `map` arrives already carrying whatever the declared key and the accepted
 /// rename hints established. The resolved key claims next, and only then are
@@ -220,16 +197,12 @@ impl ColumnMap {
 /// endpoints whatever they are called. Nothing here has to check for a contest:
 /// `ColumnMap::claim` refuses a spent endpoint, and hints that contradicted the
 /// key were rejected before this ran.
-///
-/// There are no schema events to read off at the end. An unmatched old column is
-/// a drop and an unmatched new one an addition, which the map derives from the
-/// pairs it holds whenever anyone asks.
 pub(crate) fn reconcile_schema(
     old: &RecordBatch,
     new: &RecordBatch,
     key: &ResolvedKey,
     map: &mut ColumnMap,
-) -> Result<(), DiffError> {
+) {
     let old_schema = old.schema();
     let new_schema = new.schema();
 
@@ -253,33 +226,16 @@ pub(crate) fn reconcile_schema(
             .iter()
             .position(|field| field.name() == old_field.name());
         if let Some(new_index) = by_name {
-            // A same-named column already claimed is unavailable, which leaves
-            // this column unmatched rather than sharing an endpoint.
             map.claim(old_index, new_index, IdentityBasis::Name);
         }
     }
-
-    for pair in map.pairs() {
-        let old_field = old_schema.field(pair.old);
-        let new_field = new_schema.field(pair.new);
-        if ComparisonPlan::new(old_field.data_type(), new_field.data_type()).is_none() {
-            return Err(DiffError::IncompatibleColumns {
-                column: old_field.name().clone(),
-                old_type: format!("{:?}", old_field.data_type()),
-                new_type: format!("{:?}", new_field.data_type()),
-            });
-        }
-    }
-    Ok(())
 }
 
-/// Schema reconciliation as it looks to tests whose subject is not hints.
 #[cfg(test)]
 pub(crate) mod testing {
     use arrow_array::RecordBatch;
 
     use super::ColumnMap;
-    use crate::DiffError;
     use crate::key::ResolvedKey;
 
     /// Reconcile the two schemas with no hints in play.
@@ -291,10 +247,10 @@ pub(crate) mod testing {
         old: &RecordBatch,
         new: &RecordBatch,
         key: &ResolvedKey,
-    ) -> Result<ColumnMap, DiffError> {
+    ) -> ColumnMap {
         let mut map = ColumnMap::new(old.schema_ref(), new.schema_ref());
-        super::reconcile_schema(old, new, key, &mut map)?;
-        Ok(map)
+        super::reconcile_schema(old, new, key, &mut map);
+        map
     }
 }
 
@@ -306,18 +262,17 @@ mod tests {
     use super::ColumnMap;
     use super::testing::reconcile_schema;
     use crate::key::testing::resolve_key;
-    use crate::{DiffError, DiffOptions, IdentityBasis, Side};
+    use crate::{DiffOptions, IdentityBasis, Side};
 
-    fn reconcile(old: &RecordBatch, new: &RecordBatch) -> Result<ColumnMap, DiffError> {
+    fn reconcile(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: Vec::new(),
         };
-        let key = resolve_key(old, new, &options)?;
+        let key = resolve_key(old, new, &options).unwrap();
         reconcile_schema(old, new, &key)
     }
 
-    /// Every pair the map holds, as the four things it records about one.
     fn pairs(map: &ColumnMap) -> Vec<(usize, usize, IdentityBasis, bool)> {
         map.pairs()
             .iter()
@@ -325,7 +280,6 @@ mod tests {
             .collect()
     }
 
-    /// A map over two tables with nothing claimed in it yet.
     fn empty(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         ColumnMap::new(old.schema_ref(), new.schema_ref())
     }
@@ -343,7 +297,7 @@ mod tests {
             "add" => [1],
         };
 
-        let map = reconcile(&old, &new).unwrap();
+        let map = reconcile(&old, &new);
 
         assert_eq!(
             pairs(&map),
@@ -373,10 +327,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
 
-        // The pair claims old "a" and new "b". Both names still exist on the
-        // other side, but their endpoints are taken, so old "b" has nothing
-        // left to match and new "a" is unclaimed.
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
         assert_eq!(pairs(&map), [(0, 1, IdentityBasis::Declared, true)]);
         assert_eq!(map.dropped(), [1]);
@@ -399,7 +350,7 @@ mod tests {
             hints: Vec::new(),
         };
         let key = resolve_key(&old, &new, &options).unwrap();
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
         assert_eq!(
             pairs(&map),
@@ -425,11 +376,8 @@ mod tests {
 
         let options = DiffOptions::default();
         let key = resolve_key(&old, &new, &options).unwrap();
-        let map = reconcile_schema(&old, &new, &key).unwrap();
+        let map = reconcile_schema(&old, &new, &key);
 
-        // The key is a guess, but the identity under it is not: both files call
-        // the column "id", which is what identified it. Key-ness is the separate
-        // fact, which is why it is a separate flag.
         assert_eq!(
             pairs(&map),
             [
@@ -475,8 +423,6 @@ mod tests {
         assert!(map.reserved(Side::Old, 1));
         assert!(!map.claim(1, 1, IdentityBasis::Name));
 
-        // Reserved and merely unpaired are the same thing to everyone but
-        // `claim`: both are what the bijection has no pair for.
         assert_eq!(map.dropped(), [0, 1]);
         assert_eq!(map.added(), [0, 1]);
     }
@@ -490,8 +436,6 @@ mod tests {
         let mut map = empty(&table, &table);
 
         assert!(map.claim(0, 0, IdentityBasis::Declared));
-        // The same pair again, from a stage with less authority. Redundant
-        // rather than contested, and not a second author.
         assert!(map.claim(0, 0, IdentityBasis::Name));
 
         assert_eq!(pairs(&map), [(0, 0, IdentityBasis::Declared, false)]);
@@ -525,8 +469,6 @@ mod tests {
         map.claim(2, 2, IdentityBasis::Name);
         map.exchange(1, 2);
 
-        // Neither old position moved, so the pairs are still ascending by old
-        // position, which is what ordering requires of them.
         assert_eq!(
             pairs(&map),
             [
@@ -540,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incompatible_same_name_columns() {
+    fn a_boolean_and_a_numeric_column_pair_like_any_other() {
         let old = table! {
             "id" => [1],
             "flag" => [true],
@@ -550,13 +492,18 @@ mod tests {
             "flag" => [1],
         };
 
+        // Once fatal as incompatible; booleans now compare in the numeric
+        // domains, so the pair is an ordinary same-name identity.
+        let map = reconcile(&old, &new);
+
         assert_eq!(
-            reconcile(&old, &new).unwrap_err(),
-            DiffError::IncompatibleColumns {
-                column: "flag".into(),
-                old_type: "Boolean".into(),
-                new_type: "Int64".into(),
-            }
+            pairs(&map),
+            [
+                (0, 0, IdentityBasis::Declared, true),
+                (1, 1, IdentityBasis::Name, false),
+            ]
         );
+        assert!(map.dropped().is_empty());
+        assert!(map.added().is_empty());
     }
 }

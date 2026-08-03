@@ -148,6 +148,28 @@ fn main() {
         },
     );
 
+    // The columns appear to have traded types, but each new column holds the
+    // other's old values in its own representation, so the account that fits
+    // is an exchange rather than two impossible retypes.
+    write(
+        &output,
+        "swap-types-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "flag" => [true, false, true],
+            "count" => [1000, 2000, 3000],
+        },
+    );
+    write(
+        &output,
+        "swap-types-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "flag" => [1000, 2000, 3000],
+            "count" => [true, false, true],
+        },
+    );
+
     // The key column is called something different in each file, so only a
     // paired --key component can line these rows up.
     write(

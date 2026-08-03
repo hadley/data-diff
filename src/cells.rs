@@ -85,8 +85,7 @@ pub(crate) fn compare_cells(
         if !identity.is_key {
             let old_values = old.column(identity.old);
             let new_values = new.column(identity.new);
-            let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type())
-                .expect("schema reconciliation accepted the type pair");
+            let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
             let old_values = plan.canonicalize_old(old_values.as_ref());
             let new_values = plan.canonicalize_new(new_values.as_ref());
             for &(old_row, new_row) in &rows.matched {
@@ -124,8 +123,6 @@ pub(crate) fn compare_cells(
         .iter()
         .zip(fanout_cells)
         .map(|(group, mut cells)| {
-            // The old row is constant within an event, so grouping by new row
-            // reads as each new row's differences from the old one.
             cells.sort_by_key(|cell| (cell.new_row, cell.old_column, cell.new_column));
             FanoutChanges {
                 old: group.old,
@@ -161,7 +158,7 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let schema = reconcile_schema(old, new, &key).unwrap();
+        let schema = reconcile_schema(old, new, &key);
         compare_cells(old, new, &schema, &rows)
     }
 
@@ -239,8 +236,6 @@ mod tests {
             "value" => [10, 21],
         };
 
-        // "id" shares both values and "value" only one, so guessing selects
-        // "id"; the selected column is excluded whatever the basis.
         assert_eq!(
             changes_with(&old, &new, &[]).changed_cells(),
             [ChangedCell {
@@ -334,8 +329,6 @@ mod tests {
 
         let changes = changes(&old, &new);
 
-        // Separation partitions a column's cells rather than suppressing the
-        // column: the matched change is still an ordinary changed cell.
         assert_eq!(
             changes.columns,
             [ColumnChanges {
@@ -354,7 +347,6 @@ mod tests {
                 new_column: 1,
             }]
         );
-        // The fanout change is reachable only through its event.
         assert_eq!(
             changes.fanout,
             [FanoutChanges {
@@ -383,7 +375,6 @@ mod tests {
 
         let changes = changes(&old, &new);
 
-        // The fanout itself is the event, whether or not values differ.
         assert_eq!(
             changes.fanout,
             [FanoutChanges {
@@ -406,8 +397,6 @@ mod tests {
             "add" => [0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0],
         };
 
-        // The key agrees by construction and neither other column is
-        // identified, so the event has nothing comparable to report.
         assert!(changes(&old, &new).fanout[0].cells.is_empty());
     }
 

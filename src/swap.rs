@@ -114,8 +114,7 @@ fn rewritten(
     values: &mut Aligned,
     identity: &ColumnPair,
 ) -> bool {
-    let plan = plan_for(old, new, identity.old, identity.new)
-        .expect("schema reconciliation accepted the type pair");
+    let plan = plan_for(old, new, identity.old, identity.new);
     values
         .measure(plan, identity.old, identity.new)
         .is_distant()
@@ -142,8 +141,13 @@ fn crosses(
     let old_column = old.column(old_index);
     let new_column = new.column(new_index);
     old_column.data_type() == new_column.data_type()
-        && plan_for(old, new, old_index, new_index)
-            .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
+        && values
+            .measure(
+                plan_for(old, new, old_index, new_index),
+                old_index,
+                new_index,
+            )
+            .is_close()
 }
 
 fn plan_for(
@@ -151,7 +155,7 @@ fn plan_for(
     new: &RecordBatch,
     old_index: usize,
     new_index: usize,
-) -> Option<ComparisonPlan> {
+) -> ComparisonPlan {
     ComparisonPlan::new(
         old.column(old_index).data_type(),
         new.column(new_index).data_type(),
@@ -178,12 +182,11 @@ mod tests {
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(old, new, &key).unwrap();
+        let mut schema = reconcile_schema(old, new, &key);
         infer(old, new, &mut schema, &rows, &[]);
         schema
     }
 
-    /// The `(old, new)` pairs of every identity that is not the key.
     fn pairs(schema: &ColumnMap) -> Vec<(usize, usize)> {
         schema
             .pairs()
@@ -204,7 +207,6 @@ mod tests {
             .any(|pair| old.column(pair.old).data_type() != new.column(pair.new).data_type())
     }
 
-    /// What the map says established the identity holding this old column.
     fn basis(schema: &ColumnMap, old: usize) -> IdentityBasis {
         schema
             .pairs()
@@ -372,7 +374,7 @@ mod tests {
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        let mut schema = reconcile_schema(&old, &new, &key).unwrap();
+        let mut schema = reconcile_schema(&old, &new, &key);
         rename::infer(&old, &new, &mut schema, &rows);
         let inferred = schema.clone();
         infer(&old, &new, &mut schema, &rows, &[]);
@@ -414,7 +416,7 @@ mod tests {
         )
         .unwrap();
         let mut schema = hints.map.clone();
-        crate::schema::reconcile_schema(&old, &new, &key, &mut schema).unwrap();
+        crate::schema::reconcile_schema(&old, &new, &key, &mut schema);
         infer(&old, &new, &mut schema, &rows, &hints.edits);
 
         // The values would read as an exchange, and a hint says otherwise. Every
@@ -450,7 +452,7 @@ mod tests {
         )
         .unwrap();
         let mut schema = hints.map.clone();
-        crate::schema::reconcile_schema(&old, &new, &key, &mut schema).unwrap();
+        crate::schema::reconcile_schema(&old, &new, &key, &mut schema);
         infer(&old, &new, &mut schema, &rows, &hints.edits);
 
         // An edit claims no endpoint, so the map knows nothing about it and the

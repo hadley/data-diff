@@ -100,7 +100,6 @@ mod tests {
 
     #[test]
     fn additions_and_deletions_do_not_create_moves() {
-        // Gaps in either coordinate represent excluded additions or drops.
         assert_eq!(minimal_moves(&[(0, 1), (2, 3), (4, 8)]), []);
     }
 

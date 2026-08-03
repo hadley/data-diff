@@ -12,12 +12,10 @@ use arrow_schema::Schema;
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedKey {
     pub basis: KeyBasis,
-    /// Empty exactly for the positional key, declared or fallen back to.
     pub columns: Vec<KeyColumn>,
     pub old: Vec<Vec<CanonicalValue>>,
     pub new: Vec<Vec<CanonicalValue>>,
     pub overlap: Option<KeyOverlap>,
-    /// The declared key this one replaced, where one was declared and refused.
     pub rejection: Option<KeyRejection>,
 }
 
@@ -93,8 +91,6 @@ pub(crate) fn resolve_key(
     hinted: &ColumnMap,
 ) -> ResolvedKey {
     let rejection = match declared {
-        // A positional key has nothing to resolve and nothing to validate, so
-        // it is reached directly rather than through the chain below.
         Declared::Positional => return positional_key(old, new, KeyBasis::Declared),
         Declared::Components(components) => match declared_key(old, new, components, hinted) {
             Ok(key) => return key,
@@ -154,14 +150,7 @@ fn declared_key(
         let (old_index, new_index) = component_endpoints(old, new, component, hinted)?;
         let old_values = old.column(old_index);
         let new_values = new.column(new_index);
-        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type()).ok_or_else(
-            || {
-                component.rejected(RejectionReason::IncompatibleTypes {
-                    old_type: format!("{:?}", old_values.data_type()),
-                    new_type: format!("{:?}", new_values.data_type()),
-                })
-            },
-        )?;
+        let plan = ComparisonPlan::new(old_values.data_type(), new_values.data_type());
         old_components.push(plan.canonicalize_old(old_values.as_ref()));
         new_components.push(plan.canonicalize_new(new_values.as_ref()));
         columns.push(KeyColumn {
@@ -239,7 +228,6 @@ fn schema_position(schema: &Schema, name: &str) -> Option<usize> {
         .position(|field| field.name() == name)
 }
 
-/// Key resolution as it looks to tests whose subject is not hints.
 #[cfg(test)]
 pub(crate) mod testing {
     use arrow_array::RecordBatch;
@@ -266,7 +254,6 @@ pub(crate) mod testing {
         Ok(super::resolve_key(old, new, &declared, &map))
     }
 
-    /// Why the declared key was refused, for tests whose subject is that.
     pub(crate) fn rejection(
         old: &RecordBatch,
         new: &RecordBatch,
@@ -394,9 +381,7 @@ pub(crate) fn guess_key(
         }
         let old_column = old.column(old_index);
         let new_column = new.column(new_index);
-        let Some(plan) = ComparisonPlan::new(old_column.data_type(), new_column.data_type()) else {
-            continue;
-        };
+        let plan = ComparisonPlan::new(old_column.data_type(), new_column.data_type());
         let old_values = plan.canonicalize_old(old_column.as_ref());
         let new_values = plan.canonicalize_new(new_column.as_ref());
         let Some(overlap) = candidate_overlap(&old_values, &new_values, stable_hash) else {
@@ -444,14 +429,12 @@ fn single_component_rows(values: Vec<CanonicalValue>) -> Vec<Vec<CanonicalValue>
     values.into_iter().map(|value| vec![value]).collect()
 }
 
-/// What a candidate column offers as a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Overlap {
     /// Distinct old keys that also occur in `new`.
     shared: usize,
     /// Those that occur more than once in `new`.
     affected: usize,
-    /// Distinct key values in `new`, however often each repeats.
     distinct_new: usize,
 }
 
@@ -545,8 +528,6 @@ pub(crate) struct Component {
 }
 
 impl Component {
-    /// The two columns this component names, which parsing knows whether or
-    /// not either of them turns out to exist.
     fn named(&self) -> KeyComponent {
         KeyComponent {
             old: self.old.clone(),
@@ -554,7 +535,6 @@ impl Component {
         }
     }
 
-    /// This component refused, for a reason that is its own fault.
     fn rejected(&self, reason: RejectionReason) -> KeyRejection {
         KeyRejection {
             subject: KeySubject::Component(self.named()),
@@ -572,7 +552,6 @@ impl Component {
 /// declarable as a key itself.
 pub const POSITIONAL_COMPONENT: &str = "#row";
 
-/// What `--key` asked for, once parsed.
 pub(crate) enum Declared {
     /// No `--key` at all, so a key is to be guessed.
     Guess,
@@ -582,8 +561,6 @@ pub(crate) enum Declared {
 }
 
 impl Declared {
-    /// The components to claim identities from, of which a positional key has
-    /// none.
     pub(crate) fn components(&self) -> &[Component] {
         match self {
             Declared::Components(components) => components,
@@ -960,20 +937,16 @@ mod tests {
     }
 
     #[test]
-    fn an_incompatible_pair_names_the_component_as_written() {
-        let old = table! { "customer_id" => [true] };
-        let new = table! { "id" => [1] };
+    fn a_boolean_and_a_numeric_component_pair_validates() {
+        let old = table! { "customer_id" => [true, false] };
+        let new = table! { "id" => [1, 0] };
 
-        assert_eq!(
-            rejection(&old, &new, &["customer_id/id"]),
-            Some(KeyRejection {
-                subject: KeySubject::Component(paired("customer_id", "id")),
-                reason: RejectionReason::IncompatibleTypes {
-                    old_type: "Boolean".into(),
-                    new_type: "Int64".into(),
-                },
-            })
-        );
+        // Once rejected as incompatible; the encoding now compares, so the
+        // declared pair identifies both rows.
+        let key = resolve_key(&old, &new, &options(&["customer_id/id"])).unwrap();
+
+        assert_eq!(key.rejection, None);
+        assert_eq!(key.old, key.new);
     }
 
     #[test]
@@ -1004,19 +977,6 @@ mod tests {
                 reason: RejectionReason::MissingColumn { side: Side::New },
             })
         );
-    }
-
-    #[test]
-    fn rejects_incompatible_key_types() {
-        let old = table! { "id" => [true] };
-        let new = table! { "id" => [1] };
-        assert!(matches!(
-            rejection(&old, &new, &["id"]),
-            Some(KeyRejection {
-                reason: RejectionReason::IncompatibleTypes { .. },
-                ..
-            })
-        ));
     }
 
     #[test]
@@ -1402,7 +1362,6 @@ mod tests {
             "nan" => [1.0, f64::NAN],
             "dup_old" => [1, 1],
             "dup_new" => [1, 2],
-            "mismatch" => [true, false],
             "disjoint" => [1, 2],
             "missing" => [1, 2],
         };
@@ -1411,7 +1370,6 @@ mod tests {
             "nan" => [1.0, 2.0],
             "dup_old" => [1, 2],
             "dup_new" => [1, 1],
-            "mismatch" => [1, 2],
             "disjoint" => [3, 4],
         };
 

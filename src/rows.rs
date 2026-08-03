@@ -10,11 +10,9 @@ pub(crate) struct RowMatches {
     pub fanout: Vec<FanoutGroup>,
 }
 
-/// One old row and the several new rows that share its key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FanoutGroup {
     pub old: usize,
-    /// New rows in ascending order.
     pub new: Vec<usize>,
 }
 
@@ -120,7 +118,6 @@ mod tests {
 
         let rows = rows(old, new, &["id"]);
 
-        // Key 4 fans out, key 11 has no new row, and key 99 has no old row.
         assert_eq!(
             rows.fanout,
             [FanoutGroup {
@@ -131,8 +128,6 @@ mod tests {
         assert_eq!(rows.dropped, [10]);
         assert_eq!(rows.added, [11]);
 
-        // The four results partition the rows: a fanned-out old row is neither
-        // matched nor dropped, and its new rows are not additions.
         assert_eq!(rows.matched.len(), 9);
         assert!(!rows.matched.iter().any(|&(old, _)| old == 3));
         assert!(!rows.matched.iter().any(|&(_, new)| new == 3 || new == 4));
@@ -145,8 +140,6 @@ mod tests {
 
         let rows = rows(old, new, &["id"]);
 
-        // Old-side presence is decided before new-side multiplicity, so key 3
-        // never reaches the fanout branch.
         assert_eq!(rows.added, [2, 3]);
         assert!(rows.fanout.is_empty());
     }

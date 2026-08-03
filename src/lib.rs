@@ -69,7 +69,7 @@ pub fn diff_tables(
     // refused as a value, and the chain falls back to a guess and then to row
     // position, so the identities the declaration asserted survive it.
     let key = key::resolve_key(old, new, &declared, &hinted);
-    let first = run_pass(old, new, key, hinted.clone(), &edits)?;
+    let first = run_pass(old, new, key, hinted.clone(), &edits);
 
     // Reconsider the key at most once: a straight second pass, never a loop.
     // Pass one's diff is evidence about its own key, and when that evidence
@@ -90,7 +90,7 @@ pub fn diff_tables(
             {
                 map.claim(old_index, new_index, basis);
             }
-            run_pass(old, new, second, map, &edits)?
+            run_pass(old, new, second, map, &edits)
         }
         None => first,
     };
@@ -263,9 +263,9 @@ fn run_pass(
     key: ResolvedKey,
     mut map: ColumnMap,
     edits: &[EditHint],
-) -> Result<Pass, DiffError> {
+) -> Pass {
     let rows = rows::match_rows(&key);
-    schema::reconcile_schema(old, new, &key, &mut map)?;
+    schema::reconcile_schema(old, new, &key, &mut map);
 
     // Both resolve column identity, before ordering and cells go on to read it
     rename::infer(old, new, &mut map, &rows);
@@ -277,7 +277,7 @@ fn run_pass(
     // they name exists needs inference, and whether it changed needs the cells.
     let (edit_issues, forced) = hint::validate_edits(edits, &map, &cells);
     let summary = summary::summarize(&cells, &forced);
-    Ok(Pass {
+    Pass {
         key,
         map,
         rows,
@@ -285,7 +285,7 @@ fn run_pass(
         cells,
         edit_issues,
         summary,
-    })
+    }
 }
 
 fn one_based(indices: &[usize]) -> Vec<usize> {

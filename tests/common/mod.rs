@@ -8,7 +8,6 @@ use parquet::arrow::ArrowWriter;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// A unique temporary directory removed when the test finishes.
 pub struct TempDir(PathBuf);
 
 impl TempDir {
@@ -33,12 +32,10 @@ impl Drop for TempDir {
     }
 }
 
-/// Write one batch as a Parquet fixture.
 pub fn write_parquet(path: &Path, batch: &RecordBatch) {
     write_parquet_batches(path, std::slice::from_ref(batch));
 }
 
-/// Write multiple batches to one Parquet file in their given order.
 pub fn write_parquet_batches(path: &Path, batches: &[RecordBatch]) {
     assert!(!batches.is_empty());
     let file = std::fs::File::create(path).unwrap();
