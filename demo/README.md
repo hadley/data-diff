@@ -175,13 +175,25 @@ col_edit(markdown, changes: 3)
 
 ## Beyond the core types
 
-Dates, timestamps, decimals, binary, and nested values all participate: but a column outside the core types can only be compared exactly to its own type. Here the `when` dates are diffed like any other column, while `flag` changed from an integer to a date — two types with no comparison between them — so its type change is the whole of its report: the values are never compared, so no `changes:` count is ever claimed:
+Dates, timestamps, decimals, binary, and nested values all participate. Here the `when` dates are diffed like any other column, while `flag` changed from an integer to a date — two types with no comparison between them — so its type change is the whole of its report: the values are never compared, so no `changes:` count is ever claimed:
 
 ```console
 $ data-diff demo/temporal-old.parquet demo/temporal-new.parquet
 table_key([id], basis: guessed, overlap: 1.00)
 col_edit(flag, type: Int64 -> Date32)
 row_edit(2, changes: 1)
+```
+
+### Retypes that keep their values
+
+Where a decided rule connects the two types, a retyped column's values compare right across the retype — always exactly, never through a lossy conversion. Timestamps compare as instants across units and timezones, decimals meet the integers and doubles they equal, `Date32` meets `Date64`, and strings parse against dates, timestamps, and decimals under strict ISO 8601 and exact numeric grammars. Here `at` moved from milliseconds to microseconds with one genuinely edited value, which is caught across the unit change; `price` became a decimal column and `day`'s ISO strings became real dates, and every value survived both retypes, so the type changes are the whole of their reports:
+
+```console
+$ data-diff demo/promoted-old.parquet demo/promoted-new.parquet
+table_key([id], basis: guessed, overlap: 1.00)
+col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))", changes: 1)
+col_edit(price, type: Int64 -> "Decimal128(10, 2)")
+col_edit(day, type: Utf8 -> Date32)
 ```
 
 ## One-sided diffs

@@ -192,6 +192,31 @@ fn main() {
         },
     );
 
+    // Three retypes with decided cross-type rules: the timestamps compare as
+    // instants across the unit change (catching the one real edit), the
+    // decimals equal the integers they replaced, and the ISO date strings
+    // equal the dates they became.
+    write(
+        &output,
+        "promoted-old.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "at" => ts_ms[1_000, 2_000, 3_000],
+            "price" => [500, 600, 700],
+            "day" => ["2026-08-01", "2026-08-02", "2026-08-03"],
+        },
+    );
+    write(
+        &output,
+        "promoted-new.parquet",
+        table! {
+            "id" => [1, 2, 3],
+            "at" => ts_us[1_000_000, 2_500_000, 3_000_000],
+            "price" => dec[50_000, 60_000, 70_000],
+            "day" => date32[20666, 20667, 20668],
+        },
+    );
+
     // The key column is called something different in each file, so only a
     // paired --key component can line these rows up.
     write(

@@ -141,6 +141,11 @@ fn normalized_type(data_type: &DataType) -> Option<NormalizedType> {
         {
             Some(NormalizedType::String)
         }
+        // The promoted families compare semantically, so they are classified
+        // ahead of the opaque probe.
+        DataType::Timestamp(_, _) => Some(NormalizedType::Timestamp),
+        DataType::Date32 | DataType::Date64 => Some(NormalizedType::Date),
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => Some(NormalizedType::Decimal),
         // Outside the matrix, admission is probed rather than listed: a column
         // participates exactly when the canonical row encoding can represent
         // it, so the admitted set grows with the encoding rather than with a
@@ -292,17 +297,39 @@ mod tests {
     #[test]
     fn admits_the_common_type_families_and_refuses_the_unencodable() {
         let item = Arc::new(Field::new("item", DataType::Int64, true));
+
+        // The promoted families classify as themselves rather than probing.
+        for (data_type, expected) in [
+            (DataType::Date32, NormalizedType::Date),
+            (DataType::Date64, NormalizedType::Date),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                NormalizedType::Timestamp,
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                NormalizedType::Timestamp,
+            ),
+            (DataType::Decimal128(10, 2), NormalizedType::Decimal),
+            (DataType::Decimal256(60, 10), NormalizedType::Decimal),
+        ] {
+            assert_eq!(normalized_type(&data_type), Some(expected), "{data_type:?}");
+        }
+
         let admitted = [
             DataType::Binary,
             DataType::FixedSizeBinary(4),
-            DataType::Date32,
-            DataType::Timestamp(TimeUnit::Microsecond, None),
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             DataType::Duration(TimeUnit::Microsecond),
-            DataType::Decimal128(10, 2),
+            DataType::Time32(TimeUnit::Second),
             DataType::List(item.clone()),
             DataType::Struct(Fields::from(vec![item.clone()])),
             DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Int64)),
+            // Dictionary-wrapped promoted types stay opaque: hydrating them
+            // into their family's domain is deferred, as the plan records.
+            DataType::Dictionary(
+                Box::new(DataType::Int8),
+                Box::new(DataType::Timestamp(TimeUnit::Millisecond, None)),
+            ),
         ];
         for data_type in admitted {
             assert_eq!(

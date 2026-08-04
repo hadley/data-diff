@@ -1,11 +1,26 @@
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, make_array,
+    Array, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, make_array,
 };
+use arrow_buffer::i256;
 use arrow_cast::cast;
 use arrow_row::{RowConverter, SortField};
-use arrow_schema::DataType;
+use arrow_schema::{DataType, TimeUnit};
 use xxhash_rust::xxh3::xxh3_128_with_seed;
+
+/// Whether a timestamp type carries a timezone.
+///
+/// An aware timestamp names an instant — Arrow stores its value as a UTC epoch
+/// offset and keeps the timezone string as presentation metadata — while a
+/// naive one names a calendar reading. The two are different claims, so
+/// awareness divides the timestamp kind and no domain crosses the divide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Awareness {
+    Aware,
+    Naive,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Kind {
@@ -13,6 +28,9 @@ enum Kind {
     Int,
     Double,
     String,
+    Timestamp(Awareness),
+    Date,
+    Decimal,
     /// Any admitted type outside the matrix, compared only against itself.
     Opaque,
 }
@@ -29,6 +47,16 @@ enum Domain {
     StringBoolean,
     StringInt,
     StringDouble,
+    Timestamp,
+    Date,
+    DateTimestamp,
+    Decimal,
+    DecimalInt,
+    DecimalDouble,
+    StringDate,
+    StringNaiveTimestamp,
+    StringAwareTimestamp,
+    StringDecimal,
     Opaque,
 }
 
@@ -52,11 +80,121 @@ pub(crate) enum CanonicalValue {
     Double(u64),
     String(Vec<u8>),
     UnparsedString(Vec<u8>),
+    /// A temporal value in nanoseconds, held wide enough that no unit
+    /// conversion can overflow: a UTC epoch offset for an aware timestamp, a
+    /// wall-clock reading for a naive one, and midnight-based values for
+    /// dates.
+    Nanos(i128),
+    /// An exact rational, the canonical form of the decimal domains.
+    Rational(Rational),
     /// Canonical row-format bytes of a value outside the matrix.
     ///
     /// Equal exactly when the values are, for two arrays of one type, which is
     /// the only pairing the `Opaque` domain admits.
     Opaque(Vec<u8>),
+}
+
+/// An exact rational in the canonical form m · 2ᵃ · 5ᵇ with m coprime to 10.
+///
+/// Every decimal value and every finite double reduces to exactly one such
+/// triple, so equality of triples is equality of values across precision,
+/// scale, 128/256 width, and binary-versus-decimal representation. The
+/// mantissa is an [`i256`] stored as little-endian bytes, which every reduced
+/// decimal and double mantissa fits; exponents are held separately rather
+/// than multiplied out, so no construction can overflow.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct Rational {
+    mantissa: [u8; 32],
+    exp2: i32,
+    exp5: i32,
+}
+
+impl Rational {
+    /// The canonical triple of mantissa × 10^exponent10, or `None` where the
+    /// exponents overflow an `i32`.
+    ///
+    /// Only a parsed string can reach the overflow — a decimal's exponents
+    /// are bounded by its `i8` scale and the mantissa's bit width, a double's
+    /// by its own exponent field — and such a string names a value no decimal
+    /// column can hold, so `None` is a mismatch and never a lost value.
+    fn new(mut mantissa: i256, exponent10: i32) -> Option<Self> {
+        if mantissa == i256::ZERO {
+            return Some(Self {
+                mantissa: i256::ZERO.to_le_bytes(),
+                exp2: 0,
+                exp5: 0,
+            });
+        }
+        let twos = strip_factor(&mut mantissa, i256::from_i128(2));
+        let fives = strip_factor(&mut mantissa, i256::from_i128(5));
+        Some(Self {
+            mantissa: mantissa.to_le_bytes(),
+            exp2: twos.checked_add(exponent10)?,
+            exp5: fives.checked_add(exponent10)?,
+        })
+    }
+
+    /// The value as an `i64`, where it is exactly one.
+    fn to_i64(self) -> Option<i64> {
+        if self.exp2 < 0 || self.exp5 < 0 {
+            return None;
+        }
+        let mut value = i256::from_le_bytes(self.mantissa);
+        for _ in 0..self.exp2 {
+            value = value.checked_mul(i256::from_i128(2))?;
+        }
+        for _ in 0..self.exp5 {
+            value = value.checked_mul(i256::from_i128(5))?;
+        }
+        i64::try_from(value.to_i128()?).ok()
+    }
+}
+
+/// Divide out every factor of `factor` and return how many there were.
+fn strip_factor(value: &mut i256, factor: i256) -> i32 {
+    let mut count = 0;
+    loop {
+        let quotient = value.wrapping_div(factor);
+        if quotient.wrapping_mul(factor) == *value {
+            *value = quotient;
+            count += 1;
+        } else {
+            return count;
+        }
+    }
+}
+
+/// The exact rational a finite double is; `None` for `NaN` and infinities.
+fn rational_of_double(value: f64) -> Option<Rational> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value == 0.0 {
+        return Rational::new(i256::ZERO, 0);
+    }
+    let bits = value.to_bits();
+    let fraction = (bits & ((1 << 52) - 1)) as i128;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    // Subnormals have no implicit bit and share the minimum exponent.
+    let (significand, exp2) = if exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), exponent - 1075)
+    };
+    let significand = if value < 0.0 {
+        -significand
+    } else {
+        significand
+    };
+    let base = Rational::new(i256::from_i128(significand), 0)
+        .expect("a bare significand strips at most its own bit width");
+    Some(Rational {
+        mantissa: base.mantissa,
+        // Bounded by the double's own exponent field plus the significand's
+        // 53 bits, far inside an `i32`.
+        exp2: base.exp2 + exp2,
+        exp5: base.exp5,
+    })
 }
 
 impl CanonicalValue {
@@ -69,12 +207,18 @@ impl CanonicalValue {
 impl ComparisonPlan {
     /// Plan the comparison for a pair of column types, where one exists.
     ///
-    /// The four normalized types compare across the whole matrix. Outside it,
-    /// identity of type is the whole of comparability: a pair of one admitted
-    /// type gets the `Opaque` domain, and every other pair — opaque against a
-    /// different opaque, opaque against a normalized type — has no plan and is
-    /// declined wherever an identity would be claimed.
+    /// The four normalized types compare across the whole matrix, and the
+    /// promoted families — timestamps, dates, decimals — compare by the
+    /// decided rules recorded in the design: within a family by exact value,
+    /// against the matrix where a row below says so, and against ISO 8601 or
+    /// exact numeric strings. Outside the decided matrix, identity of type is
+    /// the whole of comparability: a pair of one admitted type gets the
+    /// `Opaque` domain, and every other pair — aware against naive, date
+    /// against an aware timestamp, opaque against anything else — has no plan
+    /// and is declined wherever values would be measured.
     pub(crate) fn new(old: &DataType, new: &DataType) -> Option<Self> {
+        use Awareness::{Aware, Naive};
+
         let old_kind = kind(old);
         let new_kind = kind(new);
         let domain = match (old_kind, new_kind) {
@@ -88,6 +232,22 @@ impl ComparisonPlan {
             (Kind::String, Kind::Boolean) | (Kind::Boolean, Kind::String) => Domain::StringBoolean,
             (Kind::String, Kind::Int) | (Kind::Int, Kind::String) => Domain::StringInt,
             (Kind::String, Kind::Double) | (Kind::Double, Kind::String) => Domain::StringDouble,
+            (Kind::Timestamp(old), Kind::Timestamp(new)) if old == new => Domain::Timestamp,
+            (Kind::Date, Kind::Date) => Domain::Date,
+            (Kind::Date, Kind::Timestamp(Naive)) | (Kind::Timestamp(Naive), Kind::Date) => {
+                Domain::DateTimestamp
+            }
+            (Kind::Decimal, Kind::Decimal) => Domain::Decimal,
+            (Kind::Decimal, Kind::Int) | (Kind::Int, Kind::Decimal) => Domain::DecimalInt,
+            (Kind::Decimal, Kind::Double) | (Kind::Double, Kind::Decimal) => Domain::DecimalDouble,
+            (Kind::String, Kind::Date) | (Kind::Date, Kind::String) => Domain::StringDate,
+            (Kind::String, Kind::Timestamp(Naive)) | (Kind::Timestamp(Naive), Kind::String) => {
+                Domain::StringNaiveTimestamp
+            }
+            (Kind::String, Kind::Timestamp(Aware)) | (Kind::Timestamp(Aware), Kind::String) => {
+                Domain::StringAwareTimestamp
+            }
+            (Kind::String, Kind::Decimal) | (Kind::Decimal, Kind::String) => Domain::StringDecimal,
             (Kind::Opaque, Kind::Opaque) if old == new => Domain::Opaque,
             _ => return None,
         };
@@ -153,6 +313,10 @@ enum RawValue {
     Int(i64),
     Double(f64),
     String(Vec<u8>),
+    /// A temporal value already normalized to nanoseconds.
+    Nanos(i128),
+    /// A decimal's unscaled mantissa and its type's scale.
+    Decimal(i256, i8),
 }
 
 fn kind(data_type: &DataType) -> Kind {
@@ -173,6 +337,10 @@ fn kind(data_type: &DataType) -> Kind {
         {
             Kind::String
         }
+        DataType::Timestamp(_, Some(_)) => Kind::Timestamp(Awareness::Aware),
+        DataType::Timestamp(_, None) => Kind::Timestamp(Awareness::Naive),
+        DataType::Date32 | DataType::Date64 => Kind::Date,
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => Kind::Decimal,
         _ => Kind::Opaque,
     }
 }
@@ -185,6 +353,8 @@ fn raw_values(values: &dyn Array, kind: Kind) -> Vec<RawValue> {
         Kind::Int => integer_values(values),
         Kind::Double => double_values(values),
         Kind::String => string_values(values),
+        Kind::Timestamp(_) | Kind::Date => temporal_values(values),
+        Kind::Decimal => decimal_values(values),
         Kind::Opaque => unreachable!("opaque columns canonicalize as row bytes"),
     }
 }
@@ -238,6 +408,55 @@ fn double_values(values: &dyn Array) -> Vec<RawValue> {
     }
 }
 
+/// Nanoseconds in one day, the factor a `Date32` value scales by.
+const NANOS_PER_DAY: i128 = 86_400_000_000_000;
+
+/// Read a temporal column as nanoseconds.
+///
+/// Every unit widens into `i128` nanoseconds exactly — the extreme `i64`
+/// seconds value is ~9.2e27 nanoseconds against an `i128` range of ~1.7e38 —
+/// so the conversion is total and overflow is unrepresentable rather than
+/// checked. A `Date32` scales from days and a `Date64` from milliseconds,
+/// which lands both spellings of one calendar day on one value.
+fn temporal_values(values: &dyn Array) -> Vec<RawValue> {
+    macro_rules! nanos {
+        ($array:ty, $factor:expr) => {
+            primitive_values::<$array, _>(values, |array, row| {
+                RawValue::Nanos(i128::from(array.value(row)) * $factor)
+            })
+        };
+    }
+    match values.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => nanos!(TimestampSecondArray, 1_000_000_000),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            nanos!(TimestampMillisecondArray, 1_000_000)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => nanos!(TimestampMicrosecondArray, 1_000),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => nanos!(TimestampNanosecondArray, 1),
+        DataType::Date32 => nanos!(Date32Array, NANOS_PER_DAY),
+        DataType::Date64 => nanos!(Date64Array, 1_000_000),
+        _ => unreachable!("validated temporal type"),
+    }
+}
+
+fn decimal_values(values: &dyn Array) -> Vec<RawValue> {
+    match values.data_type() {
+        DataType::Decimal128(_, scale) => {
+            let scale = *scale;
+            primitive_values::<Decimal128Array, _>(values, move |array, row| {
+                RawValue::Decimal(i256::from_i128(array.value(row)), scale)
+            })
+        }
+        DataType::Decimal256(_, scale) => {
+            let scale = *scale;
+            primitive_values::<Decimal256Array, _>(values, move |array, row| {
+                RawValue::Decimal(array.value(row), scale)
+            })
+        }
+        _ => unreachable!("validated decimal type"),
+    }
+}
+
 fn string_values(values: &dyn Array) -> Vec<RawValue> {
     let owned;
     let values = if matches!(values.data_type(), DataType::Dictionary(_, _)) {
@@ -274,8 +493,32 @@ fn canonicalize(value: RawValue, domain: Domain) -> CanonicalValue {
             Domain::IntDouble | Domain::BoolDouble => exact_double_to_i64(value)
                 .map(CanonicalValue::Int)
                 .unwrap_or_else(|| canonical_double(value)),
+            // A finite double is an exact rational; `NaN` and the infinities
+            // keep the double canonicalization, so `NaN` agrees with `NaN`
+            // and still invalidates keys, and nothing equals a decimal.
+            Domain::DecimalDouble => rational_of_double(value)
+                .map(CanonicalValue::Rational)
+                .unwrap_or_else(|| canonical_double(value)),
             _ => canonical_double(value),
         },
+        // Every temporal domain shares one canonical form, so the nanoseconds
+        // pass through: cross-unit, cross-spelling, and date-at-midnight
+        // equality are all equality of this value.
+        RawValue::Nanos(value) => CanonicalValue::Nanos(value),
+        RawValue::Decimal(mantissa, scale) => {
+            let value = Rational::new(mantissa, -i32::from(scale))
+                .expect("a decimal's exponents are bounded by its i8 scale and 256 bits");
+            match domain {
+                // The `IntDouble` precedent: a decimal that is exactly an
+                // integer meets the integer in its own form, and any other
+                // decimal keeps a form no integer has.
+                Domain::DecimalInt => value
+                    .to_i64()
+                    .map(CanonicalValue::Int)
+                    .unwrap_or(CanonicalValue::Rational(value)),
+                _ => CanonicalValue::Rational(value),
+            }
+        }
         RawValue::String(value) => match domain {
             Domain::String => CanonicalValue::String(value),
             Domain::StringBoolean => parse_bytes(&value, |value| {
@@ -286,6 +529,18 @@ fn canonicalize(value: RawValue, domain: Domain) -> CanonicalValue {
             }),
             Domain::StringDouble => parse_bytes(&value, |value| {
                 value.parse::<f64>().ok().map(canonical_double)
+            }),
+            Domain::StringDate => parse_bytes(&value, |value| {
+                parse_iso_date(value).map(CanonicalValue::Nanos)
+            }),
+            Domain::StringNaiveTimestamp => parse_bytes(&value, |value| {
+                parse_iso_naive(value).map(CanonicalValue::Nanos)
+            }),
+            Domain::StringAwareTimestamp => parse_bytes(&value, |value| {
+                parse_iso_instant(value).map(CanonicalValue::Nanos)
+            }),
+            Domain::StringDecimal => parse_bytes(&value, |value| {
+                parse_exact_rational(value).map(CanonicalValue::Rational)
             }),
             _ => unreachable!("string value in non-string domain"),
         },
@@ -402,6 +657,209 @@ fn parse_exact_i64(value: &str) -> Option<i64> {
     }
 }
 
+/// Parse a decimal string exactly, to the canonical rational form.
+///
+/// The grammar is the exact numeric parser's — sign, digits, optional single
+/// fraction, optional exponent — read into a rational rather than through an
+/// `i64` or a float, so `"1.50"` is exactly 1.5 and `"1e2"` exactly 100.
+/// Trailing zeros leave the digits before accumulation, so every value any
+/// decimal column can hold is reachable; a string with more significant
+/// digits than an `i256` holds equals no decimal and fails the parse.
+fn parse_exact_rational(value: &str) -> Option<Rational> {
+    let bytes = value.as_bytes();
+    let (negative, rest) = match bytes.first()? {
+        b'+' => (false, &bytes[1..]),
+        b'-' => (true, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+
+    let exponent_at = rest.iter().position(|byte| matches!(byte, b'e' | b'E'));
+    let (mantissa, exponent) = match exponent_at {
+        Some(index) => (&rest[..index], parse_exponent(&rest[index + 1..])?),
+        None => (rest, 0),
+    };
+    let dot_at = mantissa.iter().position(|byte| *byte == b'.');
+    if dot_at.is_some_and(|index| mantissa[index + 1..].contains(&b'.')) {
+        return None;
+    }
+    let (whole, fraction) = match dot_at {
+        Some(index) => (&mantissa[..index], &mantissa[index + 1..]),
+        None => (mantissa, &[][..]),
+    };
+    if whole.is_empty() || !whole.iter().chain(fraction).all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let mut digits = Vec::with_capacity(whole.len() + fraction.len());
+    digits.extend_from_slice(whole);
+    digits.extend_from_slice(fraction);
+    if digits.iter().all(|digit| *digit == b'0') {
+        return Rational::new(i256::ZERO, 0);
+    }
+    let mut scale = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+        scale = scale.checked_add(1)?;
+    }
+    let digits = &digits[digits.iter().position(|digit| *digit != b'0')?..];
+
+    let mut magnitude = i256::ZERO;
+    for digit in digits {
+        magnitude = magnitude
+            .checked_mul(i256::from_i128(10))?
+            .checked_add(i256::from_i128(i128::from(digit - b'0')))?;
+    }
+    let mantissa = if negative {
+        i256::ZERO.checked_sub(magnitude)?
+    } else {
+        magnitude
+    };
+    // An exponent near the `i32` edge survives to here but overflows the
+    // canonical triple, which no decimal's exponents can; `Rational::new`
+    // declines it, and the string is a mismatch like any other parse failure.
+    Rational::new(mantissa, i32::try_from(scale).ok()?)
+}
+
+/// Parse the ISO 8601 extended calendar date, `YYYY-MM-DD`, to midnight.
+fn parse_iso_date(value: &str) -> Option<i128> {
+    parse_civil_days(value.as_bytes()).map(|days| i128::from(days) * NANOS_PER_DAY)
+}
+
+/// Parse the ISO 8601 unzoned date-time, `YYYY-MM-DDTHH:MM:SS[.f…]`.
+fn parse_iso_naive(value: &str) -> Option<i128> {
+    let bytes = value.as_bytes();
+    let (nanos, consumed) = parse_wall_nanos(bytes)?;
+    (consumed == bytes.len()).then_some(nanos)
+}
+
+/// Parse the ISO 8601 instant: the unzoned date-time with a required `Z` or
+/// `±HH:MM` offset, normalized to UTC.
+fn parse_iso_instant(value: &str) -> Option<i128> {
+    let bytes = value.as_bytes();
+    let (wall, consumed) = parse_wall_nanos(bytes)?;
+    let offset = parse_offset_seconds(&bytes[consumed..])?;
+    Some(wall - i128::from(offset) * 1_000_000_000)
+}
+
+/// Parse `YYYY-MM-DD` — the whole of `bytes` — to days since the epoch.
+fn parse_civil_days(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let year = fixed_digits(&bytes[0..4])?;
+    let month = fixed_digits(&bytes[5..7])?;
+    let day = fixed_digits(&bytes[8..10])?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(days_from_civil(i64::from(year), month, day))
+}
+
+/// Parse a leading `YYYY-MM-DDTHH:MM:SS[.f…]` to wall-clock nanoseconds and
+/// the number of bytes consumed, leaving any offset for the caller.
+fn parse_wall_nanos(bytes: &[u8]) -> Option<(i128, usize)> {
+    if bytes.len() < 19 || bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' {
+        return None;
+    }
+    let days = parse_civil_days(&bytes[..10])?;
+    let hours = fixed_digits(&bytes[11..13])?;
+    let minutes = fixed_digits(&bytes[14..16])?;
+    let seconds = fixed_digits(&bytes[17..19])?;
+    if hours > 23 || minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let (fraction, consumed) = if bytes.get(19) == Some(&b'.') {
+        let digits = bytes[20..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if !(1..=9).contains(&digits) {
+            return None;
+        }
+        let value = fixed_digits(&bytes[20..20 + digits])?;
+        (
+            u64::from(value) * 10_u64.pow(9 - u32::try_from(digits).unwrap()),
+            20 + digits,
+        )
+    } else {
+        (0, 19)
+    };
+
+    let seconds_of_day = i128::from(hours) * 3_600 + i128::from(minutes) * 60 + i128::from(seconds);
+    Some((
+        i128::from(days) * NANOS_PER_DAY + seconds_of_day * 1_000_000_000 + i128::from(fraction),
+        consumed,
+    ))
+}
+
+/// Parse an offset designator — the whole of `bytes` — to seconds.
+fn parse_offset_seconds(bytes: &[u8]) -> Option<i64> {
+    match bytes {
+        [b'Z'] => Some(0),
+        [sign @ (b'+' | b'-'), rest @ ..] if rest.len() == 5 && rest[2] == b':' => {
+            let hours = fixed_digits(&rest[0..2])?;
+            let minutes = fixed_digits(&rest[3..5])?;
+            // ISO 8601 offsets stop at ±14:00, with the minutes zero at the
+            // boundary; anything past that names no timezone and no instant.
+            if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+                return None;
+            }
+            let seconds = i64::from(hours) * 3_600 + i64::from(minutes) * 60;
+            if *sign == b'-' {
+                // ISO 8601 has no negative zero offset; RFC 3339 gives
+                // `-00:00` a meaning ("offset unknown") that is precisely not
+                // an instant, so it does not parse.
+                (seconds != 0).then_some(-seconds)
+            } else {
+                Some(seconds)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Read a fixed-width run of ASCII digits.
+fn fixed_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut value = 0_u32;
+    for digit in bytes {
+        value = value
+            .checked_mul(10)?
+            .checked_add(u32::from(digit - b'0'))?;
+    }
+    Some(value)
+}
+
+fn leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Days from 1970-01-01 to the given civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_index = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let day_of_year = (153 * month_index + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 fn parse_exponent(bytes: &[u8]) -> Option<i64> {
     let (negative, digits) = match bytes.first()? {
         b'+' => (false, &bytes[1..]),
@@ -476,6 +934,16 @@ fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
         CanonicalValue::String(value) => encode_bytes(4, value, &mut bytes),
         CanonicalValue::UnparsedString(value) => encode_bytes(5, value, &mut bytes),
         CanonicalValue::Opaque(value) => encode_bytes(6, value, &mut bytes),
+        CanonicalValue::Nanos(value) => {
+            bytes.push(7);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        CanonicalValue::Rational(value) => {
+            bytes.push(8);
+            bytes.extend_from_slice(&value.mantissa);
+            bytes.extend_from_slice(&value.exp2.to_le_bytes());
+            bytes.extend_from_slice(&value.exp5.to_le_bytes());
+        }
     }
     hasher.hash(&bytes)
 }
@@ -526,32 +994,86 @@ mod tests {
     }
 
     #[test]
-    fn outside_the_matrix_only_the_identical_type_has_a_plan() {
+    fn the_promoted_pairs_have_plans_and_the_refused_pairs_stay_planless() {
         use arrow_schema::{DataType, TimeUnit};
 
         let date = DataType::Date32;
+        let wide = DataType::Date64;
         let aware = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+        let aware_ns = DataType::Timestamp(TimeUnit::Nanosecond, Some("+02:00".into()));
         let naive = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let naive_us = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let decimal = DataType::Decimal128(10, 2);
+        let decimal_wide = DataType::Decimal256(60, 10);
+        let string = DataType::Utf8;
 
-        assert!(ComparisonPlan::new(&date, &date).is_some());
-        assert!(ComparisonPlan::new(&aware, &aware).is_some());
+        // Every decided row of the promoted matrix has a plan, both ways.
+        for (left, right) in [
+            (&aware, &aware_ns),
+            (&naive, &naive_us),
+            (&date, &wide),
+            (&date, &naive),
+            (&wide, &naive_us),
+            (&decimal, &decimal_wide),
+            (&decimal, &DataType::Int64),
+            (&decimal, &DataType::Float64),
+            (&string, &date),
+            (&string, &naive),
+            (&string, &aware),
+            (&string, &decimal),
+        ] {
+            assert!(
+                ComparisonPlan::new(left, right).is_some(),
+                "{left:?}/{right:?}"
+            );
+            assert!(
+                ComparisonPlan::new(right, left).is_some(),
+                "{right:?}/{left:?}"
+            );
+        }
 
-        // A different opaque type, a different unit's worth of the same
-        // family, and a normalized type are all incomparable: identity of type
-        // is the whole of comparability out here.
-        assert!(ComparisonPlan::new(&date, &aware).is_none());
-        assert!(ComparisonPlan::new(&aware, &naive).is_none());
-        assert!(ComparisonPlan::new(&date, &DataType::Int64).is_none());
-        assert!(ComparisonPlan::new(&DataType::Int32, &date).is_none());
+        // The refusals: awareness is never crossed, a date meets no instant,
+        // booleans meet no promoted type, and integers meet no temporal one.
+        for (left, right) in [
+            (&aware, &naive),
+            (&date, &aware),
+            (&string, &DataType::Duration(TimeUnit::Second)),
+            (&DataType::Boolean, &date),
+            (&DataType::Boolean, &decimal),
+            (&DataType::Int64, &date),
+            (&DataType::Int64, &naive),
+            (&DataType::Float64, &aware),
+        ] {
+            assert!(
+                ComparisonPlan::new(left, right).is_none(),
+                "{left:?}/{right:?}"
+            );
+            assert!(
+                ComparisonPlan::new(right, left).is_none(),
+                "{right:?}/{left:?}"
+            );
+        }
+
+        // Outside the promoted families, identity of type is still the whole
+        // of comparability, dictionary-wrapped promoted types included.
+        let duration = DataType::Duration(TimeUnit::Second);
+        let wrapped = DataType::Dictionary(Box::new(DataType::Int8), Box::new(naive.clone()));
+        assert!(ComparisonPlan::new(&duration, &duration).is_some());
+        assert!(ComparisonPlan::new(&wrapped, &wrapped).is_some());
+        assert!(
+            ComparisonPlan::new(&duration, &DataType::Duration(TimeUnit::Millisecond)).is_none()
+        );
+        assert!(ComparisonPlan::new(&wrapped, &naive).is_none());
     }
 
     #[test]
     fn opaque_values_compare_and_hash_by_their_encoding() {
         let (old, new) = values(
-            column!(date32[Some(1), Some(2), None, None]),
-            column!(date32[Some(1), Some(3), None, Some(4)]),
+            column!(binary[Some("a"), Some("b"), None, None]),
+            column!(binary[Some("a"), Some("c"), None, Some("d")]),
         );
         assert_eq!(old[0], new[0]);
+        assert!(matches!(old[0], CanonicalValue::Opaque(_)));
         assert_ne!(old[1], new[1]);
         // Nulls leave the encoding before it happens, so the null rules stay
         // the matrix's own: null agrees with null and disagrees with present.
@@ -611,6 +1133,349 @@ mod tests {
         let (old, new) = values(std::sync::Arc::new(old), std::sync::Arc::new(new));
         assert_eq!(old, new);
         assert!(matches!(old[0], CanonicalValue::Opaque(_)));
+    }
+
+    #[test]
+    fn timestamps_compare_as_instants_across_units_and_timezones() {
+        use std::sync::Arc;
+
+        use arrow_array::TimestampSecondArray;
+
+        // One second is a billion nanoseconds; the unit is representation.
+        let (old, new) = values(
+            column!(ts_ms[Some(1000), Some(2000), None]),
+            column!(ts_us[Some(1_000_000), Some(3_000_000), None]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert!(matches!(old[0], CanonicalValue::Nanos(_)));
+        assert_ne!(old[1], new[1]);
+        assert_eq!(old[2], CanonicalValue::Null);
+        assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+
+        // The timezone string is presentation metadata: the stored value is
+        // the instant, so one day into 1970 is one day into 1970 in New York.
+        let new_york =
+            Arc::new(TimestampSecondArray::from(vec![86_400]).with_timezone("America/New_York"))
+                as ArrayRef;
+        let (old, new) = values(column!(ts_ms[86_400_000]), new_york);
+        assert_eq!(old, new);
+
+        // The extremes of the widest and narrowest units canonicalize
+        // without overflow, nanoseconds being held in an `i128`.
+        let seconds =
+            Arc::new(TimestampSecondArray::from(vec![i64::MAX, i64::MIN]).with_timezone("UTC"))
+                as ArrayRef;
+        let (old, new) = values(seconds, column!(ts_us[i64::MAX, i64::MIN]));
+        assert_ne!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+    }
+
+    #[test]
+    fn naive_timestamps_compare_as_wall_clock_across_units() {
+        let (old, new) = values(
+            column!(ts_ms_naive[Some(1500), None]),
+            column!(ts_us_naive[Some(1_500_000), None]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], CanonicalValue::Null);
+        assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+    }
+
+    #[test]
+    fn the_two_date_spellings_meet_on_the_day() {
+        let (old, new) = values(
+            column!(date32[Some(1), Some(-1), Some(2), None]),
+            column!(date64[
+                Some(86_400_000),
+                Some(-86_400_000),
+                Some(172_800_001),
+                None
+            ]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+        // A non-midnight `Date64` is a real value, equal to no `Date32`.
+        assert_ne!(old[2], new[2]);
+        assert_eq!(old[3], CanonicalValue::Null);
+    }
+
+    #[test]
+    fn a_date_is_the_exact_midnight_of_a_naive_timestamp() {
+        let (old, new) = values(
+            column!(date32[Some(1), Some(1), Some(-1)]),
+            column!(ts_ms_naive[
+                Some(86_400_000),
+                Some(86_400_001),
+                Some(-86_400_000)
+            ]),
+        );
+        assert_eq!(old[0], new[0]);
+        // One millisecond past midnight is another value entirely.
+        assert_ne!(old[1], new[1]);
+        assert_eq!(old[2], new[2]);
+    }
+
+    #[test]
+    fn decimals_compare_by_value_across_precision_scale_and_width() {
+        use std::sync::Arc;
+
+        use arrow_array::Decimal256Array;
+        use arrow_buffer::i256;
+
+        let (old, new) = values(
+            column!(dec[Some(150), Some(150), None]),
+            column!(dec_wide[Some(150_000), Some(150_010), None]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert!(matches!(old[0], CanonicalValue::Rational(_)));
+        assert_ne!(old[1], new[1]);
+        assert_eq!(old[2], CanonicalValue::Null);
+        assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+
+        // A `Decimal256` at a third scale reaches the same canonical value.
+        let wide = Arc::new(
+            Decimal256Array::from(vec![i256::from_i128(15_000_000_000)])
+                .with_precision_and_scale(60, 10)
+                .unwrap(),
+        ) as ArrayRef;
+        let (old, new) = values(column!(dec[150]), wide);
+        assert_eq!(old, new);
+    }
+
+    #[test]
+    fn a_decimal_equals_the_integer_it_exactly_is() {
+        use std::sync::Arc;
+
+        use arrow_array::Decimal128Array;
+
+        let (old, new) = values(
+            column!(dec[Some(500), Some(501), None]),
+            column!([Some(5), Some(5), None]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[0], CanonicalValue::Int(5));
+        assert_ne!(old[1], new[1]);
+        assert_eq!(old[2], CanonicalValue::Null);
+
+        // A decimal beyond every `i64` keeps a form no integer has.
+        let huge = Arc::new(
+            Decimal128Array::from(vec![i128::from(i64::MAX) + 1])
+                .with_precision_and_scale(38, 0)
+                .unwrap(),
+        ) as ArrayRef;
+        let (old, new) = values(huge, column!([i64::MAX]));
+        assert!(matches!(old[0], CanonicalValue::Rational(_)));
+        assert_ne!(old[0], new[0]);
+
+        // Negative scale multiplies out rather than dividing: 5 × 10² is 500.
+        let shifted = Arc::new(
+            Decimal128Array::from(vec![5])
+                .with_precision_and_scale(10, -2)
+                .unwrap(),
+        ) as ArrayRef;
+        let (old, new) = values(shifted, column!([500]));
+        assert_eq!(old, new);
+        assert_eq!(old[0], CanonicalValue::Int(500));
+    }
+
+    #[test]
+    fn a_decimal_meets_a_double_only_at_the_exact_value() {
+        let (old, new) = values(
+            column!(dec[Some(50), Some(10), Some(0)]),
+            column!([Some(0.5), Some(0.1), Some(-0.0)]),
+        );
+        // 0.50 is exactly the double 0.5; 0.10 is not the double nearest 0.1,
+        // whose exact value has fifty-five decimal digits; zero is zero,
+        // signed or not.
+        assert_eq!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+        assert_eq!(old[2], new[2]);
+
+        // `NaN` and infinity equal no decimal, and `NaN` still invalidates
+        // keys, its canonicalization being the double domain's own.
+        let (old, new) = values(
+            column!(dec[Some(0), Some(0)]),
+            column!([f64::NAN, f64::INFINITY]),
+        );
+        assert_ne!(old[0], new[0]);
+        assert_ne!(old[1], new[1]);
+        assert!(new[0].invalid_key());
+    }
+
+    #[test]
+    fn iso_date_strings_parse_against_date_columns() {
+        let (old, new) = values(
+            column!([
+                "2026-08-03",
+                "2024-02-29",
+                "2023-02-29",
+                "1969-12-31",
+                "2026-8-3",
+                " 2026-08-03"
+            ]),
+            column!(date32[20668, 19782, 19782, -1, 19782, 20668]),
+        );
+        assert_eq!(old[0], new[0]);
+        // A leap day parses exactly in a leap year and not at all outside one.
+        assert_eq!(old[1], new[1]);
+        assert!(matches!(old[2], CanonicalValue::UnparsedString(_)));
+        assert_eq!(old[3], new[3]);
+        // Extended format only, untrimmed: no elided zeros, no whitespace.
+        assert!(matches!(old[4], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[5], CanonicalValue::UnparsedString(_)));
+    }
+
+    #[test]
+    fn iso_naive_strings_parse_wall_clock_readings() {
+        let (old, new) = values(
+            column!([
+                "1970-01-01T00:00:01",
+                "1970-01-01T00:00:00.5",
+                "1970-01-02T00:00:00",
+                "1970-01-01",
+                "1970-01-01T00:00:01Z",
+                "1970-01-01t00:00:01"
+            ]),
+            column!(ts_ms_naive[1000, 500, 86_400_000, 0, 1000, 1000]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+        assert_eq!(old[2], new[2]);
+        // A date-only string is the date profile's, not an implicit midnight;
+        // an offset belongs to instants; designators are uppercase.
+        assert!(matches!(old[3], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[4], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[5], CanonicalValue::UnparsedString(_)));
+    }
+
+    #[test]
+    fn fractional_seconds_reach_nanoseconds_and_stop_there() {
+        use std::sync::Arc;
+
+        use arrow_array::TimestampNanosecondArray;
+
+        let nanos = Arc::new(TimestampNanosecondArray::from(vec![123_456_789, 0, 0])) as ArrayRef;
+        let (old, new) = values(
+            column!([
+                "1970-01-01T00:00:00.123456789",
+                "1970-01-01T00:00:00.0000000000",
+                "1970-01-01T00:00:00."
+            ]),
+            nanos,
+        );
+        assert_eq!(old[0], new[0]);
+        // Ten fractional digits name nothing a timestamp can hold, and a
+        // bare point names nothing at all.
+        assert!(matches!(old[1], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[2], CanonicalValue::UnparsedString(_)));
+    }
+
+    #[test]
+    fn iso_instant_strings_require_an_offset_and_normalize_to_utc() {
+        let (old, new) = values(
+            column!([
+                "1970-01-01T00:00:01Z",
+                "1970-01-01T01:00:00+01:00",
+                "1969-12-31T19:00:00-05:00",
+                "1970-01-01T14:00:00+14:00",
+                "1970-01-01T00:00:01",
+                "1970-01-01T00:00:01z",
+                "1970-01-01T00:00:01-00:00",
+                "1970-01-01T14:01:00+14:01",
+                "1970-01-01T15:00:00+15:00"
+            ]),
+            column!(ts_ms[1000, 0, 0, 0, 1000, 1000, 1000, 0, 0]),
+        );
+        assert_eq!(old[0], new[0]);
+        // Two spellings of the epoch, one instant — and the offset range's
+        // far edge, ±14:00, is a real offset that reaches it too.
+        assert_eq!(old[1], new[1]);
+        assert_eq!(old[2], new[2]);
+        assert_eq!(old[3], new[3]);
+        // No offset is no instant; designators are uppercase; ISO 8601 has no
+        // negative zero offset, no minutes past a ±14-hour offset, and
+        // nothing beyond it.
+        assert!(matches!(old[4], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[5], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[6], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[7], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[8], CanonicalValue::UnparsedString(_)));
+    }
+
+    #[test]
+    fn decimal_strings_parse_exactly_to_rationals() {
+        let (old, new) = values(
+            column!(["1.50", "1.5", "1e2", "-0.00", "0.1", "1.51", "NaN", "1_000"]),
+            column!(dec[150, 150, 10_000, 0, 10, 150, 0, 100_000]),
+        );
+        assert_eq!(old[0], new[0]);
+        assert_eq!(old[1], new[1]);
+        assert_eq!(old[2], new[2]);
+        assert_eq!(old[3], new[3]);
+        // "0.1" is exactly the decimal 0.10 — the parse never touches a float.
+        assert_eq!(old[4], new[4]);
+        assert_ne!(old[5], new[5]);
+        // A decimal holds no `NaN`, and the grammar holds no underscores.
+        assert!(matches!(old[6], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[7], CanonicalValue::UnparsedString(_)));
+        assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+    }
+
+    #[test]
+    fn decimal_strings_reach_the_far_edge_of_the_decimal_range() {
+        use std::sync::Arc;
+
+        use arrow_array::Decimal256Array;
+        use arrow_buffer::i256;
+
+        // Trailing zeros strip before accumulation, so a long spelling of a
+        // representable value parses; eighty significant digits name a value
+        // no decimal column can hold, and mismatch; an exponent at the `i32`
+        // edge would overflow the canonical triple's exponents, which no
+        // decimal's can, and mismatches rather than wrapping or panicking.
+        let long = format!("1{}", "0".repeat(80));
+        let dense = "9".repeat(80);
+        let strings = Arc::new(StringArray::from(vec![
+            long.as_str(),
+            dense.as_str(),
+            "2e2147483647",
+            "2e-2147483649",
+        ])) as ArrayRef;
+        let wide = Arc::new(
+            Decimal256Array::from(vec![
+                i256::from_i128(10_000),
+                i256::from_i128(0),
+                i256::from_i128(0),
+                i256::from_i128(0),
+            ])
+            .with_precision_and_scale(76, -76)
+            .unwrap(),
+        ) as ArrayRef;
+
+        let (old, new) = values(strings, wide);
+        assert_eq!(old[0], new[0]);
+        assert!(matches!(old[1], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[2], CanonicalValue::UnparsedString(_)));
+        assert!(matches!(old[3], CanonicalValue::UnparsedString(_)));
+    }
+
+    #[test]
+    fn temporal_equality_does_not_compose_across_triangles() {
+        // "2026-08-03" equals the date, the date equals its midnight naive
+        // timestamp, and the string does not equal that timestamp: each pair
+        // compares under its own profile, as the numeric triangles always
+        // have.
+        let day = column!(date32[20668]);
+        let midnight = column!(ts_ms_naive[20_668_i64 * 86_400_000]);
+        let text = column!(["2026-08-03"]);
+
+        let (old, new) = values(text.clone(), day.clone());
+        assert_eq!(old, new);
+        let (old, new) = values(day, midnight.clone());
+        assert_eq!(old, new);
+        let (old, new) = values(text, midnight);
+        assert!(matches!(old[0], CanonicalValue::UnparsedString(_)));
+        assert_ne!(old[0], new[0]);
     }
 
     #[test]
