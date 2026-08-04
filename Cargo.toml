@@ -9,6 +9,7 @@ members = ["test-support"]
 
 [dependencies]
 arrow-array = "54"
+arrow-buffer = "54"
 arrow-cast = "54"
 arrow-row = "54"
 arrow-schema = "54"

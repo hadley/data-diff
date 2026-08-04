@@ -28,10 +28,10 @@ use std::sync::Arc;
 
 use arrow_array::types::Int8Type;
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, DictionaryArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, RecordBatch,
-    RecordBatchOptions, StringArray, TimestampMillisecondArray, UInt8Array, UInt16Array,
-    UInt32Array, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    DictionaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
@@ -199,6 +199,16 @@ fn resolve(annotation: &str, kind: Option<Kind>, context: Option<&str>) -> DataT
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
         ),
         "ts_ms_naive" => (Kind::Int, DataType::Timestamp(TimeUnit::Millisecond, None)),
+        "ts_us" => (
+            Kind::Int,
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        ),
+        "ts_us_naive" => (Kind::Int, DataType::Timestamp(TimeUnit::Microsecond, None)),
+        "date64" => (Kind::Int, DataType::Date64),
+        // Decimal values are written as their unscaled mantissas, reusing the
+        // integer cell path the temporal annotations use: `dec[150]` is 1.50.
+        "dec" => (Kind::Int, DataType::Decimal128(10, 2)),
+        "dec_wide" => (Kind::Int, DataType::Decimal128(25, 5)),
         unknown => fail(context, format!("unknown type annotation `{unknown}`")),
     };
 
@@ -239,9 +249,28 @@ fn build(
         DataType::UInt32 => Arc::new(UInt32Array::from(narrow(cells, label, context))),
         DataType::UInt64 => Arc::new(UInt64Array::from(narrow(cells, label, context))),
         DataType::Date32 => Arc::new(Date32Array::from(narrow(cells, label, context))),
+        DataType::Date64 => Arc::new(Date64Array::from(narrow::<i64>(cells, label, context))),
         DataType::Timestamp(TimeUnit::Millisecond, timezone) => Arc::new(
             TimestampMillisecondArray::from(narrow::<i64>(cells, label, context))
                 .with_timezone_opt(timezone.clone()),
+        ),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone) => Arc::new(
+            TimestampMicrosecondArray::from(narrow::<i64>(cells, label, context))
+                .with_timezone_opt(timezone.clone()),
+        ),
+        DataType::Decimal128(precision, scale) => Arc::new(
+            Decimal128Array::from(
+                cells
+                    .into_iter()
+                    .map(|cell| match cell {
+                        Cell::Null => None,
+                        Cell::Int(value) => Some(value),
+                        other => unreachable!("{other:?} in a decimal column"),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .with_precision_and_scale(*precision, *scale)
+            .unwrap_or_else(|_| fail(context, format!("mantissa does not fit {label}"))),
         ),
         DataType::Float32 => Arc::new(Float32Array::from(
             doubles(cells)

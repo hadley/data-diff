@@ -986,3 +986,67 @@ fn an_incomparable_rename_hint_is_honoured_as_a_type_change() {
     col_edit(stamp, type: Date32 -> Int64)
     ");
 }
+
+#[test]
+fn a_promoted_retype_compares_values_across_units() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2, 3],
+        "at" => ts_ms[1000, 2000, 3000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "at" => ts_us[1_000_000, 2_500_000, 3_000_000],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // A unit retype read as a type-only edit before promotion; the instants
+    // now compare across the units, so the one genuine edit is counted.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r##"
+    table_key([id], basis: declared)
+    col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))", changes: 1)
+    "##);
+}
+
+#[test]
+fn an_iso_date_string_retype_is_a_type_only_edit() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    let old = table! {
+        "id" => [1, 2],
+        "day" => ["2026-08-01", "2026-08-02"],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "day" => date32[20666, 20667],
+    };
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // Each string parses under the date profile to the day beside it, so the
+    // values all compare equal and the retype is the whole report.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    table_key([id], basis: declared)
+    col_edit(day, type: Utf8 -> Date32)
+    ");
+}

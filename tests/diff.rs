@@ -2137,9 +2137,10 @@ fn a_timezone_is_part_of_the_type() {
         "at" => ts_ms_naive[1000, 2000],
     };
 
-    // An instant and a wall-clock reading are different claims, and deciding
-    // how they compare is the promotion step's business; until then the pair
-    // is one column whose type changed, with no value story either way.
+    // An instant and a wall-clock reading are different claims, and no rule
+    // relates them without assuming the writer's timezone, so awareness is
+    // never crossed: the pair is one column whose type changed, with no value
+    // story either way — the one refusal promotion deliberately kept.
     let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
     assert_eq!(
@@ -2276,10 +2277,249 @@ fn a_one_sided_diff_admits_opaque_columns() {
 
     let added = diff_added(&table).unwrap();
 
-    assert_eq!(added.columns[1].normalized_type, NormalizedType::Opaque);
+    assert_eq!(added.columns[1].normalized_type, NormalizedType::Timestamp);
     assert_eq!(
         added.columns[1].source_type,
         "Timestamp(Millisecond, Some(\"UTC\"))"
     );
     assert_eq!(added.rows, 2);
+}
+
+#[test]
+fn a_cross_unit_timestamp_column_can_be_the_declared_or_guessed_key() {
+    let old = table! {
+        "at" => ts_ms[1000, 2000, 3000],
+        "value" => [1, 1, 2],
+    };
+    let new = table! {
+        "at" => ts_us[3_000_000, 1_000_000, 2_000_000],
+        "value" => [2, 1, 1],
+    };
+
+    // A unit retype rejected this declaration as `incompatible_types` before
+    // promotion; the pair now compares as instants and validates as a key.
+    let declared = diff_tables(&old, &new, &declared("at")).unwrap();
+    assert_eq!(declared.key.basis, KeyBasis::Declared);
+    assert!(declared.key.rejection.is_none());
+    assert_eq!(
+        declared.rows.matched,
+        vec![
+            Coordinate::from_zero_based(0, 1),
+            Coordinate::from_zero_based(1, 2),
+            Coordinate::from_zero_based(2, 0),
+        ]
+    );
+    assert!(declared.cells.is_empty());
+
+    // "value" repeats in old, so the timestamp column is the one candidate,
+    // and it wins on ordinary evidence.
+    let guessed = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(guessed.key.basis, KeyBasis::Guessed);
+    assert_eq!(guessed.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(guessed, repeated);
+    assert_eq!(render(&guessed), render(&repeated));
+}
+
+#[test]
+fn a_cross_unit_retype_compares_values_and_reports_the_type_change() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "at" => ts_ms[1000, 2000, 3000],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "at" => ts_us[1_000_000, 2_500_000, 3_000_000],
+    };
+    let options = declared("id");
+
+    // The type change and the value change are independent facts, and
+    // promotion makes both visible at once: the equal instants are equal
+    // across the unit change, and the edited one is a changed cell.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 1,
+        }]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(1, 1, 1, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_dropped_timestamp_is_recovered_as_a_rename_across_units() {
+    let old = table! {
+        "id" => [1, 2],
+        "stamp" => ts_ms[1000, 2000],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "logged" => ts_us[1_000_000, 2_000_000],
+    };
+
+    // Exact inference hashes the pair under its plan, and the instants are
+    // equal across the unit change, so the rename is recovered on the same
+    // evidence as any other.
+    let diff = diff_tables(&old, &new, &declared("id")).unwrap();
+
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 1, IdentityBasis::Exact),
+        ]
+    );
+    assert!(diff.columns.added.is_empty());
+    assert!(diff.columns.dropped.is_empty());
+
+    let repeated = diff_tables(&old, &new, &declared("id")).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_decimal_column_meets_the_integers_it_replaced() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "price" => [500, 600, 700],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "price" => dec[50_000, 60_000, 70_100],
+    };
+    let options = declared("id");
+
+    // 500 is exactly 500.00, so only the genuinely edited price is a changed
+    // cell, beside the visible retype.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 1,
+        }]
+    );
+    assert_eq!(
+        diff.cells,
+        vec![CellCoordinate::from_zero_based(2, 1, 2, 1)]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_iso_date_string_column_retyped_to_dates_is_a_type_only_edit() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "day" => ["2026-08-01", "2026-08-02", "2026-08-03"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "day" => date32[20666, 20667, 20668],
+    };
+    let options = declared("id");
+
+    // Each string parses under the date profile to the day beside it, so the
+    // values all compare equal and the retype is the whole report.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_instant_string_column_matches_an_aware_timestamp() {
+    let old = table! {
+        "id" => [1, 2],
+        "at" => ["1970-01-01T00:00:01Z", "1970-01-01T01:00:00+01:00"],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "at" => ts_ms[1000, 0],
+    };
+    let options = declared("id");
+
+    // Both spellings carry offsets, so both name instants, and each equals
+    // the stored epoch offset beside it after normalization to UTC.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.columns.edited,
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(1, 1),
+            type_changed: true,
+            changes: 0,
+        }]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn a_declared_key_across_the_awareness_divide_is_still_rejected() {
+    let old = table! {
+        "id" => [1, 2],
+        "at" => ts_ms[1000, 2000],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "at" => ts_ms_naive[1000, 2000],
+    };
+    let options = declared("at");
+
+    // Promotion widened the matrix, not the machinery around it: a pair with
+    // no plan still rejects a declared key and keeps its asserted identity.
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert_eq!(
+        diff.key.rejection,
+        Some(KeyRejection {
+            subject: KeySubject::Component(shared("at")),
+            reason: RejectionReason::IncompatibleTypes {
+                old_type: "Timestamp(Millisecond, Some(\"UTC\"))".into(),
+                new_type: "Timestamp(Millisecond, None)".into(),
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Name),
+            identity(1, 1, IdentityBasis::Declared),
+        ]
+    );
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
 }

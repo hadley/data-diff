@@ -193,13 +193,23 @@ impl CellCoordinate {
     }
 }
 
-/// A type in the MVP comparison domain.
+/// A type in the comparison domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NormalizedType {
     Boolean,
     Int64,
     Double,
     String,
+    /// A timestamp, aware or naive: comparable within its awareness across
+    /// units and timezones, and against ISO 8601 strings.
+    Timestamp,
+    /// A calendar date: comparable across `Date32` and `Date64`, against
+    /// naive timestamps at midnight, and against ISO 8601 date strings.
+    Date,
+    /// A decimal: comparable across precision, scale, and width, against
+    /// integers and doubles when the value is exact, and against exact
+    /// numeric strings.
+    Decimal,
     /// Admitted but outside the matrix: comparable only against the identical
     /// source type, by canonical row-format bytes.
     Opaque,
