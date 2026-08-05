@@ -24,6 +24,8 @@
 //! let blank = table! { "id" => i64[] };
 //! ```
 
+pub mod generate;
+
 use std::sync::Arc;
 
 use arrow_array::types::Int8Type;

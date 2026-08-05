@@ -1,9 +1,9 @@
 use data_diff::{
-    CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, Coordinate, Diff,
-    DiffError, DiffOptions, EditSummary, FanoutEvent, HintKind, IdentityBasis, IssueKind, KeyBasis,
-    KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
-    OneSidedDiff, RejectionReason, RowEdit, Side, diff_added, diff_removed, diff_tables,
-    write_human, write_human_one_sided,
+    Budgets, CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, Coordinate,
+    Diff, DiffError, DiffOptions, EditSummary, FanoutEvent, HintKind, IdentityBasis,
+    IncompleteStage, IssueKind, KeyBasis, KeyComponent, KeyDiff, KeyOverlap, KeyRejection,
+    KeyRetraction, KeySubject, NormalizedType, OneSidedDiff, RejectionReason, RowEdit, Side,
+    diff_added, diff_removed, diff_tables, write_human, write_human_one_sided,
 };
 use test_support::table;
 
@@ -42,7 +42,7 @@ fn shared(name: &str) -> KeyComponent {
 fn declared(key: &str) -> DiffOptions {
     DiffOptions {
         key: vec![key.to_owned()],
-        hints: Vec::new(),
+        ..DiffOptions::default()
     }
 }
 
@@ -50,6 +50,7 @@ fn hinted(key: &[&str], hints: &[&str]) -> DiffOptions {
     DiffOptions {
         key: key.iter().map(|name| (*name).to_owned()).collect(),
         hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
+        ..DiffOptions::default()
     }
 }
 
@@ -641,7 +642,7 @@ fn a_boolean_and_a_numeric_pair_may_be_declared_as_the_key() {
     };
     let options = DiffOptions {
         key: vec!["flag/count".into()],
-        hints: Vec::new(),
+        ..DiffOptions::default()
     };
 
     let diff = diff_tables(&old, &new, &options).unwrap();
@@ -679,7 +680,7 @@ fn a_renamed_key_identifies_rows_across_both_files() {
     };
     let options = DiffOptions {
         key: vec!["customer_id/id".into()],
-        hints: Vec::new(),
+        ..DiffOptions::default()
     };
 
     let diff = diff_tables(&old, &new, &options).unwrap();
@@ -1450,7 +1451,7 @@ fn a_declared_positional_key_and_the_fallback_reach_one_key() {
         &new,
         &DiffOptions {
             key: vec![data_diff::POSITIONAL_COMPONENT.to_owned()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         },
     )
     .unwrap();
@@ -1476,7 +1477,7 @@ fn a_rejected_pair_keeps_the_identity_it_asserted() {
         &new,
         &DiffOptions {
             key: vec!["customer_id/id".to_owned()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         },
     )
     .unwrap();
@@ -2522,4 +2523,241 @@ fn a_declared_key_across_the_awareness_divide_is_still_rejected() {
     let repeated = diff_tables(&old, &new, &options).unwrap();
     assert_eq!(diff, repeated);
     assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn tiny_budgets_produce_valid_partial_results_and_report_them() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "gone" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "p" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "q" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+        "edited" => [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "fresh" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 999],
+        "p" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+        "q" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "edited" => [6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    };
+
+    // Under the defaults nothing binds: the rename-and-modify pair is one
+    // column, the exchange is a swap, and the summary is exactly minimal.
+    let options = declared("id");
+    let free = diff_tables(&old, &new, &options).unwrap();
+    assert!(free.incomplete.is_empty());
+    assert!(free.summary.optimal);
+    assert!(free.columns.dropped.is_empty());
+    assert!(free.columns.added.is_empty());
+    assert!(
+        free.columns
+            .identities
+            .contains(&identity(1, 1, IdentityBasis::Approximate))
+    );
+    assert!(
+        free.columns
+            .identities
+            .contains(&identity(2, 3, IdentityBasis::Swapped))
+    );
+
+    // Zeroed budgets exhaust every bounded stage. Each returns its stated
+    // valid partial result — the candidates stay a drop and an addition, the
+    // exchange stays two same-name identities, the summary still covers every
+    // cell — and the diff names all three, in the fixed order.
+    let bounded = DiffOptions {
+        budgets: Budgets {
+            rename_pairs: 0,
+            swap_pairs: 0,
+            summary_cells: 0,
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+    let diff = diff_tables(&old, &new, &bounded).unwrap();
+
+    assert_eq!(
+        diff.incomplete,
+        [
+            IncompleteStage::Renames,
+            IncompleteStage::Swaps,
+            IncompleteStage::Summary,
+        ]
+    );
+    assert_eq!(diff.columns.dropped, [2]);
+    assert_eq!(diff.columns.added, [2]);
+    assert!(!diff.summary.optimal);
+    assert!(diff.summary.rows.is_empty());
+    assert_eq!(
+        diff.summary.columns,
+        vec![
+            ColumnEdit {
+                column: Coordinate::from_zero_based(2, 2),
+                type_changed: false,
+                changes: 12,
+            },
+            ColumnEdit {
+                column: Coordinate::from_zero_based(3, 3),
+                type_changed: false,
+                changes: 12,
+            },
+            ColumnEdit {
+                column: Coordinate::from_zero_based(4, 4),
+                type_changed: false,
+                changes: 1,
+            },
+        ]
+    );
+
+    // The report leads the problems block, before the separator, and repeats
+    // byte for byte: a bounded run is as deterministic as an unbounded one.
+    let rendered = String::from_utf8(render(&diff)).unwrap();
+    assert!(
+        rendered
+            .starts_with("incomplete_renames()\nincomplete_swaps()\nincomplete_summary()\n----\n")
+    );
+    let repeated = diff_tables(&old, &new, &bounded).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn reconsiderations_second_pass_runs_under_fresh_counters() {
+    let old = table! {
+        "customer_id" => [1, 2, 3],
+        "value" => [10, 20, 30],
+        "r_old" => ["a", "b", "c"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "value" => [10, 20, 31],
+        "r_new" => ["a", "b", "c"],
+    };
+    // Pass one guesses "value", and its rename inference spends four units on
+    // the diagonal: two claiming the key pair, two claiming the other rename.
+    // Reconsideration then adopts the inferred key, and the second pass must
+    // re-derive (r_old, r_new) over the wider matching, spending two more. A
+    // budget of four covers each pass alone and not both together, so this
+    // passes only if every pass runs under its own counters.
+    let options = DiffOptions {
+        budgets: Budgets {
+            rename_pairs: 4,
+            ..Budgets::default()
+        },
+        ..DiffOptions::default()
+    };
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert!(diff.incomplete.is_empty());
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Exact),
+            identity(1, 1, IdentityBasis::Name),
+            identity(2, 2, IdentityBasis::Exact),
+        ]
+    );
+
+    // A first pass allowed three units strands (r_old, r_new) — but the diff
+    // reports the pass it kept, and the second pass re-derives the pair well
+    // within its own fresh budget, so nothing is incomplete in the end.
+    let tighter = DiffOptions {
+        budgets: Budgets {
+            rename_pairs: 3,
+            ..Budgets::default()
+        },
+        ..DiffOptions::default()
+    };
+    let diff = diff_tables(&old, &new, &tighter).unwrap();
+
+    assert!(diff.incomplete.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Exact),
+            identity(1, 1, IdentityBasis::Name),
+            identity(2, 2, IdentityBasis::Exact),
+        ]
+    );
+}
+
+#[test]
+fn sampled_inference_still_infers_and_reports_nothing() {
+    let old = table! {
+        "id" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        ],
+        "a" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        ],
+        "b" => [
+            -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
+            -16, -17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30,
+        ],
+    };
+    let new = table! {
+        "id" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        ],
+        "a" => [
+            -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
+            -16, -17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30,
+        ],
+        "b" => [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        ],
+    };
+    // Thirty matched rows against a sample cap of eight, so swap inference
+    // measures a deterministic key-hash sample rather than every row. The
+    // exchange still crosses perfectly over whichever rows were chosen, and
+    // completing inference over the sample is not budget exhaustion: nothing
+    // is reported, exactly as the design specifies.
+    let options = DiffOptions {
+        budgets: Budgets {
+            agreement_rows: 8,
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+
+    let diff = diff_tables(&old, &new, &options).unwrap();
+
+    assert!(diff.incomplete.is_empty());
+    assert_eq!(
+        diff.columns.identities,
+        vec![
+            identity(0, 0, IdentityBasis::Declared),
+            identity(1, 2, IdentityBasis::Swapped),
+            identity(2, 1, IdentityBasis::Swapped),
+        ]
+    );
+    assert!(diff.cells.is_empty());
+
+    let repeated = diff_tables(&old, &new, &options).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_incomplete_line_is_not_a_hint_kind() {
+    let old = table! { "id" => [1], "value" => [10] };
+    let new = table! { "id" => [1], "value" => [10] };
+
+    // The report lines follow `table_regenerate()`'s precedent: statements
+    // about the run, not identities a user could assert, so pasting one back
+    // is refused by kind like any other non-hint operation.
+    assert_eq!(
+        diff_tables(&old, &new, &hinted(&["id"], &["incomplete_renames(value)"])).unwrap_err(),
+        DiffError::UnknownHintKind {
+            hint: "incomplete_renames(value)".into(),
+            kind: "incomplete_renames".into(),
+        }
+    );
 }

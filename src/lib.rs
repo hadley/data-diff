@@ -22,13 +22,14 @@ pub use human::{write_human, write_human_one_sided};
 pub use input::{MISSING_FILE, read_parquet, validate_tables};
 pub use key::POSITIONAL_COMPONENT;
 pub use model::{
-    CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff, Coordinate,
-    Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent, HintClaim,
-    HintKind, HintNames, IdentityBasis, Issue, IssueKind, KeyBasis, KeyComponent, KeyDiff,
-    KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType, OneSidedDiff, OrderDiff,
-    RejectionReason, RowEdit, RowsDiff, Schemas, Side,
+    Budgets, CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff,
+    Coordinate, Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent,
+    HintClaim, HintKind, HintNames, IdentityBasis, IncompleteStage, Issue, IssueKind, KeyBasis,
+    KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
+    OneSidedDiff, OrderDiff, RejectionReason, RowEdit, RowsDiff, Schemas, Side,
 };
 
+use crate::agreement::RowSample;
 use crate::cells::CellChanges;
 use crate::hint::{EditHint, PendingIssue};
 use crate::key::ResolvedKey;
@@ -91,7 +92,7 @@ pub fn diff_tables(
     // refused as a value, and the chain falls back to a guess and then to row
     // position, so the identities the declaration asserted survive it.
     let key = key::resolve_key(old, new, &declared, &hinted);
-    let first = run_pass(old, new, key, hinted.clone(), &edits);
+    let first = run_pass(old, new, key, hinted.clone(), &edits, &options.budgets);
 
     // Reconsider the key at most once: a straight second pass, never a loop.
     // Pass one's diff is evidence about its own key, and when that evidence
@@ -112,7 +113,7 @@ pub fn diff_tables(
             {
                 map.claim(old_index, new_index, basis);
             }
-            run_pass(old, new, second, map, &edits)
+            run_pass(old, new, second, map, &edits, &options.budgets)
         }
         None => first,
     };
@@ -235,6 +236,7 @@ pub fn diff_tables(
                 )
             })
             .collect(),
+        incomplete: pass.incomplete,
         issues,
         summary: EditSummary {
             optimal: pass.summary.optimal,
@@ -271,6 +273,7 @@ struct Pass {
     cells: CellChanges,
     edit_issues: Vec<PendingIssue>,
     summary: SummaryChanges,
+    incomplete: Vec<IncompleteStage>,
 }
 
 /// Run every stage below key resolution over one key.
@@ -279,26 +282,51 @@ struct Pass {
 /// pass's account of column identity, which every stage below both reads and
 /// adds to. What remains of the hints is the edits, which are waiting for an
 /// identity to attach to and are judged afresh in each pass against its cells.
+///
+/// Each pass runs under fresh budget counters, so a bounded first pass cannot
+/// starve reconsideration's second, and the incompleteness the diff reports is
+/// the final pass's own.
 fn run_pass(
     old: &RecordBatch,
     new: &RecordBatch,
     key: ResolvedKey,
     mut map: ColumnMap,
     edits: &[EditHint],
+    budgets: &Budgets,
 ) -> Pass {
     let rows = rows::match_rows(&key);
     schema::reconcile_schema(old, new, &key, &mut map);
 
+    // One sample serves both inference stages: it is a function of the key
+    // and the matching, not of the stage asking.
+    let sample = RowSample::select(&key, &rows, budgets.agreement_rows);
+    let mut incomplete = Vec::new();
+
     // Both resolve column identity, before ordering and cells go on to read it
-    rename::infer(old, new, &mut map, &rows);
-    swap::infer(old, new, &mut map, &rows, edits);
+    if !rename::infer(old, new, &mut map, &rows, &sample, budgets.rename_pairs) {
+        incomplete.push(IncompleteStage::Renames);
+    }
+    if !swap::infer(
+        old,
+        new,
+        &mut map,
+        &rows,
+        edits,
+        &sample,
+        budgets.swap_pairs,
+    ) {
+        incomplete.push(IncompleteStage::Swaps);
+    }
 
     let order = order::detect_order(&map, &rows);
     let cells = cells::compare_cells(old, new, &map, &rows);
     // Edit hints are judged here rather than with the rest: whether the identity
     // they name exists needs inference, and whether it changed needs the cells.
     let (edit_issues, forced) = hint::validate_edits(edits, &map, &cells);
-    let summary = summary::summarize(&cells, &forced);
+    let summary = summary::summarize(&cells, &forced, budgets.summary_cells);
+    if !summary.optimal {
+        incomplete.push(IncompleteStage::Summary);
+    }
     Pass {
         key,
         map,
@@ -307,6 +335,7 @@ fn run_pass(
         cells,
         edit_issues,
         summary,
+        incomplete,
     }
 }
 

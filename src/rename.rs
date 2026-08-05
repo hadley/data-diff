@@ -1,8 +1,11 @@
 //! Identify a dropped and an added column as one renamed column.
 
-use arrow_array::RecordBatch;
+use std::collections::{HashMap, HashSet};
 
-use crate::agreement::Aligned;
+use arrow_array::RecordBatch;
+use arrow_schema::DataType;
+
+use crate::agreement::{Aligned, Meter, RowSample};
 use crate::compare::ComparisonPlan;
 use crate::rows::RowMatches;
 use crate::schema::ColumnMap;
@@ -20,36 +23,90 @@ use crate::{IdentityBasis, Side};
 /// paired: the user has said the column has no partner. Excluding it here is
 /// both what the instruction means and the performance argument the design
 /// makes for these two kinds, candidates being compared pairwise.
-pub(crate) fn infer(old: &RecordBatch, new: &RecordBatch, map: &mut ColumnMap, rows: &RowMatches) {
-    infer_with(old, new, map, rows, &mut Aligned::new(old, new, rows));
+///
+/// `budget` bounds the value-level pair examinations both stages may spend,
+/// and the return value says whether they finished: `false` means the budget
+/// exhausted, some candidates were never examined, and the endpoints they
+/// would have resolved remain drops and additions.
+pub(crate) fn infer(
+    old: &RecordBatch,
+    new: &RecordBatch,
+    map: &mut ColumnMap,
+    rows: &RowMatches,
+    sample: &RowSample,
+    budget: usize,
+) -> bool {
+    infer_with(
+        old,
+        new,
+        map,
+        rows,
+        &mut Aligned::new(old, new, rows, sample),
+        budget,
+    )
 }
 
 /// Exact pairs first, then approximate ones among what is left.
 ///
 /// That order is the design's and is also a real dependency: both stages draw
 /// from the same two candidate lists, so a pair that agrees everywhere would
-/// otherwise be settled by whichever rule reached it first.
+/// otherwise be settled by whichever rule reached it first. One meter spans
+/// both stages, so the budget is a fact about rename inference rather than
+/// about either half of it.
 fn infer_with(
     old: &RecordBatch,
     new: &RecordBatch,
     map: &mut ColumnMap,
     rows: &RowMatches,
     values: &mut Aligned,
-) {
+    budget: usize,
+) -> bool {
     if rows.matched.is_empty() {
-        return;
+        return true;
     }
-    let exact = exact_pairs(old, new, map, values);
+    let mut meter = Meter::new(budget);
+    let (exact, exact_complete) = exact_pairs(old, new, map, values, &mut meter);
     apply(map, exact, IdentityBasis::Exact);
-    let approximate = approximate_pairs(old, new, map, values);
+    let (approximate, approximate_complete) = approximate_pairs(old, new, map, values, &mut meter);
     apply(map, approximate, IdentityBasis::Approximate);
+    exact_complete && approximate_complete
+}
+
+/// The unresolved, unreserved endpoints, in column order.
+///
+/// Reserved endpoints are excluded here rather than filtered at each use, so a
+/// hint that says a column has no partner keeps it out of every candidate
+/// structure, and the ranks the positional pre-pass aligns are ranks among
+/// real candidates.
+fn candidates(map: &ColumnMap) -> (Vec<usize>, Vec<usize>) {
+    let dropped = map
+        .dropped()
+        .into_iter()
+        .filter(|&index| !map.reserved(Side::Old, index))
+        .collect();
+    let added = map
+        .added()
+        .into_iter()
+        .filter(|&index| !map.reserved(Side::New, index))
+        .collect();
+    (dropped, added)
 }
 
 /// Pair candidates that agree in every matched row.
 ///
-/// Candidates are walked in column order on both sides, so where several
-/// columns are exactly equal they pair off in that order rather than needing
-/// an assignment algorithm to choose between equally good answers.
+/// A renamed column usually keeps its position among its peers, so the
+/// rank-aligned diagonal is examined first: a same-rank pair that agrees
+/// exactly and is informative is claimed immediately, and a table where every
+/// column was renamed in place resolves in one examination per column. The
+/// pre-pass also settles what used to be settled by column order alone — an
+/// informative exact tie now prefers the positionally corresponding candidate
+/// before falling back to column order.
+///
+/// The general pass finds its candidates by a digest join rather than by
+/// scanning the dropped × added matrix: added columns are grouped by digest,
+/// one map per comparison plan, and each dropped column looks its own digest
+/// up. Only genuinely digest-equal pairs are examined at value level, which is
+/// what the meter counts.
 ///
 /// Agreeing everywhere is enough on its own, with no requirement that the
 /// values distinguish rows. Two columns holding one repeated value do agree
@@ -62,78 +119,178 @@ fn infer_with(
 ///
 /// The exception is a pairing that could equally have gone elsewhere. When
 /// values cannot distinguish candidates, every constant column matches every
-/// other, so column order is not resolving a tie between indistinguishable
-/// answers but inventing one relationship out of many. Such a pair is accepted
-/// only when it is the only exact match available to both of its ends.
+/// other, so neither rank nor column order is resolving a tie between
+/// indistinguishable answers but inventing one relationship out of many. Such
+/// a pair is accepted only when it is the only exact match available to both
+/// of its ends — a judgement that needs the whole verified matrix, so it is
+/// never made after the meter exhausts.
 fn exact_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
     map: &ColumnMap,
     values: &mut Aligned,
-) -> Vec<(usize, usize)> {
-    let dropped = map.dropped();
-    let added = map.added();
-    // Every exactly agreeing pair, collected before any of them is taken, so
-    // that ambiguity is judged against the whole candidate set. A reserved
-    // endpoint contributes no candidates, keeping the outer list aligned with
-    // the drops while offering it nothing.
-    let matching = dropped
-        .iter()
-        .map(|&old_index| {
-            eligible(map, &added, old_index)
-                .filter(|&(_, new_index)| {
-                    plan_for(old, new, old_index, new_index)
-                        .is_some_and(|plan| values.agree(plan, old_index, new_index))
-                })
-                .map(|(position, _)| position)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    meter: &mut Meter,
+) -> (Vec<(usize, usize)>, bool) {
+    let (dropped, added) = candidates(map);
+    let mut taken_old = vec![false; dropped.len()];
+    let mut taken_new = vec![false; added.len()];
+    let mut accepted = Vec::new();
 
+    // The positional pre-pass: only the same-rank pair, claimed on the spot.
+    for rank in 0..dropped.len().min(added.len()) {
+        let (old_index, new_index) = (dropped[rank], added[rank]);
+        let Some(plan) = plan_for(old, new, old_index, new_index) else {
+            continue;
+        };
+        // A differing digest consumes nothing: the pair cannot agree.
+        if values.digest(plan, Side::Old, old_index) != values.digest(plan, Side::New, new_index) {
+            continue;
+        }
+        let Some(equal) = values.verify(meter, plan, old_index, new_index) else {
+            return (accepted, false);
+        };
+        if !equal {
+            continue;
+        }
+        let Some(agreement) = values.measure_full(meter, plan, old_index, new_index) else {
+            return (accepted, false);
+        };
+        if !agreement.informative() {
+            continue;
+        }
+        taken_old[rank] = true;
+        taken_new[rank] = true;
+        accepted.push((old_index, new_index));
+    }
+
+    // The digest join over what the pre-pass left.
+    let mut join = DigestJoin::new(new, &added);
+    let mut matching = Vec::with_capacity(dropped.len());
+    let mut complete = true;
+    'drops: for (rank, &old_index) in dropped.iter().enumerate() {
+        if taken_old[rank] {
+            matching.push(Vec::new());
+            continue;
+        }
+        let mut verified = Vec::new();
+        for (position, plan) in join.matches(old, values, old_index, &taken_new) {
+            let Some(equal) = values.verify(meter, plan, old_index, added[position]) else {
+                // Every drop from here on is stranded: its candidates were
+                // never examined, so it stays a drop and its adds stay adds.
+                complete = false;
+                break 'drops;
+            };
+            if equal {
+                verified.push(position);
+            }
+        }
+        matching.push(verified);
+    }
+
+    // Ambiguity is judged against the whole verified matrix, which after an
+    // exhaustion no longer exists: the claims below would undercount, so the
+    // unambiguous shortcut is only trusted when verification finished.
     let mut claims = vec![0_usize; added.len()];
     for position in matching.iter().flatten() {
         claims[*position] += 1;
     }
 
-    let mut claimed = vec![false; added.len()];
-    let mut accepted = Vec::new();
-    for (index, candidates) in matching.iter().enumerate() {
-        let old_index = dropped[index];
-        for &position in candidates {
+    let mut claimed = taken_new;
+    for (rank, positions) in matching.iter().enumerate() {
+        let old_index = dropped[rank];
+        for &position in positions {
             if claimed[position] {
                 continue;
             }
             let new_index = added[position];
             let plan =
                 plan_for(old, new, old_index, new_index).expect("a match implies a plan exists");
-            let unambiguous = candidates.len() == 1 && claims[position] == 1;
-            if !unambiguous && !values.measure(plan, old_index, new_index).informative() {
-                continue;
+            let unambiguous = complete && positions.len() == 1 && claims[position] == 1;
+            if !unambiguous {
+                let Some(agreement) = values.measure_full(meter, plan, old_index, new_index) else {
+                    return (accepted, false);
+                };
+                if !agreement.informative() {
+                    continue;
+                }
             }
             claimed[position] = true;
             accepted.push((old_index, new_index));
             break;
         }
     }
-    accepted
+    (accepted, complete)
 }
 
-/// The additions one dropped column may be paired with, by position in `added`.
+/// Added columns grouped by digest, one map per comparison plan.
 ///
-/// Empty for a reserved old column, so a hint that says a column has no partner
-/// keeps it from acquiring one, and neither of the two stages that draw from
-/// these lists needs a rule about hints of its own.
-fn eligible<'a>(
-    map: &'a ColumnMap,
-    added: &'a [usize],
-    old_index: usize,
-) -> impl Iterator<Item = (usize, usize)> + 'a {
-    let reserved = map.reserved(Side::Old, old_index);
-    added
-        .iter()
-        .enumerate()
-        .filter(move |&(_, &new_index)| !reserved && !map.reserved(Side::New, new_index))
-        .map(|(position, &new_index)| (position, new_index))
+/// The join is built lazily: a plan's bucket fills the first time a drop needs
+/// it, one type group at a time, so a plan no drop asks about costs nothing.
+/// Projection construction behind the digests is cached per (column, plan) —
+/// the amortized linear pass the design accepts — and the buckets are only
+/// ever looked up by digest, never iterated, so hash order decides nothing.
+struct DigestJoin {
+    /// Distinct added data types, each with its `(position, column)` pairs in
+    /// add order: the position indexes the added list, the column the table.
+    groups: Vec<(DataType, Vec<(usize, usize)>)>,
+    buckets: HashMap<ComparisonPlan, HashMap<u128, Vec<usize>>>,
+    folded: HashSet<(ComparisonPlan, usize)>,
+}
+
+impl DigestJoin {
+    fn new(new: &RecordBatch, added: &[usize]) -> Self {
+        let mut groups: Vec<(DataType, Vec<(usize, usize)>)> = Vec::new();
+        for (position, &new_index) in added.iter().enumerate() {
+            let data_type = new.column(new_index).data_type();
+            match groups.iter_mut().find(|(held, _)| held == data_type) {
+                Some((_, members)) => members.push((position, new_index)),
+                None => groups.push((data_type.clone(), vec![(position, new_index)])),
+            }
+        }
+        Self {
+            groups,
+            buckets: HashMap::new(),
+            folded: HashSet::new(),
+        }
+    }
+
+    /// The added-list positions whose digest equals the drop's, with the plan
+    /// each was digested under, ascending by position.
+    ///
+    /// Two type groups can share one plan — the plan is a function of the
+    /// normalized kinds, not the source types — so a bucket folds in every
+    /// group that reaches it, each exactly once.
+    fn matches(
+        &mut self,
+        old: &RecordBatch,
+        values: &mut Aligned,
+        old_index: usize,
+        taken: &[bool],
+    ) -> Vec<(usize, ComparisonPlan)> {
+        let old_type = old.column(old_index).data_type();
+        let mut found = Vec::new();
+        for (group, (new_type, members)) in self.groups.iter().enumerate() {
+            let Some(plan) = ComparisonPlan::new(old_type, new_type) else {
+                continue;
+            };
+            if self.folded.insert((plan, group)) {
+                let bucket = self.buckets.entry(plan).or_default();
+                for &(position, new_index) in members {
+                    bucket
+                        .entry(values.digest(plan, Side::New, new_index))
+                        .or_default()
+                        .push(position);
+                }
+            }
+            let digest = values.digest(plan, Side::Old, old_index);
+            if let Some(positions) = self.buckets[&plan].get(&digest) {
+                found.extend(positions.iter().map(|&position| (position, plan)));
+            }
+        }
+        found.sort_unstable_by_key(|&(position, _)| position);
+        found.retain(|&(position, _)| !taken[position]);
+        found
+    }
 }
 
 /// Pair candidates that agree closely enough, and by more than chance.
@@ -144,42 +301,64 @@ fn eligible<'a>(
 /// differ in how well they match, and picking the first would be choosing
 /// against evidence this step has deliberately not weighed. Overlapping
 /// candidates stay drops and additions for the user to resolve.
+///
+/// The work proceeds in endpoint groups, drop by drop in column order: first
+/// the drop's full row of candidates, then, where exactly one qualifies, the
+/// qualifying add's full column for the mutual-uniqueness check. A pair is
+/// accepted only after every candidate incident to both of its endpoints has
+/// been measured, so when the meter exhausts, the drop it stopped in and every
+/// later one are stranded while the groups already completed stay accepted.
 fn approximate_pairs(
     old: &RecordBatch,
     new: &RecordBatch,
     map: &ColumnMap,
     values: &mut Aligned,
-) -> Vec<(usize, usize)> {
-    let dropped = map.dropped();
-    let added = map.added();
-    let qualifying = dropped
-        .iter()
-        .map(|&old_index| {
-            eligible(map, &added, old_index)
-                .filter(|&(_, new_index)| {
-                    plan_for(old, new, old_index, new_index)
-                        .is_some_and(|plan| values.measure(plan, old_index, new_index).is_close())
-                })
-                .map(|(position, _)| position)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    let mut claims = vec![0_usize; added.len()];
-    for position in qualifying.iter().flatten() {
-        claims[*position] += 1;
-    }
-
-    qualifying
-        .iter()
-        .enumerate()
-        .filter_map(|(index, matches)| {
-            let [position] = matches[..] else {
-                return None;
+    meter: &mut Meter,
+) -> (Vec<(usize, usize)>, bool) {
+    let (dropped, added) = candidates(map);
+    let mut accepted = Vec::new();
+    for &old_index in &dropped {
+        // The drop's full row of candidates.
+        let mut qualifying = Vec::new();
+        for (position, &new_index) in added.iter().enumerate() {
+            let Some(plan) = plan_for(old, new, old_index, new_index) else {
+                continue;
             };
-            (claims[position] == 1).then(|| (dropped[index], added[position]))
-        })
-        .collect()
+            let Some(agreement) = values.measure_sampled(meter, plan, old_index, new_index) else {
+                return (accepted, false);
+            };
+            if agreement.is_close() {
+                qualifying.push(position);
+            }
+        }
+        let [position] = qualifying[..] else {
+            continue;
+        };
+        let new_index = added[position];
+        // The qualifying add's full column: mutual uniqueness is evidence
+        // about every candidate incident to the add, so all of them are
+        // measured rather than stopping at the first competitor.
+        let mut unique = true;
+        for &other_index in &dropped {
+            if other_index == old_index {
+                continue;
+            }
+            let Some(plan) = plan_for(old, new, other_index, new_index) else {
+                continue;
+            };
+            let Some(agreement) = values.measure_sampled(meter, plan, other_index, new_index)
+            else {
+                return (accepted, false);
+            };
+            if agreement.is_close() {
+                unique = false;
+            }
+        }
+        if unique {
+            accepted.push((old_index, new_index));
+        }
+    }
+    (accepted, true)
 }
 
 /// Claim the accepted pairs, which is the whole of applying them.
@@ -214,7 +393,7 @@ mod tests {
     use super::{infer, infer_with};
     use crate::DiffOptions;
     use crate::IdentityBasis;
-    use crate::agreement::Aligned;
+    use crate::agreement::{Aligned, RowSample};
     use crate::compare::CanonicalValue;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
@@ -222,15 +401,22 @@ mod tests {
     use crate::schema::testing::reconcile_schema;
 
     fn infer_renames(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
+        let (schema, complete) = infer_with_budget(old, new, usize::MAX);
+        assert!(complete);
+        schema
+    }
+
+    fn infer_with_budget(old: &RecordBatch, new: &RecordBatch, budget: usize) -> (ColumnMap, bool) {
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key);
-        infer(old, new, &mut schema, &rows);
-        schema
+        let sample = RowSample::full();
+        let complete = infer(old, new, &mut schema, &rows, &sample, budget);
+        (schema, complete)
     }
 
     fn renames(schema: &ColumnMap) -> Vec<(usize, usize)> {
@@ -361,7 +547,7 @@ mod tests {
         };
 
         // Every candidate equals every other, which the design resolves by
-        // column order rather than by refusing to choose.
+        // position — here the ranks align, so this is also column order.
         assert_eq!(renames(&infer_renames(&old, &new)), [(1, 1), (2, 2)]);
     }
 
@@ -412,16 +598,25 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key);
-        let mut values = Aligned::with_digest(&old, &new, &rows, |_: &[CanonicalValue]| 0);
-        infer_with(&old, &new, &mut schema, &rows, &mut values);
+        let sample = RowSample::full();
+        let mut values = Aligned::with_digest(&old, &new, &rows, &sample, |_: &[CanonicalValue]| 0);
+        assert!(infer_with(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &mut values,
+            usize::MAX
+        ));
 
-        // Every column now digests alike, so only the elementwise comparison
-        // separates the real rename from the unrelated pair.
+        // Every column now digests alike, so the join offers every pair and
+        // only the elementwise verification separates the real rename from
+        // the unrelated one.
         assert_eq!(renames(&schema), [(2, 2)]);
         assert_eq!(schema.dropped(), [1]);
         assert_eq!(schema.added(), [1]);
@@ -471,9 +666,11 @@ mod tests {
             "y" => [true, true],
         };
 
-        // Every candidate matches every other, so column order would not be
-        // resolving a tie between indistinguishable answers, it would be
-        // inventing two relationships out of four equally good ones.
+        // Every candidate matches every other, so neither rank alignment nor
+        // column order would be resolving a tie between indistinguishable
+        // answers: it would be inventing two relationships out of four equally
+        // good ones. The positional pre-pass claims informative pairs only,
+        // so these fall through to the mutual-uniqueness rule and stay put.
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
@@ -518,6 +715,31 @@ mod tests {
         // values could have told the candidates apart. Here they vary, and
         // agree anyway, so the tie is between equally complete answers.
         assert_eq!(renames(&infer_renames(&old, &new)), [(1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn an_informative_tie_prefers_the_positionally_corresponding_candidate() {
+        let old = table! {
+            "id" => [1, 2],
+            "s" => ["only", "old"],
+            "b" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "x" => [10, 20],
+            "y" => [10, 20],
+            "t" => ["never", "matches"],
+        };
+
+        // "b" ties exactly with "x" and "y". Its rank among the drops is 1,
+        // and rank 1 among the adds is "y", so the diagonal claims (b, y)
+        // where column order alone would have taken "x". The refined
+        // tie-break is positional correspondence first, column order after.
+        let schema = infer_renames(&old, &new);
+
+        assert_eq!(renames(&schema), [(2, 2)]);
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1, 3]);
     }
 
     #[test]
@@ -608,8 +830,8 @@ mod tests {
             "x" => [-1, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
         };
 
-        // Both old columns qualify with the one new column, so the new
-        // endpoint is claimed twice and nothing is accepted.
+        // Both old columns qualify with the one new column, so the mutual
+        // uniqueness check fails from the add's end and nothing is accepted.
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
@@ -629,9 +851,8 @@ mod tests {
             "y" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
         };
 
-        // The mirror of the case above, and a separate path: candidates are
-        // enumerated by walking old columns and scanning new ones, so this
-        // counts the old endpoint's matches rather than the new one's.
+        // The mirror of the case above, and a separate path: the drop's own
+        // row of candidates holds two qualifiers, so no column check runs.
         let schema = infer_renames(&old, &new);
 
         assert!(renames(&schema).is_empty());
@@ -658,5 +879,95 @@ mod tests {
 
         assert_eq!(renames(&schema), [(1, 2)]);
         assert_eq!(schema.added(), [1]);
+    }
+
+    #[test]
+    fn an_exhausted_budget_strands_endpoints_and_keeps_what_finished() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "a" => [-1, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+            "b" => [-1, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "x" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110],
+            "y" => [11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111],
+        };
+
+        // Unbounded, both pairs are approximate renames: (a, x) and (b, y).
+        let (schema, complete) = infer_with_budget(&old, &new, usize::MAX);
+        assert!(complete);
+        assert_eq!(renames(&schema), [(1, 1), (2, 2)]);
+
+        // Two units fund a's row of candidates but not the mutual-uniqueness
+        // column, so the group exhausts mid-way: nothing is accepted and both
+        // endpoints strand as the drop and addition they were.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        assert!(!complete);
+        assert!(renames(&schema).is_empty());
+        assert_eq!(schema.dropped(), [1, 2]);
+        assert_eq!(schema.added(), [1, 2]);
+
+        // Three units complete a's whole endpoint group — its row and the one
+        // fresh column measurement — so (a, x) is accepted before the budget
+        // dies inside b's group, which strands b and y only.
+        let (schema, complete) = infer_with_budget(&old, &new, 3);
+        assert!(!complete);
+        assert_eq!(renames(&schema), [(1, 1)]);
+        assert_eq!(schema.dropped(), [2]);
+        assert_eq!(schema.added(), [2]);
+    }
+
+    #[test]
+    fn an_exhausted_budget_never_accepts_an_uninformative_pair() {
+        let old = table! {
+            "id" => [1, 2],
+            "gone" => [true, true],
+            "lost" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "fresh" => [true, true],
+            "found" => [30, 40],
+        };
+
+        // Unbounded, (gone, fresh) is the only exact match available to both
+        // of its ends, so the constant pair is accepted.
+        let (schema, complete) = infer_with_budget(&old, &new, usize::MAX);
+        assert!(complete);
+        assert_eq!(renames(&schema), [(1, 1)]);
+
+        // One unit funds the diagonal verification of (gone, fresh) and dies
+        // on its informativeness measurement. The join never runs, so the
+        // whole verified matrix does not exist, and the uninformative pair is
+        // not accepted on evidence that was never gathered.
+        let (schema, complete) = infer_with_budget(&old, &new, 1);
+        assert!(!complete);
+        assert!(renames(&schema).is_empty());
+        assert_eq!(schema.dropped(), [1, 2]);
+        assert_eq!(schema.added(), [1, 2]);
+    }
+
+    #[test]
+    fn the_bulk_rename_resolves_within_one_examination_pair_per_column() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "a" => [10, 20, 30],
+            "b" => ["u", "v", "w"],
+            "c" => [1.5, 2.5, 3.5],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "x" => [10, 20, 30],
+            "y" => ["u", "v", "w"],
+            "z" => [1.5, 2.5, 3.5],
+        };
+
+        // Every column renamed in place: the diagonal claims each pair with
+        // one verification and one informativeness measurement, so a budget of
+        // exactly two units per column completes the stage.
+        let (schema, complete) = infer_with_budget(&old, &new, 6);
+        assert!(complete);
+        assert_eq!(renames(&schema), [(1, 1), (2, 2), (3, 3)]);
     }
 }

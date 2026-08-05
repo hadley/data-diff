@@ -1050,3 +1050,36 @@ fn an_iso_date_string_retype_is_a_type_only_edit() {
     col_edit(day, type: Utf8 -> Date32)
     ");
 }
+
+#[test]
+fn a_summary_past_its_cap_reports_itself_incomplete() {
+    let dir = common::TempDir::new();
+    let old_path = dir.path().join("old.parquet");
+    let new_path = dir.path().join("new.parquet");
+    // Two columns rewritten over 5001 rows is 10 002 changed cells, one past
+    // the default `summary_cells` cap, so the exact cover is skipped for the
+    // column-sided fallback. The key is declared, so the wholesale change is
+    // the user's own matching and not a regeneration.
+    let (old, new) = test_support::generate::full_rewrite(5001, 2);
+    common::write_parquet(&old_path, &old);
+    common::write_parquet(&new_path, &new);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .args([old_path.as_os_str(), new_path.as_os_str()])
+        .args(["--key", "id"])
+        .output()
+        .unwrap();
+
+    // The report line leads the problems block; the events below it still
+    // cover every changed cell, and each still counts its own cells — the cap
+    // withholds minimality, never evidence.
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
+    incomplete_summary()
+    ----
+    table_key([id], basis: declared)
+    col_edit(c0, changes: 5001)
+    col_edit(c1, changes: 5001)
+    ");
+}

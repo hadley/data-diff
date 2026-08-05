@@ -269,7 +269,7 @@ mod tests {
     fn reconcile(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(old, new, &options).unwrap();
         reconcile_schema(old, new, &key)
@@ -325,7 +325,7 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["a/b".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
 
@@ -349,7 +349,7 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["customer_id/id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let map = reconcile_schema(&old, &new, &key);

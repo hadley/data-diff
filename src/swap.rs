@@ -3,7 +3,7 @@
 use arrow_array::RecordBatch;
 
 use crate::IdentityBasis;
-use crate::agreement::Aligned;
+use crate::agreement::{Aligned, Meter, RowSample};
 use crate::compare::ComparisonPlan;
 use crate::hint::{EditHint, edit_protects};
 use crate::rows::RowMatches;
@@ -16,26 +16,57 @@ use crate::schema::{ColumnMap, ColumnPair};
 /// swapped. This reads and rewrites the pairs only: it neither consumes nor
 /// produces a drop or an addition, which is what keeps it independent of
 /// rename inference.
+///
+/// `budget` bounds the crossing measurements, and the return value says
+/// whether the enumeration finished. When it did not, the stage accepts
+/// nothing at all: competing-swap cancellation is a judgement over the whole
+/// candidate set, so a survivor whose canceling competitor was never examined
+/// would be an inference without its evidence, and the same-name identities
+/// standing untouched is the valid conservative result.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
     map: &mut ColumnMap,
     rows: &RowMatches,
     edits: &[EditHint],
-) {
+    sample: &RowSample,
+    budget: usize,
+) -> bool {
     if rows.matched.is_empty() {
-        return;
+        return true;
     }
-    let mut values = Aligned::new(old, new, rows);
+    let mut values = Aligned::new(old, new, rows, sample);
     // Copies rather than positions in the map, so that the candidates can be
     // weighed against each other before any of them rewires it.
     let eligible = eligible(map, edits);
 
+    // The rewritten filter is one measurement per eligible identity — linear,
+    // and deliberately unbudgeted the way every other linear pass is. Only
+    // identities rewritten under their own names enter the enumeration, which
+    // is what keeps the budgeted part to the candidates that could matter.
+    let mut filter = Meter::unlimited();
+    let rewritten = eligible
+        .iter()
+        .enumerate()
+        .filter(|(_, pair)| rewritten(old, new, &mut values, &mut filter, pair))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut meter = Meter::new(budget);
     let mut candidates = Vec::new();
-    for (first, pair) in eligible.iter().enumerate() {
-        for (offset, other) in eligible[first + 1..].iter().enumerate() {
-            if exchanged(old, new, &mut values, pair, other) {
-                candidates.push((first, first + 1 + offset));
+    for (at, &first) in rewritten.iter().enumerate() {
+        for &second in &rewritten[at + 1..] {
+            match crossed(
+                old,
+                new,
+                &mut values,
+                &mut meter,
+                &eligible[first],
+                &eligible[second],
+            ) {
+                Some(true) => candidates.push((first, second)),
+                Some(false) => {}
+                None => return false,
             }
         }
     }
@@ -55,6 +86,7 @@ pub(crate) fn infer(
             map.exchange(eligible[first].old, eligible[second].old);
         }
     }
+    true
 }
 
 /// The identities a swap may consume: provisional, same-named, and not a key.
@@ -91,20 +123,22 @@ fn eligible(map: &ColumnMap, edits: &[EditHint]) -> Vec<ColumnPair> {
 
 /// Whether two identities look like each other's exchange.
 ///
-/// Both columns must have been rewritten under their own names, and both
-/// crossings must agree closely enough to stand as renames in their own right.
-fn exchanged(
+/// Both columns have already been read as rewritten under their own names;
+/// this asks whether both crossings agree closely enough to stand as renames
+/// in their own right. `None` means the meter could not fund a crossing, so
+/// the question was never answered.
+fn crossed(
     old: &RecordBatch,
     new: &RecordBatch,
     values: &mut Aligned,
+    meter: &mut Meter,
     first: &ColumnPair,
     second: &ColumnPair,
-) -> bool {
-    if !rewritten(old, new, values, first) || !rewritten(old, new, values, second) {
-        return false;
+) -> Option<bool> {
+    match crosses(old, new, values, meter, first.old, second.new)? {
+        false => Some(false),
+        true => crosses(old, new, values, meter, second.old, first.new),
     }
-    crosses(old, new, values, first.old, second.new)
-        && crosses(old, new, values, second.old, first.new)
 }
 
 /// Whether an identity's own two ends agree in fewer than half their rows.
@@ -119,11 +153,13 @@ fn rewritten(
     old: &RecordBatch,
     new: &RecordBatch,
     values: &mut Aligned,
+    meter: &mut Meter,
     identity: &ColumnPair,
 ) -> bool {
     match plan_for(old, new, identity.old, identity.new) {
         Some(plan) => values
-            .measure(plan, identity.old, identity.new)
+            .measure_sampled(meter, plan, identity.old, identity.new)
+            .expect("the rewritten filter's meter is unlimited")
             .is_distant(),
         None => true,
     }
@@ -140,24 +176,30 @@ fn rewritten(
 /// in their own representation is the cleaner claim. Columns that were both
 /// exchanged *and* retyped fall back to two `col_edit()` events, which is a
 /// truthful description and a less specific one.
+///
+/// The type check consumes nothing; only the measurement is a budget unit.
 fn crosses(
     old: &RecordBatch,
     new: &RecordBatch,
     values: &mut Aligned,
+    meter: &mut Meter,
     old_index: usize,
     new_index: usize,
-) -> bool {
+) -> Option<bool> {
     let old_column = old.column(old_index);
     let new_column = new.column(new_index);
-    old_column.data_type() == new_column.data_type()
-        && values
-            .measure(
-                plan_for(old, new, old_index, new_index)
-                    .expect("an identical admitted type is comparable with itself"),
-                old_index,
-                new_index,
-            )
-            .is_close()
+    if old_column.data_type() != new_column.data_type() {
+        return Some(false);
+    }
+    values
+        .measure_sampled(
+            meter,
+            plan_for(old, new, old_index, new_index)
+                .expect("an identical admitted type is comparable with itself"),
+            old_index,
+            new_index,
+        )
+        .map(|agreement| agreement.is_close())
 }
 
 fn plan_for(
@@ -178,6 +220,7 @@ mod tests {
     use test_support::table;
 
     use super::infer;
+    use crate::agreement::RowSample;
     use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
@@ -186,15 +229,22 @@ mod tests {
     use crate::{DiffOptions, IdentityBasis};
 
     fn infer_swaps(old: &RecordBatch, new: &RecordBatch) -> ColumnMap {
+        let (schema, complete) = infer_with_budget(old, new, usize::MAX);
+        assert!(complete);
+        schema
+    }
+
+    fn infer_with_budget(old: &RecordBatch, new: &RecordBatch, budget: usize) -> (ColumnMap, bool) {
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key);
-        infer(old, new, &mut schema, &rows, &[]);
-        schema
+        let sample = RowSample::full();
+        let complete = infer(old, new, &mut schema, &rows, &[], &sample, budget);
+        (schema, complete)
     }
 
     fn pairs(schema: &ColumnMap) -> Vec<(usize, usize)> {
@@ -380,14 +430,15 @@ mod tests {
 
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key);
-        rename::infer(&old, &new, &mut schema, &rows);
+        let sample = RowSample::full();
+        rename::infer(&old, &new, &mut schema, &rows, &sample, usize::MAX);
         let inferred = schema.clone();
-        infer(&old, &new, &mut schema, &rows, &[]);
+        infer(&old, &new, &mut schema, &rows, &[], &sample, usize::MAX);
 
         // "kept" was rewritten and "gone" became "fresh", and the two stages
         // do not interact: the inferred identity carries different names at
@@ -415,6 +466,7 @@ mod tests {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: vec!["col_rename(a -> a)".into()],
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
@@ -427,7 +479,15 @@ mod tests {
         .unwrap();
         let mut schema = hints.map.clone();
         crate::schema::reconcile_schema(&old, &new, &key, &mut schema);
-        infer(&old, &new, &mut schema, &rows, &hints.edits);
+        infer(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &hints.edits,
+            &RowSample::full(),
+            usize::MAX,
+        );
 
         // The values would read as an exchange, and a hint says otherwise. Every
         // other exclusion here is about a default reconciliation chose; this one
@@ -451,6 +511,7 @@ mod tests {
         let options = DiffOptions {
             key: vec!["id".into()],
             hints: vec!["col_edit(a)".into()],
+            ..DiffOptions::default()
         };
         let key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
@@ -463,7 +524,15 @@ mod tests {
         .unwrap();
         let mut schema = hints.map.clone();
         crate::schema::reconcile_schema(&old, &new, &key, &mut schema);
-        infer(&old, &new, &mut schema, &rows, &hints.edits);
+        infer(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &hints.edits,
+            &RowSample::full(),
+            usize::MAX,
+        );
 
         // An edit claims no endpoint, so the map knows nothing about it and the
         // hinted-pair exclusion cannot see it. Naming one of the two columns is
@@ -487,5 +556,56 @@ mod tests {
         };
 
         assert_eq!(pairs(&infer_swaps(&old, &new)), [(1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn an_exhausted_budget_accepts_no_swap_at_all() {
+        let old = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "a" => [30, 40],
+            "b" => [10, 20],
+        };
+
+        // The exchange needs two crossing measurements; one unit funds only
+        // the first, so the candidate was never fully examined. Nothing is
+        // accepted — not even the half that measured close — and the
+        // same-name identities stand exactly as if no swap had been found.
+        let (schema, complete) = infer_with_budget(&old, &new, 1);
+
+        assert!(!complete);
+        assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
+        assert_eq!(basis(&schema, 1), IdentityBasis::Name);
+
+        // Two units complete the enumeration and the swap goes through.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        assert!(complete);
+        assert_eq!(pairs(&schema), [(1, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn the_rewritten_filter_spends_none_of_the_budget() {
+        let old = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "a" => [10, 20],
+            "b" => [30, 40],
+        };
+
+        // Both columns kept their values, so the filter measures each identity
+        // once, finds nothing rewritten, and the enumeration is empty. A zero
+        // budget still completes: the filter is the unbudgeted linear pass.
+        let (schema, complete) = infer_with_budget(&old, &new, 0);
+
+        assert!(complete);
+        assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
     }
 }

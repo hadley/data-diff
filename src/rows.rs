@@ -60,7 +60,7 @@ mod tests {
     fn rows(old: RecordBatch, new: RecordBatch, key: &[&str]) -> RowMatches {
         let options = DiffOptions {
             key: key.iter().map(|value| (*value).to_owned()).collect(),
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         match_rows(&resolve_key(&old, &new, &options).unwrap())
     }

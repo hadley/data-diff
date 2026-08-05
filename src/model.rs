@@ -12,6 +12,91 @@ pub struct DiffOptions {
     /// Raw spellings rather than parsed hints, so that parsing, and the errors
     /// it can raise, belong to the library rather than to each caller.
     pub hints: Vec<String>,
+    /// Bounds on the stages whose worst case is not linear in the input.
+    pub budgets: Budgets,
+}
+
+/// Counted bounds on the superlinear reconciliation stages.
+///
+/// Every budget is a count of deterministic work units — rows sampled, pairs
+/// examined, changed cells admitted to the exact cover — never elapsed time,
+/// which would make the output depend on the machine. Exhausting one changes
+/// when the answer arrives, not whether it is valid: each bounded stage returns
+/// a conservative partial result and reports itself in [`Diff::incomplete`].
+///
+/// The defaults are benchmark-tuned so that ordinary inputs never bind them;
+/// they are exposed so tests and embedders can tighten or relax the bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budgets {
+    /// The matched rows agreement is measured over.
+    ///
+    /// Above this many matched rows, approximate rename inference and swap
+    /// inference measure a deterministic key-hash sample of exactly this size;
+    /// at or below it, they measure every matched row. Exact rename inference
+    /// always uses every matched row, its basis being a universal claim.
+    /// Completing inference over the sample is not budget exhaustion.
+    pub agreement_rows: usize,
+    /// The candidate pairs rename inference may examine, across both stages.
+    ///
+    /// One unit is one value-level pair examination: a full-row verification
+    /// of a digest-equal exact candidate, a full-row informativeness
+    /// measurement, or a first-time sampled agreement measurement.
+    pub rename_pairs: usize,
+    /// The crossings swap inference may measure.
+    ///
+    /// One unit is one first-time sampled measurement of a crossed column
+    /// pair. On exhaustion the stage accepts no swap at all, the cancellation
+    /// rule being a judgement over the whole candidate set.
+    pub swap_pairs: usize,
+    /// The changed cells up to which the edit summary is exactly minimal.
+    ///
+    /// Above this many residual changed cells, the minimum-cover solve is
+    /// skipped and each connected component is covered by its smaller affected
+    /// side, columns when tied, with [`EditSummary::optimal`] set false.
+    pub summary_cells: usize,
+}
+
+/// The defaults, tuned against `benches/pipeline.rs` (2026-08-04): on every
+/// benchmark grid point of every adversarial scenario, each bounded stage
+/// completes within twice the same-sized identical run — the pipeline's
+/// unavoidable linear pass — and no non-adversarial scenario reports an
+/// incomplete stage. The pair budgets sit at the small end of that rule's
+/// range because a unit touches up to a sample's worth of rows, so at the
+/// grid's smallest tables a budget an order larger buys the adversaries more
+/// time than the whole linear pass it is measured against.
+impl Default for Budgets {
+    fn default() -> Self {
+        Self {
+            agreement_rows: 4096,
+            rename_pairs: 2048,
+            swap_pairs: 2048,
+            summary_cells: 10_000,
+        }
+    }
+}
+
+/// A reconciliation stage its budget cut short.
+///
+/// Each variant's partial result is valid but conservative: unexamined rename
+/// candidates stay drops and additions, an unfinished swap enumeration accepts
+/// nothing, and an uncapped summary covers every cell with possibly more events
+/// than the minimum. The complete cell-level diff is never affected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncompleteStage {
+    Renames,
+    Swaps,
+    Summary,
+}
+
+impl IncompleteStage {
+    /// The operation word the human format writes this stage as.
+    pub fn name(&self) -> &'static str {
+        match self {
+            IncompleteStage::Renames => "incomplete_renames",
+            IncompleteStage::Swaps => "incomplete_swaps",
+            IncompleteStage::Summary => "incomplete_summary",
+        }
+    }
 }
 
 /// An error that prevents a complete diff.
@@ -115,7 +200,7 @@ impl std::fmt::Display for DiffError {
 impl std::error::Error for DiffError {}
 
 /// Which input produced a validation issue.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     Old,
     New,
@@ -586,6 +671,9 @@ pub struct Diff {
     pub order: OrderDiff,
     pub cells: Vec<CellCoordinate>,
     pub summary: EditSummary,
+    /// Stages the budgets cut short, in the fixed order renames, swaps,
+    /// summary, describing the pass the diff kept.
+    pub incomplete: Vec<IncompleteStage>,
     /// Instructions declined and ambiguities left unresolved.
     pub issues: Vec<Issue>,
     /// Set when the diff is not credible as a story of edits: change outweighs
