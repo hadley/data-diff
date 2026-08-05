@@ -99,6 +99,7 @@ Output goes to stdout, one operation per line:
 | `table_add(rows: n)`, `table_drop(rows: n)` | a one-sided diff: the whole file is new or gone |
 | `key_invalid(subject, reason: why)` | a declared key this data could not support |
 | `key_retracted([column], reason: why)` | a guessed key withdrawn after the diff it produced |
+| `incomplete_renames()`, `incomplete_swaps()`, `incomplete_summary()` | a stage its computation budget cut short |
 | `hint_ignored(hint, reason: why)` | an instruction that was declined |
 
 Every edit says how much changed. `changes` counts the cells the event stands for: for a column, the rows it differs in; for a row, the columns it differs in. A row edit and a column edit that cross both count the cell they share, so the numbers describe their own row and their own column rather than adding up to the total. A type-only edit has no cells to count and carries no number.
@@ -113,7 +114,9 @@ A key's `basis` is one of three: `declared` for a `--key` you supplied, `guessed
 
 When more than half of the cells change under a guessed or fallback key, the row story is withheld and `table_regenerate()` stands in for it: row events and value counts would describe a matching the tool no longer believes, so only what follows from schemas and identities is kept --- the key line, renames, column adds, drops, order, and type changes. A declared key is exempt: you vouched for the matching, so the edits are reported in full.
 
-Anything that went wrong comes first --- a rejected key, a retracted guess, a declined hint --- then a `----` line, then what the comparison found. With nothing to report there is no separator and the output opens on the key line.
+The searches behind rename inference, swap inference, and the edit summary run under fixed computation budgets, so very large or adversarial inputs stay fast. A budget that runs out never makes anything up --- it stops a search early and says so with an `incomplete_*()` line. `incomplete_renames()` means some drop/add pairs were never compared, so a `col_drop()` beside a `col_add()` might really be a rename; `incomplete_swaps()` means two heavily edited same-name columns might have been an exchange; `incomplete_summary()` means the row and column edits cover every changed cell but may use more events than the minimum. Everything reported is still real, still exact, and still deterministic.
+
+Anything that went wrong comes first --- a rejected key, a retracted guess, a search cut short, a declined hint --- then a `----` line, then what the comparison found. With nothing to report there is no separator and the output opens on the key line.
 
 A name is quoted only when it has to be: an ordinary one --- letters, digits and underscores, not starting with a digit --- is written bare, so quotes mark a name with something in it worth noticing. Coordinates are one-based, counting positions in the original files. A column is named as the new file names it, except where only the old file has it. When nothing changed, `no_changes()` follows the key line.
 

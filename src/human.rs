@@ -31,6 +31,14 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     if let Some(retraction) = &diff.key.retraction {
         operations.push(key_retraction(retraction));
     }
+    // Stages the budgets cut short come between the key problems and the
+    // declined instructions, keeping the block's story order: what the key
+    // did, what the run could not finish, what instructions were dropped.
+    // Zero arguments, following `table_regenerate()`'s precedent — the
+    // measurement detail stays in the model, as a retraction's does.
+    for stage in &diff.incomplete {
+        operations.push(format!("{}()", stage.name()));
+    }
     for issue in &diff.issues {
         operations.push(issue_context(issue));
     }
@@ -426,7 +434,7 @@ mod tests {
                     .iter()
                     .map(|component| (*component).to_owned())
                     .collect(),
-                hints: Vec::new(),
+                ..DiffOptions::default()
             },
         )
         .unwrap();
@@ -452,6 +460,7 @@ mod tests {
             &DiffOptions {
                 key: vec!["id".to_owned()],
                 hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
+                ..DiffOptions::default()
             },
         )
         .unwrap();

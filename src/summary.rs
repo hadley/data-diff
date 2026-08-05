@@ -37,13 +37,25 @@ pub(crate) struct SummaryRow {
 /// which. Their cells leave the graph with them, so the row edits are minimal
 /// over what is left to cover rather than being computed and then overridden.
 ///
+/// `cap` bounds the residual cells the exact minimum cover is computed over.
+/// At or below it, the König solve runs with no internal metering — the cap
+/// itself bounds its worst case. Above it, the solver is skipped entirely for
+/// a valid cover found in one linear pass, and `optimal` is `false`: past a
+/// few thousand changed cells nobody inspects cell-level minimality, and a
+/// minimum cover never exceeds the number of changed columns anyway, so the
+/// output was never what grew.
+///
 /// Every chosen event then counts the changed cells incident to it, over the
 /// whole cell set rather than over the graph. A row edit and a column edit that
 /// cross both count the cell they share, so the counts do not sum to the number
 /// of changed cells: each is a fact about its own row or column, which keeps it
 /// checkable against the data and independent of which tied minimum cover was
 /// chosen.
-pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> SummaryChanges {
+pub(crate) fn summarize(
+    changes: &CellChanges,
+    forced: &[(usize, usize)],
+    cap: usize,
+) -> SummaryChanges {
     let held_out =
         |column: &&ColumnChanges| column.type_changed || forced.contains(&(column.old, column.new));
 
@@ -79,8 +91,12 @@ pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> Sum
             edges.push((rows.binary_search(row).unwrap(), column));
         }
     }
-    let cover =
-        BipartiteGraph::new(rows.len(), residual_columns.len(), &edges).minimum_vertex_cover();
+    let optimal = edges.len() <= cap;
+    let cover = if optimal {
+        BipartiteGraph::new(rows.len(), residual_columns.len(), &edges).minimum_vertex_cover()
+    } else {
+        fallback_cover(rows.len(), residual_columns.len(), &edges)
+    };
 
     let mut selected_rows = cover
         .left
@@ -116,7 +132,7 @@ pub(crate) fn summarize(changes: &CellChanges, forced: &[(usize, usize)]) -> Sum
         .collect::<Vec<_>>();
 
     let summary = SummaryChanges {
-        optimal: true,
+        optimal,
         columns,
         rows,
     };
@@ -291,6 +307,63 @@ impl BipartiteGraph {
     }
 }
 
+/// A valid cover found without solving, for a graph past the cell cap.
+///
+/// Each connected component contributes its smaller affected side — its
+/// columns when the tie is even, keeping the column-flavored description where
+/// either would do. Every edge has both its endpoints in some component, so
+/// choosing a whole side of each covers every cell; the size is not minimal,
+/// which is exactly what `optimal: false` reports. One linear pass, traversal
+/// in ascending vertex order, so the cover is deterministic.
+fn fallback_cover(left_count: usize, right_count: usize, edges: &[(usize, usize)]) -> VertexCover {
+    let mut left_adjacency = vec![Vec::new(); left_count];
+    let mut right_adjacency = vec![Vec::new(); right_count];
+    for &(left, right) in edges {
+        left_adjacency[left].push(right);
+        right_adjacency[right].push(left);
+    }
+
+    let mut left_seen = vec![false; left_count];
+    let mut right_seen = vec![false; right_count];
+    let mut cover = VertexCover::default();
+    for start in 0..left_count {
+        if left_seen[start] || left_adjacency[start].is_empty() {
+            continue;
+        }
+        // Collect one component. Isolated vertices touch no edge and need no
+        // cover, and every component holds at least one left vertex, an edge
+        // having a left endpoint by construction.
+        let mut lefts = Vec::new();
+        let mut rights = Vec::new();
+        let mut queue = VecDeque::from([start]);
+        left_seen[start] = true;
+        while let Some(left) = queue.pop_front() {
+            lefts.push(left);
+            for &right in &left_adjacency[left] {
+                if right_seen[right] {
+                    continue;
+                }
+                right_seen[right] = true;
+                rights.push(right);
+                for &next in &right_adjacency[right] {
+                    if !left_seen[next] {
+                        left_seen[next] = true;
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+        if lefts.len() < rights.len() {
+            cover.left.extend(lefts);
+        } else {
+            cover.right.extend(rights);
+        }
+    }
+    cover.left.sort_unstable();
+    cover.right.sort_unstable();
+    cover
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VertexCover {
     left: Vec<usize>,
@@ -329,7 +402,7 @@ mod tests {
     use crate::cells::{CellChanges, ColumnChanges};
 
     fn summarize(changes: &CellChanges) -> SummaryChanges {
-        super::summarize(changes, &[])
+        super::summarize(changes, &[], usize::MAX)
     }
 
     fn graph(left: usize, right: usize, edges: &[(usize, usize)]) -> BipartiteGraph {
@@ -526,7 +599,7 @@ mod tests {
         // both rows, so the minimum is now that column and there is no row edit
         // at all. The row summary changed because the graph did, not because
         // anything overrode the answer it produced.
-        let forced = super::summarize(&changes, &[(2, 2), (3, 3)]);
+        let forced = super::summarize(&changes, &[(2, 2), (3, 3)], usize::MAX);
 
         assert_eq!(
             forced.columns,
@@ -575,7 +648,7 @@ mod tests {
             ..CellChanges::default()
         };
 
-        let forced = super::summarize(&changes, &[(1, 1)]);
+        let forced = super::summarize(&changes, &[(1, 1)], usize::MAX);
 
         // Row 0 is reported for the one cell left to cover, and counts two:
         // the cell in the hinted column is still a changed cell in that row. A
@@ -603,6 +676,62 @@ mod tests {
             [summary_column(2, 0, false, 2)]
         );
         assert_eq!(summarize(&row_dominant).rows, [summary_row(0, 2, 2)]);
+    }
+
+    #[test]
+    fn a_diff_at_the_cap_solves_exactly_and_one_above_it_falls_back() {
+        let changes = CellChanges {
+            columns: vec![
+                changed_column(1, 1, false, &[(0, 0), (1, 1)]),
+                changed_column(2, 2, false, &[(0, 0), (1, 1)]),
+            ],
+            ..CellChanges::default()
+        };
+
+        // Four changed cells at a cap of four solve exactly: the tied minimum
+        // picks the two rows, as the solver's own determinism test pins.
+        let exact = super::summarize(&changes, &[], 4);
+        assert!(exact.optimal);
+        assert_eq!(exact.rows, [summary_row(0, 0, 2), summary_row(1, 1, 2)]);
+        assert!(exact.columns.is_empty());
+
+        // One cell over the cap skips the solver. The component's two sides
+        // tie at two vertices, and a tie keeps the column-flavored
+        // description; every cell is still covered, and `optimal` says the
+        // description was not minimized rather than that anything is missing.
+        let capped = super::summarize(&changes, &[], 3);
+        assert!(!capped.optimal);
+        assert!(capped.rows.is_empty());
+        assert_eq!(
+            capped.columns,
+            [
+                summary_column(1, 1, false, 2),
+                summary_column(2, 2, false, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fallback_covers_each_component_by_its_smaller_side() {
+        // Two disconnected shapes: a column changed in three rows, and one row
+        // changed in three columns of its own.
+        let changes = CellChanges {
+            columns: vec![
+                changed_column(1, 1, false, &[(0, 0), (1, 1), (2, 2)]),
+                changed_column(2, 2, false, &[(5, 5)]),
+                changed_column(3, 3, false, &[(5, 5)]),
+                changed_column(4, 4, false, &[(5, 5)]),
+            ],
+            ..CellChanges::default()
+        };
+
+        let capped = super::summarize(&changes, &[], 5);
+
+        // The first component's smaller side is its one column, the second's
+        // its one row, and each event still counts every cell incident to it.
+        assert!(!capped.optimal);
+        assert_eq!(capped.columns, [summary_column(1, 1, false, 3)]);
+        assert_eq!(capped.rows, [summary_row(5, 5, 3)]);
     }
 
     fn changed_column(

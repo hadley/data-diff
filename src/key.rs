@@ -268,7 +268,7 @@ pub(crate) mod testing {
     ) -> Option<KeyRejection> {
         let options = DiffOptions {
             key: key.iter().map(|name| (*name).to_owned()).collect(),
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         resolve_key(old, new, &options).unwrap().rejection
     }
@@ -771,7 +771,7 @@ mod tests {
     fn options(key: &[&str]) -> DiffOptions {
         DiffOptions {
             key: key.iter().map(|value| (*value).to_owned()).collect(),
-            hints: Vec::new(),
+            ..DiffOptions::default()
         }
     }
 

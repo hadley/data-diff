@@ -160,7 +160,7 @@ mod tests {
     fn changes_with(old: &RecordBatch, new: &RecordBatch, key: &[&str]) -> super::CellChanges {
         let options = DiffOptions {
             key: key.iter().map(|name| (*name).to_owned()).collect(),
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(old, new, &options).unwrap();
         let rows = match_rows(&key);

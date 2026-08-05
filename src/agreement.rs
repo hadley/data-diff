@@ -1,13 +1,18 @@
 //! How far two columns agree over the rows their tables have in common.
 //!
 //! Rename and swap inference ask the same question of a candidate pair, so the
-//! measurement lives here rather than in either of them.
+//! measurement lives here rather than in either of them. So do the two devices
+//! that keep the asking bounded: the [`Meter`] that counts first-time pair
+//! examinations against a budget, and the [`RowSample`] that caps how many
+//! matched rows an approximate measurement reads.
 
 use std::collections::HashMap;
 
 use arrow_array::RecordBatch;
 
+use crate::Side;
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash};
+use crate::key::ResolvedKey;
 use crate::rows::RowMatches;
 
 /// The share of aligned rows a pair must agree in to be one column.
@@ -109,6 +114,100 @@ impl Agreement {
     }
 }
 
+/// A counted budget of first-time pair examinations.
+///
+/// Budgets are counts of deterministic work units. A memoized answer costs
+/// nothing; only a first-time examination charges, so a unit is spent exactly
+/// once per distinct question.
+pub(crate) struct Meter {
+    remaining: usize,
+}
+
+impl Meter {
+    pub(crate) fn new(units: usize) -> Self {
+        Self { remaining: units }
+    }
+
+    /// A meter for work the design deliberately leaves unbudgeted, such as
+    /// swap inference's linear rewritten filter.
+    pub(crate) fn unlimited() -> Self {
+        Self::new(usize::MAX)
+    }
+
+    fn charge(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+/// The matched rows approximate measurement reads.
+///
+/// Above the `agreement_rows` budget, the sample is the matched pairs with the
+/// smallest hashes of their canonicalized key values, ties broken by position
+/// in the matching — which is old-row order, so the tie-break is by old
+/// position. Hashing the key rather than the position keeps the selection a
+/// pure function of the input, and means the same logical rows are sampled
+/// across reconsideration's two passes when the key survives. At or below the
+/// budget the sample is every matched row and nothing changes.
+pub(crate) struct RowSample(Option<Vec<usize>>);
+
+impl RowSample {
+    /// Every matched row, for tests that want no cap in play.
+    ///
+    /// Production callers reach the same state through [`Self::select`] when
+    /// the matched rows fit the budget, which is why only tests name this.
+    #[cfg(test)]
+    pub(crate) fn full() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn select(key: &ResolvedKey, rows: &RowMatches, cap: usize) -> Self {
+        Self::with_hash(key, rows, cap, sequence_hash)
+    }
+
+    /// The hash is injectable so a test can force every key to collide, which
+    /// is the only way to reach the tie-break.
+    pub(crate) fn with_hash(
+        key: &ResolvedKey,
+        rows: &RowMatches,
+        cap: usize,
+        hash: fn(&[CanonicalValue]) -> u128,
+    ) -> Self {
+        if rows.matched.len() <= cap {
+            return Self(None);
+        }
+        let mut ranked = rows
+            .matched
+            .iter()
+            .enumerate()
+            .map(|(position, &(old_row, _))| (hash(&key.old[old_row]), position))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable();
+        let mut positions = ranked[..cap]
+            .iter()
+            .map(|&(_, position)| position)
+            .collect::<Vec<_>>();
+        // Measurement walks the sample in matching order, not in hash order,
+        // so the values it reads stay ordered however the hashes fell.
+        positions.sort_unstable();
+        Self(Some(positions))
+    }
+
+    fn is_full(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// Which rows a memoized measurement was taken over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Over {
+    Full,
+    Sampled,
+}
+
 /// Candidate columns projected onto the matched rows, measured on demand.
 ///
 /// Canonicalization depends on the pair rather than on the column — a string
@@ -116,12 +215,19 @@ impl Agreement {
 /// integers against an integer one — so a projection is cached per column
 /// *and* plan. A candidate takes part in few plans in practice, which keeps
 /// this a small multiple of one pass per column rather than one pass per pair.
+///
+/// Every answer about a pair is memoized, and only a first-time computation
+/// charges the caller's [`Meter`]: a unit of budget is one distinct pair
+/// examination, however many times the stage asks the question.
 pub(crate) struct Aligned<'a> {
     old: &'a RecordBatch,
     new: &'a RecordBatch,
     rows: &'a RowMatches,
+    sample: &'a RowSample,
     digest: fn(&[CanonicalValue]) -> u128,
     cache: HashMap<(Side, usize, ComparisonPlan), Projection>,
+    verified: HashMap<(usize, usize, ComparisonPlan), bool>,
+    measured: HashMap<(Over, usize, usize, ComparisonPlan), Agreement>,
 }
 
 /// One column's values over the matched rows, with what can be read off them.
@@ -131,15 +237,14 @@ struct Projection {
     counts: HashMap<CanonicalValue, u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Side {
-    Old,
-    New,
-}
-
 impl<'a> Aligned<'a> {
-    pub(crate) fn new(old: &'a RecordBatch, new: &'a RecordBatch, rows: &'a RowMatches) -> Self {
-        Self::with_digest(old, new, rows, sequence_hash)
+    pub(crate) fn new(
+        old: &'a RecordBatch,
+        new: &'a RecordBatch,
+        rows: &'a RowMatches,
+        sample: &'a RowSample,
+    ) -> Self {
+        Self::with_digest(old, new, rows, sample, sequence_hash)
     }
 
     /// The digest is injectable so a test can force every column to collide,
@@ -148,55 +253,148 @@ impl<'a> Aligned<'a> {
         old: &'a RecordBatch,
         new: &'a RecordBatch,
         rows: &'a RowMatches,
+        sample: &'a RowSample,
         digest: fn(&[CanonicalValue]) -> u128,
     ) -> Self {
         Self {
             old,
             new,
             rows,
+            sample,
             digest,
             cache: HashMap::new(),
+            verified: HashMap::new(),
+            measured: HashMap::new(),
         }
+    }
+
+    /// The digest of one column's full projection under a plan.
+    ///
+    /// Building the projection behind it is the unbudgeted linear pass the
+    /// design accepts for exact inference; digests only decide which pairs are
+    /// worth comparing, so a collision cannot invent a rename.
+    pub(crate) fn digest(&mut self, plan: ComparisonPlan, side: Side, index: usize) -> u128 {
+        self.fill(plan, side, index);
+        self.cache[&(side, index, plan)].digest
     }
 
     /// Whether the two columns hold equal values in every matched row.
     ///
-    /// Digests only decide which pairs are worth comparing; the values
-    /// themselves decide the answer, so a collision cannot invent a rename.
-    pub(crate) fn agree(&mut self, plan: ComparisonPlan, old: usize, new: usize) -> bool {
+    /// Memoized; a first-time comparison charges the meter, and `None` means
+    /// the meter could not fund it, so the comparison never ran.
+    pub(crate) fn verify(
+        &mut self,
+        meter: &mut Meter,
+        plan: ComparisonPlan,
+        old: usize,
+        new: usize,
+    ) -> Option<bool> {
+        if let Some(&equal) = self.verified.get(&(old, new, plan)) {
+            return Some(equal);
+        }
+        if !meter.charge() {
+            return None;
+        }
         self.fill(plan, Side::Old, old);
         self.fill(plan, Side::New, new);
-        let old = &self.cache[&(Side::Old, old, plan)];
-        let new = &self.cache[&(Side::New, new, plan)];
-        old.digest == new.digest && old.values == new.values
+        let old_column = &self.cache[&(Side::Old, old, plan)];
+        let new_column = &self.cache[&(Side::New, new, plan)];
+        let equal =
+            old_column.digest == new_column.digest && old_column.values == new_column.values;
+        self.verified.insert((old, new, plan), equal);
+        Some(equal)
     }
 
-    /// Count what the two columns agree about over the matched rows.
-    pub(crate) fn measure(&mut self, plan: ComparisonPlan, old: usize, new: usize) -> Agreement {
+    /// Count what the two columns agree about over every matched row.
+    ///
+    /// The exact stage's question: informativeness there is about what the
+    /// full columns could distinguish, not what a sample happened to hold.
+    pub(crate) fn measure_full(
+        &mut self,
+        meter: &mut Meter,
+        plan: ComparisonPlan,
+        old: usize,
+        new: usize,
+    ) -> Option<Agreement> {
+        self.measure(meter, Over::Full, plan, old, new)
+    }
+
+    /// Count what the two columns agree about over the sampled rows.
+    ///
+    /// The approximate and swap stages' question. With a full sample this is
+    /// the same measurement as [`Self::measure_full`] and shares its memo, so
+    /// one distinct examination is never charged twice.
+    pub(crate) fn measure_sampled(
+        &mut self,
+        meter: &mut Meter,
+        plan: ComparisonPlan,
+        old: usize,
+        new: usize,
+    ) -> Option<Agreement> {
+        let over = if self.sample.is_full() {
+            Over::Full
+        } else {
+            Over::Sampled
+        };
+        self.measure(meter, over, plan, old, new)
+    }
+
+    fn measure(
+        &mut self,
+        meter: &mut Meter,
+        over: Over,
+        plan: ComparisonPlan,
+        old: usize,
+        new: usize,
+    ) -> Option<Agreement> {
+        if let Some(&agreement) = self.measured.get(&(over, old, new, plan)) {
+            return Some(agreement);
+        }
+        if !meter.charge() {
+            return None;
+        }
         self.fill(plan, Side::Old, old);
         self.fill(plan, Side::New, new);
-        let old = &self.cache[&(Side::Old, old, plan)];
-        let new = &self.cache[&(Side::New, new, plan)];
-        Agreement {
-            rows: old.values.len() as u64,
-            agreeing: old
-                .values
-                .iter()
-                .zip(&new.values)
-                .filter(|(old, new)| old == new)
-                .count() as u64,
-            // Each term is a product of two row counts, so it is widened
-            // before it is formed rather than after.
-            expected: old
-                .counts
-                .iter()
-                .filter_map(|(value, count)| {
-                    new.counts
-                        .get(value)
-                        .map(|shared| u128::from(*count) * u128::from(*shared))
-                })
-                .sum(),
-        }
+        let old_column = &self.cache[&(Side::Old, old, plan)];
+        let new_column = &self.cache[&(Side::New, new, plan)];
+        let agreement = match over {
+            Over::Full => Agreement {
+                rows: old_column.values.len() as u64,
+                agreeing: old_column
+                    .values
+                    .iter()
+                    .zip(&new_column.values)
+                    .filter(|(old, new)| old == new)
+                    .count() as u64,
+                expected: expected(&old_column.counts, &new_column.counts),
+            },
+            Over::Sampled => {
+                let positions = self
+                    .sample
+                    .0
+                    .as_deref()
+                    .expect("a full sample measures as Over::Full");
+                let mut old_counts: HashMap<&CanonicalValue, u64> = HashMap::new();
+                let mut new_counts: HashMap<&CanonicalValue, u64> = HashMap::new();
+                let mut agreeing = 0_u64;
+                for &position in positions {
+                    let old_value = &old_column.values[position];
+                    let new_value = &new_column.values[position];
+                    if old_value == new_value {
+                        agreeing += 1;
+                    }
+                    *old_counts.entry(old_value).or_default() += 1;
+                    *new_counts.entry(new_value).or_default() += 1;
+                }
+                Agreement {
+                    rows: positions.len() as u64,
+                    agreeing,
+                    expected: expected(&old_counts, &new_counts),
+                }
+            }
+        };
+        self.measured.insert((over, old, new, plan), agreement);
+        Some(agreement)
     }
 
     fn fill(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
@@ -232,6 +430,25 @@ impl<'a> Aligned<'a> {
     }
 }
 
+/// $\sum_v c_{old}(v) \, c_{new}(v)$ over the values the two sides share.
+///
+/// Each term is a product of two row counts, so it is widened before it is
+/// formed rather than after. Integer addition is associative, so summing in
+/// hash order stays deterministic.
+fn expected<V: std::hash::Hash + Eq>(
+    old_counts: &HashMap<V, u64>,
+    new_counts: &HashMap<V, u64>,
+) -> u128 {
+    old_counts
+        .iter()
+        .filter_map(|(value, count)| {
+            new_counts
+                .get(value)
+                .map(|shared| u128::from(*count) * u128::from(*shared))
+        })
+        .sum()
+}
+
 fn project(values: &[CanonicalValue], rows: impl Iterator<Item = usize>) -> Vec<CanonicalValue> {
     rows.map(|row| values[row].clone()).collect()
 }
@@ -241,23 +458,30 @@ mod tests {
     use arrow_array::RecordBatch;
     use test_support::table;
 
-    use super::{Agreement, Aligned, MIN_AGREEMENT_PERCENT, MIN_KAPPA_PERCENT};
+    use super::{Agreement, Aligned, MIN_AGREEMENT_PERCENT, MIN_KAPPA_PERCENT, Meter, RowSample};
     use crate::DiffOptions;
-    use crate::compare::ComparisonPlan;
+    use crate::compare::{CanonicalValue, ComparisonPlan};
     use crate::key::testing::resolve_key;
-    use crate::rows::match_rows;
+    use crate::rows::{RowMatches, match_rows};
 
-    /// Measure the second column of each table against the other.
-    fn measure(old: &RecordBatch, new: &RecordBatch) -> Agreement {
+    fn matched(old: &RecordBatch, new: &RecordBatch) -> RowMatches {
         let options = DiffOptions {
             key: vec!["id".into()],
-            hints: Vec::new(),
+            ..DiffOptions::default()
         };
         let key = resolve_key(old, new, &options).unwrap();
-        let rows = match_rows(&key);
+        match_rows(&key)
+    }
+
+    /// Measure the second column of each table against the other, in full.
+    fn measure(old: &RecordBatch, new: &RecordBatch) -> Agreement {
+        let rows = matched(old, new);
+        let sample = RowSample::full();
         let plan =
             ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
-        Aligned::new(old, new, &rows).measure(plan, 1, 1)
+        Aligned::new(old, new, &rows, &sample)
+            .measure_full(&mut Meter::unlimited(), plan, 1, 1)
+            .expect("an unlimited meter funds every measurement")
     }
 
     #[test]
@@ -433,5 +657,184 @@ mod tests {
         // gap between the two predicates is evidence of nothing.
         assert!(!half.is_distant());
         assert!(!half.is_close());
+    }
+
+    #[test]
+    fn a_memoized_measurement_charges_no_further_unit() {
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::new(1);
+
+        let first = values.measure_full(&mut meter, plan, 1, 1);
+        let again = values.measure_full(&mut meter, plan, 1, 1);
+
+        // One unit funded the first measurement; the repeat is the memo, so it
+        // answers even though the meter is spent.
+        assert!(first.is_some());
+        assert_eq!(again, first);
+        // A distinct pair is a distinct examination, which nothing funds now.
+        assert_eq!(values.measure_full(&mut meter, plan, 1, 0), None);
+    }
+
+    #[test]
+    fn a_sampled_measurement_with_a_full_sample_shares_the_full_memo() {
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::new(1);
+
+        let full = values.measure_full(&mut meter, plan, 1, 1);
+        let sampled = values.measure_sampled(&mut meter, plan, 1, 1);
+
+        // The same rows answer both questions, so the second asks nothing new.
+        assert_eq!(sampled, full);
+    }
+
+    #[test]
+    fn a_verification_is_memoized_like_a_measurement() {
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::new(1);
+
+        assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
+        assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
+        assert_eq!(values.verify(&mut meter, plan, 1, 0), None);
+    }
+
+    #[test]
+    fn the_sample_is_every_matched_row_at_or_below_the_cap() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "value" => [10, 20, 30],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "value" => [10, 20, 30],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+
+        assert!(RowSample::select(&key, &rows, 3).is_full());
+        assert!(!RowSample::select(&key, &rows, 2).is_full());
+    }
+
+    #[test]
+    fn the_sample_selects_by_key_hash_and_is_stable() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+
+        let first = RowSample::select(&key, &rows, 2);
+        let again = RowSample::select(&key, &rows, 2);
+
+        assert_eq!(first.0.as_ref().map(Vec::len), Some(2));
+        assert_eq!(first.0, again.0);
+    }
+
+    #[test]
+    fn colliding_key_hashes_fall_back_to_old_position() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [4, 3, 2, 1],
+            "value" => [40, 30, 20, 10],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+
+        // Every key digests alike, so nothing but the tie-break chooses, and
+        // the tie-break is position in the matching — old-row order.
+        let sample = RowSample::with_hash(&key, &rows, 2, |_: &[CanonicalValue]| 0);
+
+        assert_eq!(sample.0, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn a_sampled_measurement_reads_only_the_sample() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 99, 98],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+        // Force the sample onto the two agreeing rows.
+        let sample = RowSample::with_hash(&key, &rows, 2, |_: &[CanonicalValue]| 0);
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::unlimited();
+
+        let sampled = values
+            .measure_sampled(&mut meter, plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+        let full = values
+            .measure_full(&mut meter, plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+
+        assert_eq!(sampled.rows, 2);
+        assert_eq!(sampled.agreeing, 2);
+        assert_eq!(full.rows, 4);
+        assert_eq!(full.agreeing, 2);
     }
 }

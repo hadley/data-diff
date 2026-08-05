@@ -61,6 +61,7 @@ fn run(cli: Cli) -> Result<(), String> {
         &DiffOptions {
             key: cli.key,
             hints,
+            ..DiffOptions::default()
         },
     )
     .map_err(|error| error.to_string())?;
