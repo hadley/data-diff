@@ -27,9 +27,24 @@ The default multiples — 20 for renames, 5 for swaps — were tuned under one f
 
 Two readings to keep straight when a ratio looks bad. First, `full_rewrite`'s overage — and every all-cells-change scenario's — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Second, `renamed_distinct`'s rise past 100k rows is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule requires of a non-adversarial scenario.
 
-## Baseline (2026-08-06, Apple Silicon, after the sampled-counts cache and counting placement)
+## Baseline (2026-08-06, Apple Silicon, after the u32 cell coordinates)
 
-Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. This step's wins, bit-identical to the prior build on every scenario: sampled frequency maps are built once per column instead of once per crossing measurement — the amortization the full counts always had — which took `swapped` 100k×100 from 945 ms to 174 ms and `rename_and_modify` 100k×100 from 2.1 s to 0.52 s; and the changed-cell list is placed by counting rather than sorted, its `(old_row, old_column)` key being unique per cell, which is most of `full_rewrite`'s drop to 0.75 s at the same point.
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. The u32 step's win is memory rather than time — the changed-cell vector, the largest thing a `Diff` retains, halves from 40 to 20 bytes per cell (400 MB to 200 MB at the 10⁷-cell grid cap) behind an input-validated ceiling of `u32::MAX` rows and columns — and every point here is within run noise of the prior table.
+
+| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
+|---|---|---|---|---|---|---|
+| `identical` | 0.32 ms | 2.6 ms | 25 ms | 14 ms | 52 ms | 209 ms |
+| `identical_strings` | 2.13× | 2.53× | 2.64× | 1.38× | 2.09× | 1.15× |
+| `renamed_distinct` | 1.67× | 2.02× | 1.97× | 3.95× | 9.05× | 3.58× |
+| `renamed_strings` | 3.13× | 3.73× | 3.90× | 7.32× | 17.58× | 7.43× |
+| `renamed_constant` | 2.83× | 2.63× | 2.70× | 6.37× | 12.46× | 4.55× |
+| `rename_and_modify` | 4.33× | 7.24× | 8.23× | 2.86× | 10.42× | 2.11× |
+| `swapped` | 3.10× | 4.25× | 4.70× | 1.04× | 3.51× | 0.97× |
+| `full_rewrite` | 4.17× | 4.31× | 4.73× | 5.89× | 14.88× | 4.95× |
+
+## Prior baseline (2026-08-06, Apple Silicon, after the sampled-counts cache and counting placement)
+
+The sampled-counts step's run, kept as the immediate comparison; older baselines live in this file's git history. Its wins over its own prior: sampled frequency maps built once per column instead of once per crossing measurement took `swapped` 100k×100 from 945 ms to 174 ms and `rename_and_modify` from 2.1 s to 0.52 s, and counting placement of the changed-cell list is most of `full_rewrite`'s drop to 0.75 s at the same point.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -41,21 +56,6 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `rename_and_modify` | 4.58× | 7.73× | 7.85× | 2.88× | 10.20× | 2.23× |
 | `swapped` | 3.25× | 4.51× | 4.48× | 1.06× | 3.40× | 0.98× |
 | `full_rewrite` | 4.35× | 4.51× | 4.48× | 6.00× | 14.60× | 5.16× |
-
-## Prior baseline (2026-08-06, Apple Silicon, after native verification and measurement)
-
-The verification-and-measurement step's run, kept as the immediate comparison; older baselines live in this file's git history. Between the older tables and these, two steps' worth of floor collapse make multipliers incomparable without their absolute floors — every absolute point only fell.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 0.31 ms | 2.5 ms | 26 ms | 15 ms | 54 ms | 215 ms |
-| `identical_strings` | 2.28× | 2.70× | 2.52× | 1.29× | 1.87× | 1.07× |
-| `renamed_distinct` | 1.73× | 1.91× | 1.88× | 3.69× | 8.32× | 3.52× |
-| `renamed_strings` | 3.23× | 4.18× | 3.82× | 6.99× | 16.71× | 7.41× |
-| `renamed_constant` | 3.00× | 2.75× | 2.67× | 6.53× | 11.96× | 4.63× |
-| `rename_and_modify` | 5.16× | 9.22× | 9.37× | 3.83× | 37.93× | 2.25× |
-| `swapped` | 3.59× | 6.17× | 6.80× | 1.59× | 17.47× | 1.09× |
-| `full_rewrite` | 5.43× | 6.08× | 6.93× | 8.37× | 33.91× | 5.71× |
 
 ## Profiling a point
 

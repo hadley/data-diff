@@ -147,6 +147,17 @@ pub enum DiffError {
         column: String,
         source_type: String,
     },
+    /// A side with more rows or columns than a cell coordinate can address.
+    ///
+    /// The ceiling is `u32::MAX`, which keeps the complete cell-level diff —
+    /// the largest thing a `Diff` retains — at half the width machine words
+    /// would cost. Arrow batches are `i32`-indexed in practice, so the limit
+    /// is a documented contract rather than a working constraint.
+    TableTooLarge {
+        side: Side,
+        rows: usize,
+        columns: usize,
+    },
     IntegerOutOfRange {
         side: Side,
         column: String,
@@ -194,6 +205,15 @@ impl std::fmt::Display for DiffError {
             } => write!(
                 f,
                 "{side} column {column:?} has unsupported type {source_type}"
+            ),
+            DiffError::TableTooLarge {
+                side,
+                rows,
+                columns,
+            } => write!(
+                f,
+                "{side} has {rows} rows and {columns} columns; at most {} of each are supported",
+                u32::MAX
             ),
             DiffError::IntegerOutOfRange {
                 side,
@@ -284,24 +304,39 @@ impl Coordinate {
 }
 
 /// A one-based old/new cell coordinate, collapsed when both positions agree.
+///
+/// Positions are held as `u32`, halving what the complete cell-level diff —
+/// the largest thing a `Diff` retains — costs per cell. Input validation
+/// enforces the ceiling that makes the narrowing exact: a table with more
+/// than `u32::MAX` rows or columns is rejected as [`DiffError::TableTooLarge`]
+/// before any coordinate is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellCoordinate(CellCoordinateRepr);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CellCoordinateRepr {
-    Same([usize; 2]),
-    Moved([[usize; 2]; 2]),
+    Same([u32; 2]),
+    Moved([[u32; 2]; 2]),
 }
 
 impl CellCoordinate {
+    /// # Panics
+    ///
+    /// If a one-based position exceeds `u32::MAX`, which validated input
+    /// cannot produce: tables that large are rejected at the door.
     pub fn from_zero_based(
         old_row: usize,
         old_column: usize,
         new_row: usize,
         new_column: usize,
     ) -> Self {
-        let old = [old_row + 1, old_column + 1];
-        let new = [new_row + 1, new_column + 1];
+        let position = |value: usize| -> u32 {
+            (value + 1)
+                .try_into()
+                .expect("validated tables have at most u32::MAX rows and columns")
+        };
+        let old = [position(old_row), position(old_column)];
+        let new = [position(new_row), position(new_column)];
         if old == new {
             Self(CellCoordinateRepr::Same(old))
         } else {
@@ -736,6 +771,31 @@ mod tests {
     #[test]
     fn coordinate_collapses_equal_positions() {
         assert_eq!(Coordinate::from_zero_based(1, 1).positions(), (2, 2));
+    }
+
+    /// The narrowed repr is the point: half the width of word-sized
+    /// positions, for the largest vector a `Diff` retains.
+    #[test]
+    fn cell_coordinates_are_half_a_machine_word_wide_per_position() {
+        assert!(std::mem::size_of::<super::CellCoordinate>() <= 20);
+    }
+
+    /// The largest zero-based position validated input can hold converts; one
+    /// past it panics with the documented message rather than wrapping.
+    #[test]
+    fn cell_coordinates_hold_the_largest_validated_position() {
+        let ceiling = u32::MAX as usize - 1;
+        let cell = super::CellCoordinate::from_zero_based(ceiling, 0, ceiling, 0);
+        assert_eq!(
+            cell,
+            super::CellCoordinate::from_zero_based(ceiling, 0, ceiling, 0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "validated tables have at most u32::MAX rows and columns")]
+    fn a_position_past_the_ceiling_panics_rather_than_wrapping() {
+        super::CellCoordinate::from_zero_based(u32::MAX as usize, 0, 0, 0);
     }
 
     #[test]
