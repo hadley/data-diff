@@ -276,6 +276,8 @@ struct Projection {
     full: Option<Vec<CanonicalValue>>,
     /// Values over the sampled rows only, in sample order.
     sampled: Option<Vec<CanonicalValue>>,
+    /// Value frequencies over `sampled`.
+    sampled_counts: Option<FastMap<CanonicalValue, u64>>,
     /// The digest of `full`.
     digest: Option<u128>,
     /// Value frequencies over `full`.
@@ -506,30 +508,27 @@ impl<'a> Aligned<'a> {
                 }
             }
             Over::Sampled => {
-                self.ensure_sampled(plan, Side::Old, old);
-                self.ensure_sampled(plan, Side::New, new);
-                let old_values = self.cache[&(Side::Old, old, plan)]
-                    .sampled
-                    .as_deref()
-                    .expect("ensured above");
-                let new_values = self.cache[&(Side::New, new, plan)]
-                    .sampled
-                    .as_deref()
-                    .expect("ensured above");
-                let mut old_counts: FastMap<&CanonicalValue, u64> = FastMap::default();
-                let mut new_counts: FastMap<&CanonicalValue, u64> = FastMap::default();
-                let mut agreeing = 0_u64;
-                for (old_value, new_value) in old_values.iter().zip(new_values) {
-                    if old_value == new_value {
-                        agreeing += 1;
-                    }
-                    *old_counts.entry(old_value).or_default() += 1;
-                    *new_counts.entry(new_value).or_default() += 1;
-                }
+                // The frequency maps are a fact about each column and the
+                // sample, not about the pair, so they are built once per
+                // column and reused by every measurement that consults it —
+                // the same amortization the full counts have always had.
+                self.ensure_sampled_counts(plan, Side::Old, old);
+                self.ensure_sampled_counts(plan, Side::New, new);
+                let old_column = &self.cache[&(Side::Old, old, plan)];
+                let new_column = &self.cache[&(Side::New, new, plan)];
+                let old_values = old_column.sampled.as_deref().expect("ensured above");
+                let new_values = new_column.sampled.as_deref().expect("ensured above");
                 Agreement {
                     rows: old_values.len() as u64,
-                    agreeing,
-                    expected: expected(&old_counts, &new_counts),
+                    agreeing: old_values
+                        .iter()
+                        .zip(new_values)
+                        .filter(|(old, new)| old == new)
+                        .count() as u64,
+                    expected: expected(
+                        old_column.sampled_counts.as_ref().expect("ensured above"),
+                        new_column.sampled_counts.as_ref().expect("ensured above"),
+                    ),
                 }
             }
         };
@@ -651,6 +650,23 @@ impl<'a> Aligned<'a> {
             .get_mut(&(side, index, plan))
             .expect("ensured above");
         entry.digest = Some((self.digest)(entry.full.as_deref().expect("ensured above")));
+    }
+
+    fn ensure_sampled_counts(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        self.ensure_sampled(plan, side, index);
+        let entry = self
+            .cache
+            .get_mut(&(side, index, plan))
+            .expect("ensured above");
+        if entry.sampled_counts.is_none() {
+            let values = entry.sampled.as_deref().expect("ensured above");
+            let mut counts: FastMap<CanonicalValue, u64> =
+                FastMap::with_capacity_and_hasher(values.len(), Default::default());
+            for value in values {
+                *counts.entry(value.clone()).or_default() += 1;
+            }
+            entry.sampled_counts = Some(counts);
+        }
     }
 
     fn ensure_counts(&mut self, plan: ComparisonPlan, side: Side, index: usize) {

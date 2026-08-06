@@ -64,20 +64,53 @@ pub(crate) struct ColumnChanges {
 }
 
 impl CellChanges {
+    /// Every changed cell ordered by `(old_row, old_column)`, which is unique
+    /// per cell — one column changes one old row at most once, and the new
+    /// coordinates follow from those two — so counting placement reproduces
+    /// the sorted order exactly: per-row totals, prefix sums, then one pass
+    /// over the columns in ascending old index writing each cell at its row's
+    /// cursor. Two linear passes where a sort of every changed cell used to
+    /// run.
     pub(crate) fn changed_cells(&self) -> Vec<ChangedCell> {
-        let mut cells = self
-            .columns
+        let mut columns: Vec<&ColumnChanges> = self.columns.iter().collect();
+        columns.sort_by_key(|column| column.old);
+        let rows = columns
             .iter()
-            .flat_map(|column| {
-                column.rows.iter().map(|&(old_row, new_row)| ChangedCell {
+            .flat_map(|column| column.rows.iter().map(|&(old_row, _)| old_row))
+            .max()
+            .map_or(0, |row| row + 1);
+        let mut cursors = vec![0_usize; rows + 1];
+        for column in &columns {
+            for &(old_row, _) in &column.rows {
+                cursors[old_row + 1] += 1;
+            }
+        }
+        for row in 1..cursors.len() {
+            cursors[row] += cursors[row - 1];
+        }
+        let total = *cursors.last().expect("one entry per row plus the base");
+        let mut cells = vec![
+            ChangedCell {
+                old_row: 0,
+                old_column: 0,
+                new_row: 0,
+                new_column: 0,
+            };
+            total
+        ];
+        // Columns ascend in old index, so each row's range fills in
+        // old-column order, and rows within a column already ascend.
+        for column in &columns {
+            for &(old_row, new_row) in &column.rows {
+                cells[cursors[old_row]] = ChangedCell {
                     old_row,
                     old_column: column.old,
                     new_row,
                     new_column: column.new,
-                })
-            })
-            .collect::<Vec<_>>();
-        cells.sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
+                };
+                cursors[old_row] += 1;
+            }
+        }
         cells
     }
 }
@@ -184,6 +217,52 @@ mod tests {
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
+    }
+
+    /// The counting placement must reproduce the sorted order exactly, over
+    /// columns arriving out of old-index order with sparse, overlapping, and
+    /// disjoint row sets.
+    #[test]
+    fn counting_placement_matches_the_sorted_construction() {
+        let changes = super::CellChanges {
+            columns: vec![
+                ColumnChanges {
+                    old: 3,
+                    new: 1,
+                    type_changed: false,
+                    rows: vec![(0, 5), (2, 3), (7, 0)],
+                },
+                ColumnChanges {
+                    old: 1,
+                    new: 4,
+                    type_changed: true,
+                    rows: vec![(2, 2), (4, 4)],
+                },
+                ColumnChanges {
+                    old: 2,
+                    new: 2,
+                    type_changed: false,
+                    rows: vec![],
+                },
+            ],
+            fanout: vec![],
+        };
+
+        let mut sorted = changes
+            .columns
+            .iter()
+            .flat_map(|column| {
+                column.rows.iter().map(|&(old_row, new_row)| ChangedCell {
+                    old_row,
+                    old_column: column.old,
+                    new_row,
+                    new_column: column.new,
+                })
+            })
+            .collect::<Vec<_>>();
+        sorted.sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
+
+        assert_eq!(changes.changed_cells(), sorted);
     }
 
     /// A dictionary column takes the canonicalizing fallback — `NativeEq`

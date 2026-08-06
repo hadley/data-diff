@@ -27,9 +27,24 @@ The default multiples — 20 for renames, 5 for swaps — were tuned under one f
 
 Two readings to keep straight when a ratio looks bad. First, `full_rewrite`'s overage — and every all-cells-change scenario's — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Second, `renamed_distinct`'s rise past 100k rows is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule requires of a non-adversarial scenario.
 
-## Baseline (2026-08-06, Apple Silicon, after native verification and measurement)
+## Baseline (2026-08-06, Apple Silicon, after the sampled-counts cache and counting placement)
 
-Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. Two steps' worth of floor collapse sit between this table and the prior one — the same-type fast paths halved the large floors and native full-sample measurement halved the 1000-row ones again — so multipliers are not comparable across tables without their absolute floors; every absolute point here is at or below its prior value. The verification-and-measurement step's own wins, bit-identical to the prior build on every scenario: `renamed_strings` 1M×10 fell 4.6 s → 1.7 s and 100k×100 3.0 s → 0.9 s, `renamed_distinct` 1M×10 1.4 s → 0.76 s. A column answers its first two full-row questions natively — a diagonal claim is exactly two — and materializes once when a third pair keeps asking, which is what holds the many-pairs-per-column adversaries (`rename_and_modify`, `renamed_constant`) at their materialized costs instead of re-counting per pair.
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. This step's wins, bit-identical to the prior build on every scenario: sampled frequency maps are built once per column instead of once per crossing measurement — the amortization the full counts always had — which took `swapped` 100k×100 from 945 ms to 174 ms and `rename_and_modify` 100k×100 from 2.1 s to 0.52 s; and the changed-cell list is placed by counting rather than sorted, its `(old_row, old_column)` key being unique per cell, which is most of `full_rewrite`'s drop to 0.75 s at the same point.
+
+| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
+|---|---|---|---|---|---|---|
+| `identical` | 0.30 ms | 2.4 ms | 26 ms | 13 ms | 51 ms | 198 ms |
+| `identical_strings` | 2.23× | 2.68× | 2.55× | 1.41× | 2.06× | 1.09× |
+| `renamed_distinct` | 1.80× | 1.98× | 1.88× | 3.92× | 8.59× | 3.70× |
+| `renamed_strings` | 3.33× | 4.08× | 3.76× | 8.46× | 17.84× | 8.13× |
+| `renamed_constant` | 2.98× | 2.81× | 2.54× | 6.40× | 12.44× | 4.66× |
+| `rename_and_modify` | 4.58× | 7.73× | 7.85× | 2.88× | 10.20× | 2.23× |
+| `swapped` | 3.25× | 4.51× | 4.48× | 1.06× | 3.40× | 0.98× |
+| `full_rewrite` | 4.35× | 4.51× | 4.48× | 6.00× | 14.60× | 5.16× |
+
+## Prior baseline (2026-08-06, Apple Silicon, after native verification and measurement)
+
+The verification-and-measurement step's run, kept as the immediate comparison; older baselines live in this file's git history. Between the older tables and these, two steps' worth of floor collapse make multipliers incomparable without their absolute floors — every absolute point only fell.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -41,21 +56,6 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `rename_and_modify` | 5.16× | 9.22× | 9.37× | 3.83× | 37.93× | 2.25× |
 | `swapped` | 3.59× | 6.17× | 6.80× | 1.59× | 17.47× | 1.09× |
 | `full_rewrite` | 5.43× | 6.08× | 6.93× | 8.37× | 33.91× | 5.71× |
-
-## Prior baseline (2026-08-06, Apple Silicon, after the same-type fast paths)
-
-The fast-path step's run, kept as the immediate comparison; older baselines live in this file's git history.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 0.64 ms | 6.4 ms | 68 ms | 14 ms | 51 ms | 207 ms |
-| `identical_strings` | 3.62× | 3.64× | 3.48× | 1.40× | 1.94× | 1.09× |
-| `renamed_distinct` | 1.37× | 1.37× | 1.34× | 6.57× | 19.32× | 6.78× |
-| `renamed_strings` | 4.14× | 4.15× | 3.94× | 21.43× | 59.40× | 22.10× |
-| `renamed_constant` | 1.41× | 1.31× | 1.29× | 6.70× | 16.22× | 4.65× |
-| `rename_and_modify` | 2.28× | 3.37× | 3.35× | 4.00× | 41.09× | 2.36× |
-| `swapped` | 1.50× | 2.51× | 2.77× | 1.74× | 18.92× | 1.13× |
-| `full_rewrite` | 2.38× | 2.59× | 2.79× | 8.60× | 37.01× | 6.03× |
 
 ## Profiling a point
 

@@ -6,14 +6,7 @@ title: data-diff next steps
 
 Each item below becomes its own detailed plan and dedicated branch from `main`. Implement only that plan, leave the result uncommitted for owner review, and do not start the following item until the owner has reviewed and committed the current work.
 
-The queue is currently empty.
+1. Shrink `CellCoordinate` to `u32` coordinates. After the sampled-counts cache and the counting placement (2026-08-06), the all-cells-changed scenarios' remaining cost really is the changed-cell vector itself: four `usize`s per cell where four `u32`s would halve the memory and bandwidth of the retained cell-level invariant. It is a public model change with a real ceiling — 4 billion rows or columns — so the plan should state the ceiling where the model documents the invariant, decide what an input beyond it does (arrow batches are `i32`-indexed in practice, so a checked conversion with a clear error is likely enough), and ride the same output-identity gate as the performance steps. Settle the ceiling's acceptability with the owner before implementing.
+2. Cross-representation fast paths: extend the native equivalence arguments one bijection at a time — a seconds column against a milliseconds one, decimals of equal value across scales, `Utf8` against `LargeUtf8` — wherever the pair's canonical verdict is still a pure function of the raw values under an inline conversion. Same shape as the same-type steps: each widening argued at the dispatch, everything else falling back, output verified bit-identical. Dictionary hydration belongs here too if a clean logical-value argument exists; otherwise it stays a fallback.
 
-# Performance leads
-
-Starting points for whoever opens the next performance step. The same-type fast-path step (in flight, 2026-08-06) absorbed the leads it could ride with — `KeyIndex::new`'s pre-sizing and double lookup, `minimal_moves`' missing early-out, `RowSample::select`'s full sort, and the canonicalization materialization in cell comparison and digest discovery. What remains is an observation, not a commitment — re-profile first, since relative shares move as the total shrinks.
-
-- On all-cells-changed inputs, materializing `Vec<CellCoordinate>` dominates after inference (~30% of `swapped` 100k×100, 2026-08-05): the vector is never reserved and the coordinate type is two `usize`s where two `u32`s would halve the bandwidth — but shrinking it is a model change, so it wants its own look.
-- Cross-representation fast paths (same family, different unit or scale) extend the same-type arguments one bijection at a time; deferred from the fast-path step so each widening gets its own review.
-- Parallelism remains deliberately unexplored — a different risk class than any of the above; nothing in the current structure forecloses it, and the per-column independence of canonicalization, projection, and cell comparison is the natural seam.
-
-Defer decisions about hint syntax, UI presentation, and threshold changes until the prerequisite behavior exists and can be benchmarked. Preserve the central invariants: deterministic reconciliation, no inferred event without underlying evidence, and a result model that retains the complete cell-level diff.
+Whoever opens either step should re-profile first: four performance steps (2026-08-05 to 2026-08-06) took the identical 1M×10 floor from 3.59 s to 198 ms and the worst grid point from ~6.9 s to ~0.5 s, and the profile reshapes each time the totals shrink.
