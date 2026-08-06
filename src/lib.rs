@@ -27,7 +27,7 @@ pub use model::{
     Coordinate, Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent,
     HintClaim, HintKind, HintNames, IdentityBasis, IncompleteStage, Issue, IssueKind, KeyBasis,
     KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
-    OneSidedDiff, OrderDiff, RejectionReason, RowEdit, RowsDiff, Schemas, Side,
+    OneSidedDiff, OrderDiff, RejectionReason, RowBudget, RowEdit, RowsDiff, Schemas, Side,
 };
 
 use crate::agreement::RowSample;
@@ -303,19 +303,21 @@ fn run_pass(
     let sample = RowSample::select(&key, &rows, budgets.agreement_rows);
     let mut incomplete = Vec::new();
 
+    // The proportional budgets resolve against the table the linear pass
+    // reads — matched rows times the wider side's columns — afresh each pass,
+    // so a bounded first pass cannot starve reconsideration's second.
+    let cells = rows
+        .matched
+        .len()
+        .saturating_mul(old.num_columns().max(new.num_columns()));
+    let rename_rows = budgets.rename_rows.resolve(cells);
+    let swap_rows = budgets.swap_rows.resolve(cells);
+
     // Both resolve column identity, before ordering and cells go on to read it
-    if !rename::infer(old, new, &mut map, &rows, &sample, budgets.rename_pairs) {
+    if !rename::infer(old, new, &mut map, &rows, &sample, rename_rows) {
         incomplete.push(IncompleteStage::Renames);
     }
-    if !swap::infer(
-        old,
-        new,
-        &mut map,
-        &rows,
-        edits,
-        &sample,
-        budgets.swap_pairs,
-    ) {
+    if !swap::infer(old, new, &mut map, &rows, edits, &sample, swap_rows) {
         incomplete.push(IncompleteStage::Swaps);
     }
 

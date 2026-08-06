@@ -36,18 +36,20 @@ pub struct Budgets {
     /// always uses every matched row, its basis being a universal claim.
     /// Completing inference over the sample is not budget exhaustion.
     pub agreement_rows: usize,
-    /// The candidate pairs rename inference may examine, across both stages.
+    /// The rows rename inference may examine, across both of its stages.
     ///
-    /// One unit is one value-level pair examination: a full-row verification
-    /// of a digest-equal exact candidate, a full-row informativeness
-    /// measurement, or a first-time sampled agreement measurement.
-    pub rename_pairs: usize,
-    /// The crossings swap inference may measure.
+    /// An examination is charged what it reads: a full-row verification of a
+    /// digest-equal exact candidate or a full-row informativeness measurement
+    /// costs the matched rows, and a first-time sampled agreement measurement
+    /// costs the sample. Exhaustion strands the endpoints not yet resolved as
+    /// drops and additions and the stage reports itself incomplete.
+    pub rename_rows: RowBudget,
+    /// The rows swap inference may examine measuring crossings.
     ///
-    /// One unit is one first-time sampled measurement of a crossed column
-    /// pair. On exhaustion the stage accepts no swap at all, the cancellation
-    /// rule being a judgement over the whole candidate set.
-    pub swap_pairs: usize,
+    /// Each first-time crossing measurement costs its sample of rows. On
+    /// exhaustion the stage accepts no swap at all, the cancellation rule
+    /// being a judgement over the whole candidate set.
+    pub swap_rows: RowBudget,
     /// The changed cells up to which the edit summary is exactly minimal.
     ///
     /// Above this many residual changed cells, the minimum-cover solve is
@@ -56,20 +58,50 @@ pub struct Budgets {
     pub summary_cells: usize,
 }
 
-/// The defaults, tuned against `benches/pipeline.rs` (2026-08-04): on every
-/// benchmark grid point of every adversarial scenario, each bounded stage
-/// completes within twice the same-sized identical run — the pipeline's
-/// unavoidable linear pass — and no non-adversarial scenario reports an
-/// incomplete stage. The pair budgets sit at the small end of that rule's
-/// range because a unit touches up to a sample's worth of rows, so at the
-/// grid's smallest tables a budget an order larger buys the adversaries more
-/// time than the whole linear pass it is measured against.
+/// A bound on the rows a bounded search may examine.
+///
+/// The proportional form is the default because the pipeline's own yardstick
+/// scales with the input: the design prices bounded work against the linear
+/// pass that reads every cell, so a budget that holds by construction must be
+/// a multiple of the same quantity. A fixed row count remains for tests and
+/// embedders that want an absolute ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowBudget {
+    /// This many row examinations per cell of the compared table, cells being
+    /// the matched rows times the wider side's column count.
+    PerCell(usize),
+    /// Exactly this many row examinations, whatever the input's size.
+    Rows(usize),
+}
+
+impl RowBudget {
+    /// The row allowance this budget grants a table of `cells` cells.
+    pub(crate) fn resolve(self, cells: usize) -> usize {
+        match self {
+            RowBudget::PerCell(multiple) => multiple.saturating_mul(cells),
+            RowBudget::Rows(rows) => rows,
+        }
+    }
+}
+
+/// The defaults, tuned against `benches/pipeline.rs` (2026-08-06). The search
+/// budgets are proportional, so "each bounded stage examines at most this many
+/// rows per cell of the input" holds by construction on every machine; the
+/// grid confirms what construction cannot — that no non-adversarial scenario
+/// reports an incomplete stage, and that the adversaries' wall clock stays
+/// within the multipliers recorded in `benches/README.md`. The multiples were
+/// then raised from their analytic floors until no grid point lost a
+/// completion the previous fixed pair budgets funded: rename inference's 20
+/// covers the ten-column adversaries' ~200 full-row examinations across
+/// eleven columns, and swap inference's 5 covers a fully swapped ten-column
+/// table's crossing enumeration at full rows. Rename's multiple is the larger
+/// because its examinations are mostly full-row where swap's are sampled.
 impl Default for Budgets {
     fn default() -> Self {
         Self {
             agreement_rows: 4096,
-            rename_pairs: 2048,
-            swap_pairs: 2048,
+            rename_rows: RowBudget::PerCell(20),
+            swap_rows: RowBudget::PerCell(5),
             summary_cells: 10_000,
         }
     }
@@ -686,7 +718,20 @@ pub struct Diff {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coordinate, EditSummary, KeyOverlap};
+    use super::{Coordinate, EditSummary, KeyOverlap, RowBudget};
+
+    #[test]
+    fn a_proportional_budget_scales_with_the_cells_and_saturates() {
+        assert_eq!(RowBudget::PerCell(4).resolve(1_000), 4_000);
+        assert_eq!(RowBudget::PerCell(4).resolve(0), 0);
+        assert_eq!(RowBudget::PerCell(2).resolve(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn a_fixed_budget_ignores_the_cells() {
+        assert_eq!(RowBudget::Rows(7).resolve(1_000_000), 7);
+        assert_eq!(RowBudget::Rows(0).resolve(1_000_000), 0);
+    }
 
     #[test]
     fn coordinate_collapses_equal_positions() {
