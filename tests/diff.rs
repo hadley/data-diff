@@ -2,8 +2,8 @@ use data_diff::{
     Budgets, CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, Coordinate,
     Diff, DiffError, DiffOptions, EditSummary, FanoutEvent, HintKind, IdentityBasis,
     IncompleteStage, IssueKind, KeyBasis, KeyComponent, KeyDiff, KeyOverlap, KeyRejection,
-    KeyRetraction, KeySubject, NormalizedType, OneSidedDiff, RejectionReason, RowEdit, Side,
-    diff_added, diff_removed, diff_tables, write_human, write_human_one_sided,
+    KeyRetraction, KeySubject, NormalizedType, OneSidedDiff, RejectionReason, RowBudget, RowEdit,
+    Side, diff_added, diff_removed, diff_tables, write_human, write_human_one_sided,
 };
 use test_support::table;
 
@@ -2567,8 +2567,8 @@ fn tiny_budgets_produce_valid_partial_results_and_report_them() {
     // cell — and the diff names all three, in the fixed order.
     let bounded = DiffOptions {
         budgets: Budgets {
-            rename_pairs: 0,
-            swap_pairs: 0,
+            rename_rows: RowBudget::Rows(0),
+            swap_rows: RowBudget::Rows(0),
             summary_cells: 0,
             ..Budgets::default()
         },
@@ -2633,15 +2633,16 @@ fn reconsiderations_second_pass_runs_under_fresh_counters() {
         "value" => [10, 20, 31],
         "r_new" => ["a", "b", "c"],
     };
-    // Pass one guesses "value", and its rename inference spends four units on
-    // the diagonal: two claiming the key pair, two claiming the other rename.
-    // Reconsideration then adopts the inferred key, and the second pass must
-    // re-derive (r_old, r_new) over the wider matching, spending two more. A
-    // budget of four covers each pass alone and not both together, so this
-    // passes only if every pass runs under its own counters.
+    // Pass one guesses "value", and its rename inference spends four
+    // examinations of the 3 matched rows on the diagonal: two claiming the
+    // key pair, two claiming the other rename. Reconsideration then adopts
+    // the inferred key, and the second pass must re-derive (r_old, r_new)
+    // over the wider matching, spending two more. Twelve rows cover each
+    // pass alone and not both together, so this passes only if every pass
+    // runs under its own counters.
     let options = DiffOptions {
         budgets: Budgets {
-            rename_pairs: 4,
+            rename_rows: RowBudget::Rows(12),
             ..Budgets::default()
         },
         ..DiffOptions::default()
@@ -2661,12 +2662,13 @@ fn reconsiderations_second_pass_runs_under_fresh_counters() {
         ]
     );
 
-    // A first pass allowed three units strands (r_old, r_new) — but the diff
-    // reports the pass it kept, and the second pass re-derives the pair well
-    // within its own fresh budget, so nothing is incomplete in the end.
+    // A first pass allowed three examinations' worth strands (r_old, r_new)
+    // — but the diff reports the pass it kept, and the second pass re-derives
+    // the pair well within its own fresh budget, so nothing is incomplete in
+    // the end.
     let tighter = DiffOptions {
         budgets: Budgets {
-            rename_pairs: 3,
+            rename_rows: RowBudget::Rows(9),
             ..Budgets::default()
         },
         ..DiffOptions::default()
@@ -2681,6 +2683,123 @@ fn reconsiderations_second_pass_runs_under_fresh_counters() {
             identity(1, 1, IdentityBasis::Name),
             identity(2, 2, IdentityBasis::Exact),
         ]
+    );
+}
+
+#[test]
+fn a_proportional_rename_budget_binds_by_the_tables_own_size() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "a" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "b" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "x" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "y" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+    };
+
+    // Both columns renamed in place. The diagonal spends one verification and
+    // one informativeness measurement per pair, 12 rows each; the table is 36
+    // cells, so one row per cell funds the first pair's 24 and dies inside the
+    // second — which strands (b, y) while the finished claim stands.
+    let bound = DiffOptions {
+        budgets: Budgets {
+            rename_rows: RowBudget::PerCell(1),
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+    let diff = diff_tables(&old, &new, &bound).unwrap();
+
+    assert_eq!(diff.incomplete, [IncompleteStage::Renames]);
+    assert!(
+        diff.columns
+            .identities
+            .contains(&identity(1, 1, IdentityBasis::Exact))
+    );
+    assert_eq!(diff.columns.dropped, [3]);
+    assert_eq!(diff.columns.added, [3]);
+
+    // Two rows per cell fund both pairs, and nothing is incomplete.
+    let free = DiffOptions {
+        budgets: Budgets {
+            rename_rows: RowBudget::PerCell(2),
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+    let diff = diff_tables(&old, &new, &free).unwrap();
+
+    assert!(diff.incomplete.is_empty());
+    assert!(
+        diff.columns
+            .identities
+            .contains(&identity(2, 2, IdentityBasis::Exact))
+    );
+}
+
+#[test]
+fn a_proportional_swap_budget_binds_by_the_tables_own_size() {
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "a" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "b" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+        "c" => [11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121],
+        "d" => [-2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13],
+        "e" => [12, 22, 32, 42, 52, 62, 72, 82, 92, 102, 112, 122],
+        "f" => [-3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "a" => [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12],
+        "b" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "c" => [-2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13],
+        "d" => [11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121],
+        "e" => [-3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14],
+        "f" => [12, 22, 32, 42, 52, 62, 72, 82, 92, 102, 112, 122],
+    };
+
+    // Three simultaneous exchanges: six rewritten identities, fifteen
+    // crossings to enumerate, eighteen first-time measurements of 12 rows
+    // each — 216 rows against an 84-cell table. One row per cell exhausts the
+    // enumeration, and exhaustion accepts nothing: every identity keeps its
+    // name basis, exactly as if no swap had been found.
+    let bound = DiffOptions {
+        budgets: Budgets {
+            swap_rows: RowBudget::PerCell(1),
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+    let diff = diff_tables(&old, &new, &bound).unwrap();
+
+    assert_eq!(diff.incomplete, [IncompleteStage::Swaps]);
+    assert!(
+        diff.columns
+            .identities
+            .iter()
+            .all(|pair| pair.basis != IdentityBasis::Swapped)
+    );
+
+    // Three rows per cell fund the whole enumeration and all three swaps land.
+    let free = DiffOptions {
+        budgets: Budgets {
+            swap_rows: RowBudget::PerCell(3),
+            ..Budgets::default()
+        },
+        ..declared("id")
+    };
+    let diff = diff_tables(&old, &new, &free).unwrap();
+
+    assert!(diff.incomplete.is_empty());
+    assert_eq!(
+        diff.columns
+            .identities
+            .iter()
+            .filter(|pair| pair.basis == IdentityBasis::Swapped)
+            .count(),
+        6
     );
 }
 

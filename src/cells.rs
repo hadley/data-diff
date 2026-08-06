@@ -1,8 +1,32 @@
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch};
 
-use crate::compare::ComparisonPlan;
+use crate::compare::{CanonicalValue, ComparisonPlan, NativeEq};
 use crate::rows::RowMatches;
 use crate::schema::ColumnMap;
+
+/// One column pair's equality question, answered natively where the type has
+/// a written equivalence argument and over materialized canonical values
+/// everywhere else.
+enum CellEq<'a> {
+    Native(NativeEq<'a>),
+    Canonical(Vec<CanonicalValue>, Vec<CanonicalValue>),
+}
+
+impl<'a> CellEq<'a> {
+    fn for_pair(old: &'a dyn Array, new: &'a dyn Array, plan: ComparisonPlan) -> Self {
+        match NativeEq::for_pair(old, new) {
+            Some(native) => CellEq::Native(native),
+            None => CellEq::Canonical(plan.canonicalize_old(old), plan.canonicalize_new(new)),
+        }
+    }
+
+    fn equal(&self, old_row: usize, new_row: usize) -> bool {
+        match self {
+            CellEq::Native(native) => native.equal(old_row, new_row),
+            CellEq::Canonical(old, new) => old[old_row] == new[new_row],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CellChanges {
@@ -40,20 +64,53 @@ pub(crate) struct ColumnChanges {
 }
 
 impl CellChanges {
+    /// Every changed cell ordered by `(old_row, old_column)`, which is unique
+    /// per cell — one column changes one old row at most once, and the new
+    /// coordinates follow from those two — so counting placement reproduces
+    /// the sorted order exactly: per-row totals, prefix sums, then one pass
+    /// over the columns in ascending old index writing each cell at its row's
+    /// cursor. Two linear passes where a sort of every changed cell used to
+    /// run.
     pub(crate) fn changed_cells(&self) -> Vec<ChangedCell> {
-        let mut cells = self
-            .columns
+        let mut columns: Vec<&ColumnChanges> = self.columns.iter().collect();
+        columns.sort_by_key(|column| column.old);
+        let rows = columns
             .iter()
-            .flat_map(|column| {
-                column.rows.iter().map(|&(old_row, new_row)| ChangedCell {
+            .flat_map(|column| column.rows.iter().map(|&(old_row, _)| old_row))
+            .max()
+            .map_or(0, |row| row + 1);
+        let mut cursors = vec![0_usize; rows + 1];
+        for column in &columns {
+            for &(old_row, _) in &column.rows {
+                cursors[old_row + 1] += 1;
+            }
+        }
+        for row in 1..cursors.len() {
+            cursors[row] += cursors[row - 1];
+        }
+        let total = *cursors.last().expect("one entry per row plus the base");
+        let mut cells = vec![
+            ChangedCell {
+                old_row: 0,
+                old_column: 0,
+                new_row: 0,
+                new_column: 0,
+            };
+            total
+        ];
+        // Columns ascend in old index, so each row's range fills in
+        // old-column order, and rows within a column already ascend.
+        for column in &columns {
+            for &(old_row, new_row) in &column.rows {
+                cells[cursors[old_row]] = ChangedCell {
                     old_row,
                     old_column: column.old,
                     new_row,
                     new_column: column.new,
-                })
-            })
-            .collect::<Vec<_>>();
-        cells.sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
+                };
+                cursors[old_row] += 1;
+            }
+        }
         cells
     }
 }
@@ -92,18 +149,25 @@ pub(crate) fn compare_cells(
                 new.column(identity.new).data_type(),
             )
         {
-            let old_values = plan.canonicalize_old(old.column(identity.old).as_ref());
-            let new_values = plan.canonicalize_new(new.column(identity.new).as_ref());
+            // A same-type pair with a clean equivalence argument is compared
+            // straight off the arrow arrays; everything else materializes the
+            // canonical values as before. Same verdicts either way — the
+            // native comparator exists only where that is provable.
+            let equality = CellEq::for_pair(
+                old.column(identity.old).as_ref(),
+                new.column(identity.new).as_ref(),
+                plan,
+            );
             for &(old_row, new_row) in &rows.matched {
-                if old_values[old_row] != new_values[new_row] {
+                if !equality.equal(old_row, new_row) {
                     changed_rows.push((old_row, new_row));
                 }
             }
-            // The same canonicalized columns serve the one-to-many comparison,
-            // so a fanout costs no extra pass over the data.
+            // The same comparator serves the one-to-many comparison, so a
+            // fanout costs no extra pass over the data.
             for (group, cells) in rows.fanout.iter().zip(&mut fanout_cells) {
                 for &new_row in &group.new {
-                    if old_values[group.old] != new_values[new_row] {
+                    if !equality.equal(group.old, new_row) {
                         cells.push(ChangedCell {
                             old_row: group.old,
                             old_column: identity.old,
@@ -153,6 +217,71 @@ mod tests {
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
+    }
+
+    /// The counting placement must reproduce the sorted order exactly, over
+    /// columns arriving out of old-index order with sparse, overlapping, and
+    /// disjoint row sets.
+    #[test]
+    fn counting_placement_matches_the_sorted_construction() {
+        let changes = super::CellChanges {
+            columns: vec![
+                ColumnChanges {
+                    old: 3,
+                    new: 1,
+                    type_changed: false,
+                    rows: vec![(0, 5), (2, 3), (7, 0)],
+                },
+                ColumnChanges {
+                    old: 1,
+                    new: 4,
+                    type_changed: true,
+                    rows: vec![(2, 2), (4, 4)],
+                },
+                ColumnChanges {
+                    old: 2,
+                    new: 2,
+                    type_changed: false,
+                    rows: vec![],
+                },
+            ],
+            fanout: vec![],
+        };
+
+        let mut sorted = changes
+            .columns
+            .iter()
+            .flat_map(|column| {
+                column.rows.iter().map(|&(old_row, new_row)| ChangedCell {
+                    old_row,
+                    old_column: column.old,
+                    new_row,
+                    new_column: column.new,
+                })
+            })
+            .collect::<Vec<_>>();
+        sorted.sort_by_key(|cell| (cell.old_row, cell.old_column, cell.new_row, cell.new_column));
+
+        assert_eq!(changes.changed_cells(), sorted);
+    }
+
+    /// A dictionary column takes the canonicalizing fallback — `NativeEq`
+    /// refuses it — and its cells still compare by logical value.
+    #[test]
+    fn dictionary_columns_fall_back_and_still_compare() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "label" => dict["a", "b", "a"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "label" => dict["a", "x", "a"],
+        };
+
+        let changes = changes(&old, &new);
+
+        assert_eq!(changes.columns.len(), 1);
+        assert_eq!(changes.columns[0].rows, [(1, 1)]);
     }
 
     /// Compare cells under a specific key, or under a guessed one when `key` is

@@ -72,6 +72,16 @@ pub(crate) fn validate_table(
     table: &RecordBatch,
     side: Side,
 ) -> Result<Vec<ColumnSchema>, DiffError> {
+    // One-based cell coordinates are held as u32, so every row and column
+    // position must fit one; rejecting the table here is what makes the
+    // narrowing below infallible.
+    if table.num_rows() > u32::MAX as usize || table.num_columns() > u32::MAX as usize {
+        return Err(DiffError::TableTooLarge {
+            side,
+            rows: table.num_rows(),
+            columns: table.num_columns(),
+        });
+    }
     validate_names(table, side)?;
     table
         .schema()
@@ -198,6 +208,36 @@ mod tests {
 
     use super::{concatenate, normalized_type, validate_tables};
     use crate::{DiffError, DuplicateColumnName, NormalizedType, Side};
+
+    /// A side past the `u32` coordinate ceiling is rejected at the door with
+    /// the counts and the side named, which is what makes every narrowing in
+    /// the model infallible. Both counts are checked by one bound; a column
+    /// count that large cannot be constructed, so rows carry the test.
+    #[test]
+    fn a_table_past_the_coordinate_ceiling_is_rejected() {
+        let vast = test_support::rows_without_columns(u32::MAX as usize + 1);
+        let small = test_support::rows_without_columns(1);
+
+        assert_eq!(
+            validate_tables(&vast, &small).unwrap_err(),
+            DiffError::TableTooLarge {
+                side: Side::Old,
+                rows: u32::MAX as usize + 1,
+                columns: 0,
+            }
+        );
+        assert_eq!(
+            validate_tables(&small, &vast).unwrap_err(),
+            DiffError::TableTooLarge {
+                side: Side::New,
+                rows: u32::MAX as usize + 1,
+                columns: 0,
+            }
+        );
+        // At the ceiling exactly, the count still fits a one-based u32.
+        let at_ceiling = test_support::rows_without_columns(u32::MAX as usize);
+        assert!(validate_tables(&at_ceiling, &small).is_ok());
+    }
 
     #[test]
     fn normalizes_every_supported_arrow_representation() {

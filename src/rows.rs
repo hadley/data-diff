@@ -26,8 +26,12 @@ pub(crate) fn match_rows(key: &ResolvedKey) -> RowMatches {
     let index = KeyIndex::new(&key.new);
     let mut result = RowMatches::default();
     let mut used_new = vec![false; key.new.len()];
-    for (old_row, old_key) in key.old.iter().enumerate() {
-        let group = index.rows(old_key).collect::<Vec<_>>();
+    // One scratch buffer for every row's group; only a genuine fanout — the
+    // rare case — allocates a `Vec` of its own.
+    let mut group = Vec::new();
+    for old_row in 0..key.old.len() {
+        group.clear();
+        group.extend(index.rows(key.old.row(old_row), key.old.digest(old_row)));
         for &new_row in &group {
             used_new[new_row] = true;
         }
@@ -36,7 +40,7 @@ pub(crate) fn match_rows(key: &ResolvedKey) -> RowMatches {
             1 => result.matched.push((old_row, group[0])),
             _ => result.fanout.push(FanoutGroup {
                 old: old_row,
-                new: group,
+                new: group.clone(),
             }),
         }
     }

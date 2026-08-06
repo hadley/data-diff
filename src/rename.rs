@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::maps::DigestMap;
+
 use arrow_array::RecordBatch;
 use arrow_schema::DataType;
 
@@ -24,10 +26,11 @@ use crate::{IdentityBasis, Side};
 /// both what the instruction means and the performance argument the design
 /// makes for these two kinds, candidates being compared pairwise.
 ///
-/// `budget` bounds the value-level pair examinations both stages may spend,
-/// and the return value says whether they finished: `false` means the budget
-/// exhausted, some candidates were never examined, and the endpoints they
-/// would have resolved remain drops and additions.
+/// `budget` is the rows both stages may examine at value level — each
+/// examination charging the rows it reads — and the return value says whether
+/// they finished: `false` means the budget exhausted, some candidates were
+/// never examined, and the endpoints they would have resolved remain drops
+/// and additions.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
@@ -233,7 +236,7 @@ struct DigestJoin {
     /// Distinct added data types, each with its `(position, column)` pairs in
     /// add order: the position indexes the added list, the column the table.
     groups: Vec<(DataType, Vec<(usize, usize)>)>,
-    buckets: HashMap<ComparisonPlan, HashMap<u128, Vec<usize>>>,
+    buckets: HashMap<ComparisonPlan, DigestMap<Vec<usize>>>,
     folded: HashSet<(ComparisonPlan, usize)>,
 }
 
@@ -899,19 +902,20 @@ mod tests {
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1), (2, 2)]);
 
-        // Two units fund a's row of candidates but not the mutual-uniqueness
-        // column, so the group exhausts mid-way: nothing is accepted and both
-        // endpoints strand as the drop and addition they were.
-        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        // Each examination reads the 11 matched rows. Two examinations' worth
+        // funds a's row of candidates but not the mutual-uniqueness column, so
+        // the group exhausts mid-way: nothing is accepted and both endpoints
+        // strand as the drop and addition they were.
+        let (schema, complete) = infer_with_budget(&old, &new, 22);
         assert!(!complete);
         assert!(renames(&schema).is_empty());
         assert_eq!(schema.dropped(), [1, 2]);
         assert_eq!(schema.added(), [1, 2]);
 
-        // Three units complete a's whole endpoint group — its row and the one
-        // fresh column measurement — so (a, x) is accepted before the budget
-        // dies inside b's group, which strands b and y only.
-        let (schema, complete) = infer_with_budget(&old, &new, 3);
+        // Three examinations' worth completes a's whole endpoint group — its
+        // row and the one fresh column measurement — so (a, x) is accepted
+        // before the budget dies inside b's group, which strands b and y only.
+        let (schema, complete) = infer_with_budget(&old, &new, 33);
         assert!(!complete);
         assert_eq!(renames(&schema), [(1, 1)]);
         assert_eq!(schema.dropped(), [2]);
@@ -937,11 +941,12 @@ mod tests {
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1)]);
 
-        // One unit funds the diagonal verification of (gone, fresh) and dies
-        // on its informativeness measurement. The join never runs, so the
-        // whole verified matrix does not exist, and the uninformative pair is
-        // not accepted on evidence that was never gathered.
-        let (schema, complete) = infer_with_budget(&old, &new, 1);
+        // Two rows fund the diagonal verification of (gone, fresh) — one
+        // examination of the two matched rows — and die on its informativeness
+        // measurement. The join never runs, so the whole verified matrix does
+        // not exist, and the uninformative pair is not accepted on evidence
+        // that was never gathered.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
         assert!(!complete);
         assert!(renames(&schema).is_empty());
         assert_eq!(schema.dropped(), [1, 2]);
@@ -964,9 +969,10 @@ mod tests {
         };
 
         // Every column renamed in place: the diagonal claims each pair with
-        // one verification and one informativeness measurement, so a budget of
-        // exactly two units per column completes the stage.
-        let (schema, complete) = infer_with_budget(&old, &new, 6);
+        // one verification and one informativeness measurement, each reading
+        // the 3 matched rows, so exactly two examinations' worth of rows per
+        // column completes the stage.
+        let (schema, complete) = infer_with_budget(&old, &new, 18);
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1), (2, 2), (3, 3)]);
     }

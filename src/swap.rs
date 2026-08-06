@@ -17,12 +17,13 @@ use crate::schema::{ColumnMap, ColumnPair};
 /// produces a drop or an addition, which is what keeps it independent of
 /// rename inference.
 ///
-/// `budget` bounds the crossing measurements, and the return value says
-/// whether the enumeration finished. When it did not, the stage accepts
-/// nothing at all: competing-swap cancellation is a judgement over the whole
-/// candidate set, so a survivor whose canceling competitor was never examined
-/// would be an inference without its evidence, and the same-name identities
-/// standing untouched is the valid conservative result.
+/// `budget` is the rows the crossing measurements may examine, each costing
+/// its sample, and the return value says whether the enumeration finished.
+/// When it did not, the stage accepts nothing at all: competing-swap
+/// cancellation is a judgement over the whole candidate set, so a survivor
+/// whose canceling competitor was never examined would be an inference
+/// without its evidence, and the same-name identities standing untouched is
+/// the valid conservative result.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
@@ -571,18 +572,19 @@ mod tests {
             "b" => [10, 20],
         };
 
-        // The exchange needs two crossing measurements; one unit funds only
-        // the first, so the candidate was never fully examined. Nothing is
-        // accepted — not even the half that measured close — and the
-        // same-name identities stand exactly as if no swap had been found.
-        let (schema, complete) = infer_with_budget(&old, &new, 1);
+        // The exchange needs two crossing measurements of two matched rows
+        // each; two rows fund only the first, so the candidate was never
+        // fully examined. Nothing is accepted — not even the half that
+        // measured close — and the same-name identities stand exactly as if
+        // no swap had been found.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
 
         assert!(!complete);
         assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
         assert_eq!(basis(&schema, 1), IdentityBasis::Name);
 
-        // Two units complete the enumeration and the swap goes through.
-        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        // Four rows complete the enumeration and the swap goes through.
+        let (schema, complete) = infer_with_budget(&old, &new, 4);
         assert!(complete);
         assert_eq!(pairs(&schema), [(1, 2), (2, 1)]);
     }

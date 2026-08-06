@@ -8,7 +8,9 @@ use arrow_buffer::i256;
 use arrow_cast::cast;
 use arrow_row::{RowConverter, SortField};
 use arrow_schema::{DataType, TimeUnit};
-use xxhash_rust::xxh3::xxh3_128_with_seed;
+use xxhash_rust::xxh3::{Xxh3 as Xxh3State, xxh3_128_with_seed};
+
+use crate::maps::FastMap;
 
 /// Whether a timestamp type carries a timezone.
 ///
@@ -275,6 +277,393 @@ impl ComparisonPlan {
             .map(|value| canonicalize(value, self.domain))
             .collect()
     }
+}
+
+/// Same-type equality straight off the arrow arrays.
+///
+/// A pair is eligible when the canonical equality verdict is a pure function
+/// of the raw values — canonicalization restricted to the type is injective
+/// up to the normalization the comparator applies inline — and each arm below
+/// states its argument. Every type without one returns `None` and keeps the
+/// canonicalizing path: dictionaries for their hydration and logical-null
+/// subtleties, opaque columns whose canonical form *is* the comparison, and
+/// every cross-type pair. This is an optimization, never a mode — the answer
+/// is the canonical answer, produced without materializing it.
+///
+/// Null equals null and differs from every value, exactly as canonical
+/// `Null` does.
+pub(crate) struct NativeEq<'a>(Box<dyn Fn(usize, usize) -> bool + 'a>);
+
+impl<'a> NativeEq<'a> {
+    pub(crate) fn for_pair(old: &'a dyn Array, new: &'a dyn Array) -> Option<Self> {
+        if old.data_type() != new.data_type() {
+            return None;
+        }
+        Some(match old.data_type() {
+            // A boolean canonicalizes as itself against a boolean.
+            DataType::Boolean => {
+                native::<BooleanArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            // Every integer width maps bijectively into the canonical i64 —
+            // u64 by wrapping cast — so raw equality is canonical equality.
+            DataType::Int8 => native::<Int8Array>(old, new, |a, i, b, j| a.value(i) == b.value(j)),
+            DataType::Int16 => {
+                native::<Int16Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Int32 => {
+                native::<Int32Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Int64 => {
+                native::<Int64Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::UInt8 => {
+                native::<UInt8Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::UInt16 => {
+                native::<UInt16Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::UInt32 => {
+                native::<UInt32Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::UInt64 => {
+                native::<UInt64Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            // Doubles are compared by their normalized bits: raw bits alone
+            // would wrongly split -0.0 from 0.0 and NaN payloads from each
+            // other, so the canonical normalization is applied inline.
+            DataType::Float32 => native::<Float32Array>(old, new, |a, i, b, j| {
+                canonical_double_bits(f64::from(a.value(i)))
+                    == canonical_double_bits(f64::from(b.value(j)))
+            }),
+            DataType::Float64 => native::<Float64Array>(old, new, |a, i, b, j| {
+                canonical_double_bits(a.value(i)) == canonical_double_bits(b.value(j))
+            }),
+            // A string keeps its bytes against a string.
+            DataType::Utf8 => {
+                native::<StringArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::LargeUtf8 => {
+                native::<LargeStringArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            // Equal data types share the unit and awareness, and the exact
+            // scaling into canonical nanoseconds is injective, so raw equality
+            // is canonical equality.
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                native::<TimestampSecondArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                native::<TimestampMillisecondArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                native::<TimestampMicrosecondArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                native::<TimestampNanosecondArray>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Date32 => {
+                native::<Date32Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Date64 => {
+                native::<Date64Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            // At one fixed scale, mantissa equality is value equality.
+            DataType::Decimal128(_, _) => {
+                native::<Decimal128Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            DataType::Decimal256(_, _) => {
+                native::<Decimal256Array>(old, new, |a, i, b, j| a.value(i) == b.value(j))
+            }
+            _ => return None,
+        })
+    }
+
+    /// [`Self::for_pair`] with the plan gate [`NativeHasher`] applies: only
+    /// the type's own identity plan qualifies, a cross-type plan
+    /// canonicalizing into a domain the raw values alone do not determine.
+    pub(crate) fn under_plan(
+        old: &'a dyn Array,
+        new: &'a dyn Array,
+        plan: ComparisonPlan,
+    ) -> Option<Self> {
+        if ComparisonPlan::new(old.data_type(), old.data_type()) != Some(plan) {
+            return None;
+        }
+        Self::for_pair(old, new)
+    }
+
+    pub(crate) fn equal(&self, old_row: usize, new_row: usize) -> bool {
+        (self.0)(old_row, new_row)
+    }
+}
+
+fn native<'a, A: Array + 'static>(
+    old: &'a dyn Array,
+    new: &'a dyn Array,
+    equal: impl Fn(&A, usize, &A, usize) -> bool + 'a,
+) -> NativeEq<'a> {
+    let old = old
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    let new = new
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    NativeEq(Box::new(move |old_row, new_row| {
+        match (old.is_null(old_row), new.is_null(new_row)) {
+            (true, true) => true,
+            (false, false) => equal(old, old_row, new, new_row),
+            _ => false,
+        }
+    }))
+}
+
+/// Per-row canonical digests straight off an arrow column, without
+/// materializing a `CanonicalValue` per value.
+///
+/// Eligible only under the column type's own identity plan — a cross-type
+/// plan canonicalizes into the pair's shared domain, which the raw value
+/// alone does not determine — and only for the types [`NativeEq`] admits, on
+/// the same arguments. The digests are bit-identical to hashing the
+/// materialized values: the fixed-size variants construct the very
+/// `CanonicalValue` on the stack and hash it through the one shared encoding,
+/// and strings hash the same byte frame from borrowed bytes.
+pub(crate) struct NativeHasher<'a>(Box<dyn Fn(usize) -> u128 + 'a>);
+
+impl<'a> NativeHasher<'a> {
+    pub(crate) fn for_column(values: &'a dyn Array, plan: ComparisonPlan) -> Option<Self> {
+        if ComparisonPlan::new(values.data_type(), values.data_type()) != Some(plan) {
+            return None;
+        }
+        Some(match values.data_type() {
+            DataType::Boolean => hashing::<BooleanArray>(values, |a, row| {
+                stable_hash(&CanonicalValue::Boolean(a.value(row)))
+            }),
+            DataType::Int8 => hashing::<Int8Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::Int16 => hashing::<Int16Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::Int32 => hashing::<Int32Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::Int64 => hashing::<Int64Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(a.value(row)))
+            }),
+            DataType::UInt8 => hashing::<UInt8Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::UInt16 => hashing::<UInt16Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::UInt32 => hashing::<UInt32Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(i64::from(a.value(row))))
+            }),
+            DataType::UInt64 => hashing::<UInt64Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Int(a.value(row) as i64))
+            }),
+            DataType::Float32 => hashing::<Float32Array>(values, |a, row| {
+                stable_hash(&canonical_double(f64::from(a.value(row))))
+            }),
+            DataType::Float64 => hashing::<Float64Array>(values, |a, row| {
+                stable_hash(&canonical_double(a.value(row)))
+            }),
+            DataType::Utf8 => hashing::<StringArray>(values, |a, row| {
+                stable_hash_borrowed_string(a.value(row).as_bytes())
+            }),
+            DataType::LargeUtf8 => hashing::<LargeStringArray>(values, |a, row| {
+                stable_hash_borrowed_string(a.value(row).as_bytes())
+            }),
+            // The factors mirror `temporal_values` exactly, and the per-type
+            // digest tests hold the two to the same values.
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                hashing::<TimestampSecondArray>(values, |a, row| {
+                    stable_hash(&CanonicalValue::Nanos(
+                        i128::from(a.value(row)) * 1_000_000_000,
+                    ))
+                })
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                hashing::<TimestampMillisecondArray>(values, |a, row| {
+                    stable_hash(&CanonicalValue::Nanos(i128::from(a.value(row)) * 1_000_000))
+                })
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                hashing::<TimestampMicrosecondArray>(values, |a, row| {
+                    stable_hash(&CanonicalValue::Nanos(i128::from(a.value(row)) * 1_000))
+                })
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                hashing::<TimestampNanosecondArray>(values, |a, row| {
+                    stable_hash(&CanonicalValue::Nanos(i128::from(a.value(row))))
+                })
+            }
+            DataType::Date32 => hashing::<Date32Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Nanos(
+                    i128::from(a.value(row)) * NANOS_PER_DAY,
+                ))
+            }),
+            DataType::Date64 => hashing::<Date64Array>(values, |a, row| {
+                stable_hash(&CanonicalValue::Nanos(i128::from(a.value(row)) * 1_000_000))
+            }),
+            DataType::Decimal128(_, scale) => {
+                let scale = *scale;
+                hashing::<Decimal128Array>(values, move |a, row| {
+                    stable_hash(&CanonicalValue::Rational(
+                        Rational::new(i256::from_i128(a.value(row)), -i32::from(scale))
+                            .expect("a decimal's exponents are bounded by its i8 scale"),
+                    ))
+                })
+            }
+            DataType::Decimal256(_, scale) => {
+                let scale = *scale;
+                hashing::<Decimal256Array>(values, move |a, row| {
+                    stable_hash(&CanonicalValue::Rational(
+                        Rational::new(a.value(row), -i32::from(scale))
+                            .expect("a decimal's exponents are bounded by its i8 scale"),
+                    ))
+                })
+            }
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn hash(&self, row: usize) -> u128 {
+        (self.0)(row)
+    }
+}
+
+fn hashing<'a, A: Array + 'static>(
+    values: &'a dyn Array,
+    hash: impl Fn(&A, usize) -> u128 + 'a,
+) -> NativeHasher<'a> {
+    let array = values
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    NativeHasher(Box::new(move |row| {
+        if array.is_null(row) {
+            stable_hash(&CanonicalValue::Null)
+        } else {
+            hash(array, row)
+        }
+    }))
+}
+
+/// A full-row agreement measured straight off two same-type arrays: the row
+/// pairs compared, the pairs agreeing, and the expected-agreement numerator
+/// $\sum_v c_{old}(v) \, c_{new}(v)$, with no values materialized and no map
+/// keys cloned.
+///
+/// Eligible under the same arguments as [`NativeEq`], plus the plan gate
+/// [`NativeHasher`] applies: the pair's plan must be the type's own identity
+/// plan, because a cross-type plan canonicalizes into a shared domain the raw
+/// values alone do not determine. The frequency counts group exactly as
+/// canonical values do because each eligible type's key — the raw value up to
+/// the comparator's inline normalization — is injective into the canonical
+/// form, so partitioning by key yields the same equality classes, the same
+/// counts, and the same sum. Nulls form one class keyed apart from every
+/// value, exactly as `CanonicalValue::Null` does.
+pub(crate) fn native_agreement(
+    old: &dyn Array,
+    new: &dyn Array,
+    plan: ComparisonPlan,
+    pairs: &[(usize, usize)],
+) -> Option<(u64, u64, u128)> {
+    if old.data_type() != new.data_type()
+        || ComparisonPlan::new(old.data_type(), old.data_type()) != Some(plan)
+    {
+        return None;
+    }
+    Some(match old.data_type() {
+        DataType::Boolean => measure_keys::<BooleanArray, bool>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int8 => measure_keys::<Int8Array, i8>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int16 => measure_keys::<Int16Array, i16>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int32 => measure_keys::<Int32Array, i32>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int64 => measure_keys::<Int64Array, i64>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt8 => measure_keys::<UInt8Array, u8>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt16 => measure_keys::<UInt16Array, u16>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt32 => measure_keys::<UInt32Array, u32>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt64 => measure_keys::<UInt64Array, u64>(old, new, |a, i| a.value(i), pairs),
+        DataType::Float32 => measure_keys::<Float32Array, u64>(
+            old,
+            new,
+            |a, i| canonical_double_bits(f64::from(a.value(i))),
+            pairs,
+        ),
+        DataType::Float64 => measure_keys::<Float64Array, u64>(
+            old,
+            new,
+            |a, i| canonical_double_bits(a.value(i)),
+            pairs,
+        ),
+        DataType::Utf8 => measure_keys::<StringArray, &str>(old, new, |a, i| a.value(i), pairs),
+        DataType::LargeUtf8 => {
+            measure_keys::<LargeStringArray, &str>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            measure_keys::<TimestampSecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            measure_keys::<TimestampMillisecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            measure_keys::<TimestampMicrosecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            measure_keys::<TimestampNanosecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Date32 => measure_keys::<Date32Array, i32>(old, new, |a, i| a.value(i), pairs),
+        DataType::Date64 => measure_keys::<Date64Array, i64>(old, new, |a, i| a.value(i), pairs),
+        DataType::Decimal128(_, _) => {
+            measure_keys::<Decimal128Array, i128>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Decimal256(_, _) => {
+            measure_keys::<Decimal256Array, i256>(old, new, |a, i| a.value(i), pairs)
+        }
+        _ => return None,
+    })
+}
+
+/// One pass over the row pairs, counting agreement and both sides' value
+/// frequencies at once; the sum stays deterministic because every term is an
+/// unsigned integer and integer addition is associative.
+fn measure_keys<'a, A: Array + 'static, K: Eq + std::hash::Hash>(
+    old: &'a dyn Array,
+    new: &'a dyn Array,
+    key: impl Fn(&'a A, usize) -> K,
+    pairs: &[(usize, usize)],
+) -> (u64, u64, u128) {
+    let old = old
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    let new = new
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    let mut old_counts: FastMap<Option<K>, u64> = FastMap::default();
+    let mut new_counts: FastMap<Option<K>, u64> = FastMap::default();
+    let mut agreeing = 0_u64;
+    for &(old_row, new_row) in pairs {
+        let old_key = (!old.is_null(old_row)).then(|| key(old, old_row));
+        let new_key = (!new.is_null(new_row)).then(|| key(new, new_row));
+        if old_key == new_key {
+            agreeing += 1;
+        }
+        *old_counts.entry(old_key).or_default() += 1;
+        *new_counts.entry(new_key).or_default() += 1;
+    }
+    let expected = old_counts
+        .iter()
+        .filter_map(|(key, count)| {
+            new_counts
+                .get(key)
+                .map(|shared| u128::from(*count) * u128::from(*shared))
+        })
+        .sum();
+    (pairs.len() as u64, agreeing, expected)
 }
 
 /// Encode a column outside the matrix as canonical row-format bytes.
@@ -555,14 +944,20 @@ fn parse_bytes(bytes: &[u8], parse: impl FnOnce(&str) -> Option<CanonicalValue>)
 }
 
 fn canonical_double(value: f64) -> CanonicalValue {
-    let bits = if value.is_nan() {
+    CanonicalValue::Double(canonical_double_bits(value))
+}
+
+/// The normalized bit pattern doubles are compared by: every NaN collapses to
+/// one payload and both zeros to one, so bit equality is value equality under
+/// the canonical rules that NaN agrees with NaN and `-0.0` with `0.0`.
+fn canonical_double_bits(value: f64) -> u64 {
+    if value.is_nan() {
         f64::NAN.to_bits()
     } else if value == 0.0 {
         0
     } else {
         value.to_bits()
-    };
-    CanonicalValue::Double(bits)
+    }
 }
 
 fn exact_double_to_i64(value: f64) -> Option<i64> {
@@ -882,20 +1277,86 @@ fn parse_exponent(bytes: &[u8]) -> Option<i64> {
     }
 }
 
+/// The buffered reference the streaming production path is tested against;
+/// injectable so a collision can be forced, which only tests do.
+#[cfg(test)]
 pub(crate) trait StableHasher {
     fn hash(&self, bytes: &[u8]) -> u128;
 }
 
+#[cfg(test)]
 pub(crate) struct Xxh3;
 
+#[cfg(test)]
 impl StableHasher for Xxh3 {
     fn hash(&self, bytes: &[u8]) -> u128 {
         xxh3_128_with_seed(bytes, 0)
     }
 }
 
+/// Where encoded bytes go. One `encode_value` serves every consumer — the
+/// production hash streams, the injectable [`StableHasher`] path buffers — so
+/// no two spellings of the encoding can drift apart.
+trait Sink {
+    fn write(&mut self, bytes: &[u8]);
+}
+
+impl Sink for Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+impl Sink for Xxh3State {
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
+/// Encodings at most this long are hashed in one shot from the stack; only
+/// longer ones pay for streaming state. Every fixed-size variant fits — the
+/// largest is `Rational` at 41 bytes — so the split is really short strings
+/// against long ones.
+const INLINE: usize = 256;
+
+/// A stack buffer for the one-shot path. Callers check [`encoded_len`] first;
+/// the slice indexing turns a miscounted write into a panic rather than a
+/// truncated hash.
+struct Inline {
+    buf: [u8; INLINE],
+    len: usize,
+}
+
+impl Inline {
+    fn new() -> Self {
+        Self {
+            buf: [0; INLINE],
+            len: 0,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl Sink for Inline {
+    fn write(&mut self, bytes: &[u8]) {
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+}
+
 pub(crate) fn stable_hash(value: &CanonicalValue) -> u128 {
-    hash_with(value, &Xxh3)
+    if encoded_len(value) <= INLINE {
+        let mut inline = Inline::new();
+        encode_value(value, &mut inline);
+        xxh3_128_with_seed(inline.bytes(), 0)
+    } else {
+        let mut state = Xxh3State::with_seed(0);
+        encode_value(value, &mut state);
+        state.digest128()
+    }
 }
 
 /// Hash an ordered sequence of values.
@@ -905,53 +1366,106 @@ pub(crate) fn stable_hash(value: &CanonicalValue) -> u128 {
 /// hashing them the same way keeps row identity and column identity on one
 /// definition of equality.
 pub(crate) fn sequence_hash(values: &[CanonicalValue]) -> u128 {
-    let mut bytes = Vec::with_capacity(8 + values.len() * 24);
-    bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
-    for value in values {
-        let hash = stable_hash(value).to_le_bytes();
-        bytes.extend_from_slice(&(hash.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&hash);
-    }
-    xxh3_128_with_seed(&bytes, 0)
+    sequence_hash_of(values.len(), values.iter().map(stable_hash))
 }
 
-fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
-    let mut bytes = Vec::new();
+/// The sequence digest from already-computed per-value hashes.
+///
+/// One frame writer serves this and [`sequence_hash`], which delegates here,
+/// so a sequence of values and the stream of their hashes cannot digest
+/// differently.
+pub(crate) fn sequence_hash_of(count: usize, hashes: impl Iterator<Item = u128>) -> u128 {
+    // The frame is 8 bytes of length plus 24 per value.
+    if count <= (INLINE - 8) / 24 {
+        let mut inline = Inline::new();
+        encode_sequence(count, hashes, &mut inline);
+        xxh3_128_with_seed(inline.bytes(), 0)
+    } else {
+        let mut state = Xxh3State::with_seed(0);
+        encode_sequence(count, hashes, &mut state);
+        state.digest128()
+    }
+}
+
+fn encode_sequence(count: usize, hashes: impl Iterator<Item = u128>, sink: &mut impl Sink) {
+    sink.write(&(count as u64).to_le_bytes());
+    for hash in hashes {
+        let hash = hash.to_le_bytes();
+        sink.write(&(hash.len() as u64).to_le_bytes());
+        sink.write(&hash);
+    }
+}
+
+/// The digest of a string value's canonical frame, from borrowed bytes.
+///
+/// Identical to hashing `CanonicalValue::String(bytes.to_vec())` without the
+/// clone — the frame is written by the same `encode_bytes` — which is what
+/// lets the native digest path hash string columns without materializing
+/// their values.
+fn stable_hash_borrowed_string(bytes: &[u8]) -> u128 {
+    if 9 + bytes.len() <= INLINE {
+        let mut inline = Inline::new();
+        encode_bytes(4, bytes, &mut inline);
+        xxh3_128_with_seed(inline.bytes(), 0)
+    } else {
+        let mut state = Xxh3State::with_seed(0);
+        encode_bytes(4, bytes, &mut state);
+        state.digest128()
+    }
+}
+
+fn encoded_len(value: &CanonicalValue) -> usize {
     match value {
-        CanonicalValue::Null => bytes.push(0),
-        CanonicalValue::Boolean(value) => {
-            bytes.push(1);
-            bytes.push(u8::from(*value));
-        }
+        CanonicalValue::Null => 1,
+        CanonicalValue::Boolean(_) => 2,
+        CanonicalValue::Int(_) | CanonicalValue::Double(_) => 9,
+        CanonicalValue::Nanos(_) => 17,
+        CanonicalValue::Rational(_) => 41,
+        CanonicalValue::String(value)
+        | CanonicalValue::UnparsedString(value)
+        | CanonicalValue::Opaque(value) => 9 + value.len(),
+    }
+}
+
+fn encode_value(value: &CanonicalValue, sink: &mut impl Sink) {
+    match value {
+        CanonicalValue::Null => sink.write(&[0]),
+        CanonicalValue::Boolean(value) => sink.write(&[1, u8::from(*value)]),
         CanonicalValue::Int(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[2]);
+            sink.write(&value.to_le_bytes());
         }
         CanonicalValue::Double(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[3]);
+            sink.write(&value.to_le_bytes());
         }
-        CanonicalValue::String(value) => encode_bytes(4, value, &mut bytes),
-        CanonicalValue::UnparsedString(value) => encode_bytes(5, value, &mut bytes),
-        CanonicalValue::Opaque(value) => encode_bytes(6, value, &mut bytes),
+        CanonicalValue::String(value) => encode_bytes(4, value, sink),
+        CanonicalValue::UnparsedString(value) => encode_bytes(5, value, sink),
+        CanonicalValue::Opaque(value) => encode_bytes(6, value, sink),
         CanonicalValue::Nanos(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[7]);
+            sink.write(&value.to_le_bytes());
         }
         CanonicalValue::Rational(value) => {
-            bytes.push(8);
-            bytes.extend_from_slice(&value.mantissa);
-            bytes.extend_from_slice(&value.exp2.to_le_bytes());
-            bytes.extend_from_slice(&value.exp5.to_le_bytes());
+            sink.write(&[8]);
+            sink.write(&value.mantissa);
+            sink.write(&value.exp2.to_le_bytes());
+            sink.write(&value.exp5.to_le_bytes());
         }
     }
-    hasher.hash(&bytes)
 }
 
-fn encode_bytes(tag: u8, value: &[u8], output: &mut Vec<u8>) {
-    output.push(tag);
-    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    output.extend_from_slice(value);
+fn encode_bytes(tag: u8, value: &[u8], sink: &mut impl Sink) {
+    sink.write(&[tag]);
+    sink.write(&(value.len() as u64).to_le_bytes());
+    sink.write(value);
+}
+
+#[cfg(test)]
+fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
+    let mut bytes = Vec::new();
+    encode_value(value, &mut bytes);
+    hasher.hash(&bytes)
 }
 
 #[cfg(test)]
@@ -965,13 +1479,16 @@ pub(crate) fn equal_after_hash(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use arrow_array::types::Int8Type;
-    use arrow_array::{ArrayRef, DictionaryArray, Int8Array, StringArray};
+    use arrow_array::{Array, ArrayRef, BooleanArray, DictionaryArray, Int8Array, StringArray};
     use test_support::column;
 
     use super::{
-        CanonicalValue, ComparisonPlan, StableHasher, equal_after_hash, parse_exact_i64,
-        stable_hash,
+        CanonicalValue, ComparisonPlan, INLINE, NativeEq, NativeHasher, StableHasher, Xxh3,
+        encode_sequence, equal_after_hash, hash_with, native_agreement, parse_exact_i64,
+        rational_of_double, sequence_hash, sequence_hash_of, stable_hash,
     };
 
     fn values(array: ArrayRef, other: ArrayRef) -> (Vec<CanonicalValue>, Vec<CanonicalValue>) {
@@ -1624,6 +2141,387 @@ mod tests {
         let (old, new) = values(column!(["1.0"]), column!([1]));
         assert_eq!(old, new);
         assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+    }
+
+    /// The digests row sampling selects by, pinned as literals (captured
+    /// 2026-08-05). These are load-bearing values, not an implementation
+    /// detail: the bottom-k key digests choose which rows sampled inference
+    /// measures, so a changed digest silently changes output on large tables.
+    /// A failure here means the encoding or the hash moved, and the sampled
+    /// baselines moved with it.
+    #[test]
+    fn stable_hash_digests_are_pinned() {
+        let cases: [(CanonicalValue, u128); 10] = [
+            (CanonicalValue::Null, 0xa6cd5e9392000f6ac44bdff4074eecdb),
+            (
+                CanonicalValue::Boolean(true),
+                0x50e58cbd6ada00a1070d80d6a76865f3,
+            ),
+            (CanonicalValue::Int(42), 0x932241402dd83e6bf37f9a8d5d376ff9),
+            (
+                CanonicalValue::Double(1.5f64.to_bits()),
+                0x2d0719929098c2ee4848f1440928d509,
+            ),
+            (
+                CanonicalValue::String(b"hello".to_vec()),
+                0x09883e13ee49e90df19b452684f6edfb,
+            ),
+            (
+                CanonicalValue::UnparsedString(b"1.5x".to_vec()),
+                0x7636d752bb08d959706440445ccac165,
+            ),
+            (
+                CanonicalValue::Nanos(1_000_000_000),
+                0xd63c4f3c54038e1149f0d2ea94e0c878,
+            ),
+            (
+                CanonicalValue::Opaque(vec![1, 2, 3]),
+                0x3ec6974d8d3d978aed59221690025f10,
+            ),
+            (
+                CanonicalValue::String(vec![b'x'; 1024]),
+                0x7f6465c271757c6e2af2181384d2c8a2,
+            ),
+            (
+                CanonicalValue::Rational(rational_of_double(0.1).expect("0.1 is finite")),
+                0x58510aaaf0e60291cfe04dd9ad61e405,
+            ),
+        ];
+        for (value, digest) in &cases {
+            assert_eq!(stable_hash(value), *digest, "digest moved for {value:?}");
+        }
+    }
+
+    /// Sequence digests pinned the same way (captured 2026-08-05): key tuples
+    /// and column digests both come from `sequence_hash`.
+    #[test]
+    fn sequence_hash_digests_are_pinned() {
+        assert_eq!(sequence_hash(&[]), 0x2c0a8a99dc147d5445c3b49d035665b2);
+        assert_eq!(
+            sequence_hash(&[
+                CanonicalValue::Int(1),
+                CanonicalValue::String(b"a".to_vec()),
+            ]),
+            0x9d030fe3a00f96cab4d0c049492c1de1
+        );
+        let column: Vec<CanonicalValue> = (0..1000).map(CanonicalValue::Int).collect();
+        assert_eq!(sequence_hash(&column), 0x6defbb4dd2223299d3628af6c544ba61);
+    }
+
+    /// For every eligible type, the native comparator and hasher must produce
+    /// exactly the canonicalizing path's verdicts and digests — over every
+    /// ordered pair of the fixture's values, nulls and adversaries included.
+    fn assert_native_matches_canonical(old: ArrayRef, new: ArrayRef) {
+        let plan = ComparisonPlan::new(old.data_type(), new.data_type())
+            .expect("eligible types have identity plans");
+        let native = NativeEq::for_pair(old.as_ref(), new.as_ref()).expect("eligible type");
+        let hasher = NativeHasher::for_column(old.as_ref(), plan).expect("eligible type");
+        let canonical_old = plan.canonicalize_old(old.as_ref());
+        let canonical_new = plan.canonicalize_new(new.as_ref());
+        for (i, old_value) in canonical_old.iter().enumerate() {
+            assert_eq!(
+                hasher.hash(i),
+                stable_hash(old_value),
+                "digest diverged at row {i} of {:?}",
+                old.data_type()
+            );
+            for (j, new_value) in canonical_new.iter().enumerate() {
+                assert_eq!(
+                    native.equal(i, j),
+                    old_value == new_value,
+                    "verdict diverged at ({i}, {j}) of {:?}",
+                    old.data_type()
+                );
+            }
+        }
+        assert_eq!(
+            sequence_hash_of(
+                canonical_old.len(),
+                (0..canonical_old.len()).map(|row| hasher.hash(row)),
+            ),
+            sequence_hash(&canonical_old),
+            "column digest diverged for {:?}",
+            old.data_type()
+        );
+        // The native agreement must reproduce the materialized one — rows,
+        // agreeing, and the expected numerator, all three — over both a
+        // straight and a reversed pairing.
+        let rows = canonical_old.len().min(canonical_new.len());
+        let straight: Vec<(usize, usize)> = (0..rows).map(|row| (row, row)).collect();
+        let reversed: Vec<(usize, usize)> = (0..rows).map(|row| (row, rows - 1 - row)).collect();
+        for pairs in [straight, reversed] {
+            let mut old_counts = std::collections::HashMap::new();
+            let mut new_counts = std::collections::HashMap::new();
+            let mut agreeing = 0_u64;
+            for &(old_row, new_row) in &pairs {
+                if canonical_old[old_row] == canonical_new[new_row] {
+                    agreeing += 1;
+                }
+                *old_counts.entry(&canonical_old[old_row]).or_insert(0_u64) += 1;
+                *new_counts.entry(&canonical_new[new_row]).or_insert(0_u64) += 1;
+            }
+            let expected: u128 = old_counts
+                .iter()
+                .filter_map(|(value, count)| {
+                    new_counts
+                        .get(value)
+                        .map(|shared| u128::from(*count) * u128::from(*shared))
+                })
+                .sum();
+            assert_eq!(
+                native_agreement(old.as_ref(), new.as_ref(), plan, &pairs),
+                Some((pairs.len() as u64, agreeing, expected)),
+                "agreement diverged for {:?}",
+                old.data_type()
+            );
+        }
+    }
+
+    #[test]
+    fn native_integers_and_booleans_match_the_canonical_path() {
+        use arrow_array::{
+            Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        };
+        let pairs: [(ArrayRef, ArrayRef); 9] = [
+            (
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+                Arc::new(BooleanArray::from(vec![Some(false), Some(true), None])),
+            ),
+            (
+                Arc::new(Int8Array::from(vec![Some(i8::MIN), Some(i8::MAX), None])),
+                Arc::new(Int8Array::from(vec![Some(0), Some(i8::MAX), None])),
+            ),
+            (
+                Arc::new(Int16Array::from(vec![Some(i16::MIN), Some(i16::MAX), None])),
+                Arc::new(Int16Array::from(vec![Some(0), Some(i16::MAX), None])),
+            ),
+            (
+                Arc::new(Int32Array::from(vec![Some(i32::MIN), Some(i32::MAX), None])),
+                Arc::new(Int32Array::from(vec![Some(0), Some(i32::MAX), None])),
+            ),
+            (
+                Arc::new(Int64Array::from(vec![
+                    Some(i64::MIN),
+                    Some(i64::MAX),
+                    Some(-1),
+                    None,
+                ])),
+                Arc::new(Int64Array::from(vec![Some(0), Some(i64::MAX), None, None])),
+            ),
+            (
+                Arc::new(UInt8Array::from(vec![Some(0), Some(u8::MAX), None])),
+                Arc::new(UInt8Array::from(vec![Some(1), Some(u8::MAX), None])),
+            ),
+            (
+                Arc::new(UInt16Array::from(vec![Some(0), Some(u16::MAX), None])),
+                Arc::new(UInt16Array::from(vec![Some(1), Some(u16::MAX), None])),
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![Some(0), Some(u32::MAX), None])),
+                Arc::new(UInt32Array::from(vec![Some(1), Some(u32::MAX), None])),
+            ),
+            // u64::MAX wraps to -1 as canonical i64, which only ever meets
+            // values wrapped the same way: the pair is same-type by the gate.
+            (
+                Arc::new(UInt64Array::from(vec![Some(0), Some(u64::MAX), None])),
+                Arc::new(UInt64Array::from(vec![Some(1), Some(u64::MAX), None])),
+            ),
+        ];
+        for (old, new) in pairs {
+            assert_native_matches_canonical(old, new);
+        }
+    }
+
+    #[test]
+    fn native_doubles_normalize_zeros_and_nan_payloads() {
+        use arrow_array::{Float32Array, Float64Array};
+        let quiet_nan_with_payload = f64::from_bits(0x7ff8_0000_0000_0001);
+        assert_native_matches_canonical(
+            Arc::new(Float64Array::from(vec![
+                Some(0.0),
+                Some(-0.0),
+                Some(f64::NAN),
+                Some(quiet_nan_with_payload),
+                Some(1.5),
+                Some(f64::INFINITY),
+                None,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                Some(-0.0),
+                Some(0.0),
+                Some(quiet_nan_with_payload),
+                Some(f64::NAN),
+                Some(-1.5),
+                Some(f64::NEG_INFINITY),
+                None,
+            ])),
+        );
+        assert_native_matches_canonical(
+            Arc::new(Float32Array::from(vec![
+                Some(0.0),
+                Some(-0.0),
+                Some(f32::NAN),
+                Some(2.5),
+                None,
+            ])),
+            Arc::new(Float32Array::from(vec![
+                Some(-0.0),
+                Some(f32::NAN),
+                Some(2.5),
+                Some(-2.5),
+                None,
+            ])),
+        );
+    }
+
+    #[test]
+    fn native_strings_temporals_and_decimals_match_the_canonical_path() {
+        use arrow_array::{
+            Date32Array, Date64Array, Decimal128Array, LargeStringArray, TimestampMillisecondArray,
+            TimestampSecondArray,
+        };
+        assert_native_matches_canonical(
+            Arc::new(StringArray::from(vec![
+                Some(""),
+                Some("a"),
+                Some("value-1"),
+                Some("1.0"),
+                None,
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("a"),
+                Some(""),
+                Some("value-1"),
+                Some("1"),
+                None,
+            ])),
+        );
+        assert_native_matches_canonical(
+            Arc::new(LargeStringArray::from(vec![Some("x"), Some(""), None])),
+            Arc::new(LargeStringArray::from(vec![Some(""), Some("x"), None])),
+        );
+        assert_native_matches_canonical(
+            Arc::new(TimestampSecondArray::from(vec![
+                Some(0),
+                Some(-1),
+                Some(1_600_000_000),
+                None,
+            ])),
+            Arc::new(TimestampSecondArray::from(vec![
+                Some(-1),
+                Some(0),
+                Some(1_600_000_000),
+                None,
+            ])),
+        );
+        assert_native_matches_canonical(
+            Arc::new(
+                TimestampMillisecondArray::from(vec![Some(0), Some(86_400_000), None])
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![Some(86_400_000), Some(0), None])
+                    .with_timezone("UTC"),
+            ),
+        );
+        assert_native_matches_canonical(
+            Arc::new(Date32Array::from(vec![
+                Some(0),
+                Some(-1),
+                Some(19_000),
+                None,
+            ])),
+            Arc::new(Date32Array::from(vec![
+                Some(-1),
+                Some(19_000),
+                Some(0),
+                None,
+            ])),
+        );
+        assert_native_matches_canonical(
+            Arc::new(Date64Array::from(vec![Some(0), Some(86_400_000), None])),
+            Arc::new(Date64Array::from(vec![Some(86_400_000), Some(0), None])),
+        );
+        let decimals = |values: Vec<Option<i128>>| {
+            Decimal128Array::from(values)
+                .with_precision_and_scale(10, 2)
+                .expect("valid precision and scale")
+        };
+        assert_native_matches_canonical(
+            Arc::new(decimals(vec![
+                Some(100),
+                Some(-100),
+                Some(0),
+                Some(12_345),
+                None,
+            ])),
+            Arc::new(decimals(vec![
+                Some(-100),
+                Some(100),
+                Some(12_345),
+                Some(0),
+                None,
+            ])),
+        );
+    }
+
+    #[test]
+    fn ineligible_pairs_fall_back_to_the_canonical_path() {
+        use arrow_array::{Int64Array, TimestampMillisecondArray, TimestampSecondArray};
+        // A dictionary hides hydration and logical nulls behind its keys.
+        let dictionary: DictionaryArray<Int8Type> = vec!["a", "b", "a"].into_iter().collect();
+        let same: DictionaryArray<Int8Type> = vec!["a", "b", "a"].into_iter().collect();
+        assert!(NativeEq::for_pair(&dictionary, &same).is_none());
+        let plan = ComparisonPlan::new(dictionary.data_type(), same.data_type())
+            .expect("string dictionaries compare");
+        assert!(NativeHasher::for_column(&dictionary, plan).is_none());
+
+        // A cross-type pair canonicalizes into a shared domain the raw values
+        // alone do not determine.
+        let strings = StringArray::from(vec!["1", "2"]);
+        let integers = Int64Array::from(vec![1, 2]);
+        assert!(NativeEq::for_pair(&strings, &integers).is_none());
+        let parsing = ComparisonPlan::new(strings.data_type(), integers.data_type())
+            .expect("strings compare against integers");
+        assert!(NativeHasher::for_column(&strings, parsing).is_none());
+        assert!(native_agreement(&strings, &integers, parsing, &[(0, 0)]).is_none());
+        // The plan gate refuses even a same-type pair asked under a foreign
+        // plan, where its identity keys would group by the wrong domain.
+        let more_strings = StringArray::from(vec!["1", "2"]);
+        assert!(NativeEq::under_plan(&strings, &more_strings, parsing).is_none());
+        assert!(native_agreement(&strings, &more_strings, parsing, &[(0, 0)]).is_none());
+
+        // Different units are different data types, even within one family.
+        let seconds = TimestampSecondArray::from(vec![1]);
+        let milliseconds = TimestampMillisecondArray::from(vec![1_000]);
+        assert!(NativeEq::for_pair(&seconds, &milliseconds).is_none());
+    }
+
+    /// The one-shot stack path and the streaming path must agree with the
+    /// buffered encoding either side of the `INLINE` boundary, where a string
+    /// payload of `INLINE - 9` bytes is the last one-shot value.
+    #[test]
+    fn inline_and_streaming_paths_agree_with_the_buffered_encoding() {
+        for len in [0, 5, INLINE - 10, INLINE - 9, INLINE - 8, 1024, 4096] {
+            let value = CanonicalValue::String(vec![b'x'; len]);
+            assert_eq!(
+                stable_hash(&value),
+                hash_with(&value, &Xxh3),
+                "paths disagree at payload length {len}"
+            );
+        }
+        // Sequences cross their own boundary at (INLINE - 8) / 24 values.
+        let boundary = (INLINE - 8) / 24;
+        for len in [0, 1, boundary, boundary + 1, 100] {
+            let values: Vec<CanonicalValue> = (0..len as i64).map(CanonicalValue::Int).collect();
+            let mut frame = Vec::new();
+            encode_sequence(values.len(), values.iter().map(stable_hash), &mut frame);
+            assert_eq!(
+                sequence_hash(&values),
+                Xxh3.hash(&frame),
+                "sequence paths disagree at {len} values"
+            );
+        }
     }
 
     #[test]

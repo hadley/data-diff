@@ -26,9 +26,11 @@ const GRID: [(usize, usize); 6] = [
     (1_000_000, 10),
 ];
 
-const SCENARIOS: [(&str, Scenario); 6] = [
+const SCENARIOS: [(&str, Scenario); 8] = [
     ("identical", generate::identical),
+    ("identical_strings", generate::identical_strings),
     ("renamed_distinct", generate::renamed_distinct),
+    ("renamed_strings", generate::renamed_strings),
     ("renamed_constant", generate::renamed_constant),
     ("rename_and_modify", generate::rename_and_modify),
     ("swapped", generate::swapped),

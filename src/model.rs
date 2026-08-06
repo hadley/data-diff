@@ -36,18 +36,20 @@ pub struct Budgets {
     /// always uses every matched row, its basis being a universal claim.
     /// Completing inference over the sample is not budget exhaustion.
     pub agreement_rows: usize,
-    /// The candidate pairs rename inference may examine, across both stages.
+    /// The rows rename inference may examine, across both of its stages.
     ///
-    /// One unit is one value-level pair examination: a full-row verification
-    /// of a digest-equal exact candidate, a full-row informativeness
-    /// measurement, or a first-time sampled agreement measurement.
-    pub rename_pairs: usize,
-    /// The crossings swap inference may measure.
+    /// An examination is charged what it reads: a full-row verification of a
+    /// digest-equal exact candidate or a full-row informativeness measurement
+    /// costs the matched rows, and a first-time sampled agreement measurement
+    /// costs the sample. Exhaustion strands the endpoints not yet resolved as
+    /// drops and additions and the stage reports itself incomplete.
+    pub rename_rows: RowBudget,
+    /// The rows swap inference may examine measuring crossings.
     ///
-    /// One unit is one first-time sampled measurement of a crossed column
-    /// pair. On exhaustion the stage accepts no swap at all, the cancellation
-    /// rule being a judgement over the whole candidate set.
-    pub swap_pairs: usize,
+    /// Each first-time crossing measurement costs its sample of rows. On
+    /// exhaustion the stage accepts no swap at all, the cancellation rule
+    /// being a judgement over the whole candidate set.
+    pub swap_rows: RowBudget,
     /// The changed cells up to which the edit summary is exactly minimal.
     ///
     /// Above this many residual changed cells, the minimum-cover solve is
@@ -56,20 +58,50 @@ pub struct Budgets {
     pub summary_cells: usize,
 }
 
-/// The defaults, tuned against `benches/pipeline.rs` (2026-08-04): on every
-/// benchmark grid point of every adversarial scenario, each bounded stage
-/// completes within twice the same-sized identical run — the pipeline's
-/// unavoidable linear pass — and no non-adversarial scenario reports an
-/// incomplete stage. The pair budgets sit at the small end of that rule's
-/// range because a unit touches up to a sample's worth of rows, so at the
-/// grid's smallest tables a budget an order larger buys the adversaries more
-/// time than the whole linear pass it is measured against.
+/// A bound on the rows a bounded search may examine.
+///
+/// The proportional form is the default because the pipeline's own yardstick
+/// scales with the input: the design prices bounded work against the linear
+/// pass that reads every cell, so a budget that holds by construction must be
+/// a multiple of the same quantity. A fixed row count remains for tests and
+/// embedders that want an absolute ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowBudget {
+    /// This many row examinations per cell of the compared table, cells being
+    /// the matched rows times the wider side's column count.
+    PerCell(usize),
+    /// Exactly this many row examinations, whatever the input's size.
+    Rows(usize),
+}
+
+impl RowBudget {
+    /// The row allowance this budget grants a table of `cells` cells.
+    pub(crate) fn resolve(self, cells: usize) -> usize {
+        match self {
+            RowBudget::PerCell(multiple) => multiple.saturating_mul(cells),
+            RowBudget::Rows(rows) => rows,
+        }
+    }
+}
+
+/// The defaults, tuned against `benches/pipeline.rs` (2026-08-06). The search
+/// budgets are proportional, so "each bounded stage examines at most this many
+/// rows per cell of the input" holds by construction on every machine; the
+/// grid confirms what construction cannot — that no non-adversarial scenario
+/// reports an incomplete stage, and that the adversaries' wall clock stays
+/// within the multipliers recorded in `benches/README.md`. The multiples were
+/// then raised from their analytic floors until no grid point lost a
+/// completion the previous fixed pair budgets funded: rename inference's 20
+/// covers the ten-column adversaries' ~200 full-row examinations across
+/// eleven columns, and swap inference's 5 covers a fully swapped ten-column
+/// table's crossing enumeration at full rows. Rename's multiple is the larger
+/// because its examinations are mostly full-row where swap's are sampled.
 impl Default for Budgets {
     fn default() -> Self {
         Self {
             agreement_rows: 4096,
-            rename_pairs: 2048,
-            swap_pairs: 2048,
+            rename_rows: RowBudget::PerCell(20),
+            swap_rows: RowBudget::PerCell(5),
             summary_cells: 10_000,
         }
     }
@@ -114,6 +146,17 @@ pub enum DiffError {
         side: Side,
         column: String,
         source_type: String,
+    },
+    /// A side with more rows or columns than a cell coordinate can address.
+    ///
+    /// The ceiling is `u32::MAX`, which keeps the complete cell-level diff —
+    /// the largest thing a `Diff` retains — at half the width machine words
+    /// would cost. Arrow batches are `i32`-indexed in practice, so the limit
+    /// is a documented contract rather than a working constraint.
+    TableTooLarge {
+        side: Side,
+        rows: usize,
+        columns: usize,
     },
     IntegerOutOfRange {
         side: Side,
@@ -162,6 +205,15 @@ impl std::fmt::Display for DiffError {
             } => write!(
                 f,
                 "{side} column {column:?} has unsupported type {source_type}"
+            ),
+            DiffError::TableTooLarge {
+                side,
+                rows,
+                columns,
+            } => write!(
+                f,
+                "{side} has {rows} rows and {columns} columns; at most {} of each are supported",
+                u32::MAX
             ),
             DiffError::IntegerOutOfRange {
                 side,
@@ -252,24 +304,39 @@ impl Coordinate {
 }
 
 /// A one-based old/new cell coordinate, collapsed when both positions agree.
+///
+/// Positions are held as `u32`, halving what the complete cell-level diff —
+/// the largest thing a `Diff` retains — costs per cell. Input validation
+/// enforces the ceiling that makes the narrowing exact: a table with more
+/// than `u32::MAX` rows or columns is rejected as [`DiffError::TableTooLarge`]
+/// before any coordinate is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellCoordinate(CellCoordinateRepr);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CellCoordinateRepr {
-    Same([usize; 2]),
-    Moved([[usize; 2]; 2]),
+    Same([u32; 2]),
+    Moved([[u32; 2]; 2]),
 }
 
 impl CellCoordinate {
+    /// # Panics
+    ///
+    /// If a one-based position exceeds `u32::MAX`, which validated input
+    /// cannot produce: tables that large are rejected at the door.
     pub fn from_zero_based(
         old_row: usize,
         old_column: usize,
         new_row: usize,
         new_column: usize,
     ) -> Self {
-        let old = [old_row + 1, old_column + 1];
-        let new = [new_row + 1, new_column + 1];
+        let position = |value: usize| -> u32 {
+            (value + 1)
+                .try_into()
+                .expect("validated tables have at most u32::MAX rows and columns")
+        };
+        let old = [position(old_row), position(old_column)];
+        let new = [position(new_row), position(new_column)];
         if old == new {
             Self(CellCoordinateRepr::Same(old))
         } else {
@@ -686,11 +753,49 @@ pub struct Diff {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coordinate, EditSummary, KeyOverlap};
+    use super::{Coordinate, EditSummary, KeyOverlap, RowBudget};
+
+    #[test]
+    fn a_proportional_budget_scales_with_the_cells_and_saturates() {
+        assert_eq!(RowBudget::PerCell(4).resolve(1_000), 4_000);
+        assert_eq!(RowBudget::PerCell(4).resolve(0), 0);
+        assert_eq!(RowBudget::PerCell(2).resolve(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn a_fixed_budget_ignores_the_cells() {
+        assert_eq!(RowBudget::Rows(7).resolve(1_000_000), 7);
+        assert_eq!(RowBudget::Rows(0).resolve(1_000_000), 0);
+    }
 
     #[test]
     fn coordinate_collapses_equal_positions() {
         assert_eq!(Coordinate::from_zero_based(1, 1).positions(), (2, 2));
+    }
+
+    /// The narrowed repr is the point: half the width of word-sized
+    /// positions, for the largest vector a `Diff` retains.
+    #[test]
+    fn cell_coordinates_are_half_a_machine_word_wide_per_position() {
+        assert!(std::mem::size_of::<super::CellCoordinate>() <= 20);
+    }
+
+    /// The largest zero-based position validated input can hold converts; one
+    /// past it panics with the documented message rather than wrapping.
+    #[test]
+    fn cell_coordinates_hold_the_largest_validated_position() {
+        let ceiling = u32::MAX as usize - 1;
+        let cell = super::CellCoordinate::from_zero_based(ceiling, 0, ceiling, 0);
+        assert_eq!(
+            cell,
+            super::CellCoordinate::from_zero_based(ceiling, 0, ceiling, 0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "validated tables have at most u32::MAX rows and columns")]
+    fn a_position_past_the_ceiling_panics_rather_than_wrapping() {
+        super::CellCoordinate::from_zero_based(u32::MAX as usize, 0, 0, 0);
     }
 
     #[test]
