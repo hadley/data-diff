@@ -141,8 +141,12 @@ pub(crate) struct KeyIndex<'a> {
 
 impl<'a> KeyIndex<'a> {
     pub(crate) fn new(keys: &'a KeyValues) -> Self {
-        let mut buckets = DigestMap::default();
+        // Pre-sized to the worst case of all-distinct keys, and each row's
+        // bucket id is remembered from this pass, so no digest is ever looked
+        // up twice and the map never rehashes as it grows.
+        let mut buckets = DigestMap::with_capacity_and_hasher(keys.len(), Default::default());
         let mut counts: Vec<usize> = Vec::new();
+        let mut ids = Vec::with_capacity(keys.len());
         for row in 0..keys.len() {
             let next = counts.len();
             let id = *buckets.entry(keys.digest(row)).or_insert(next);
@@ -150,6 +154,7 @@ impl<'a> KeyIndex<'a> {
                 counts.push(0);
             }
             counts[id] += 1;
+            ids.push(id);
         }
         let mut offsets = Vec::with_capacity(counts.len() + 1);
         let mut total = 0;
@@ -158,12 +163,11 @@ impl<'a> KeyIndex<'a> {
             total += count;
             offsets.push(total);
         }
-        // Reuse the counts as per-bucket write cursors; visiting rows in
-        // ascending order keeps every bucket ascending.
+        // Per-bucket write cursors; visiting rows in ascending order keeps
+        // every bucket ascending.
         let mut cursors: Vec<usize> = offsets[..counts.len()].to_vec();
         let mut rows = vec![0; keys.len()];
-        for row in 0..keys.len() {
-            let id = buckets[&keys.digest(row)];
+        for (row, &id) in ids.iter().enumerate() {
             rows[cursors[id]] = row;
             cursors[id] += 1;
         }

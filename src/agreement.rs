@@ -12,7 +12,9 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_select::take::take;
 
 use crate::Side;
-use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash};
+use crate::compare::{
+    CanonicalValue, ComparisonPlan, NativeHasher, sequence_hash, sequence_hash_of,
+};
 use crate::key::ResolvedKey;
 use crate::maps::FastMap;
 use crate::rows::RowMatches;
@@ -197,7 +199,10 @@ impl RowSample {
             .enumerate()
             .map(|(position, &(old_row, _))| (key.old.digest(old_row), position))
             .collect::<Vec<_>>();
-        ranked.sort_unstable();
+        // The bottom `cap` is a unique set — positions make the order total —
+        // so partitioning selects exactly what a full sort would, without
+        // sorting the rejected majority.
+        ranked.select_nth_unstable(cap);
         let mut positions = ranked[..cap]
             .iter()
             .map(|&(_, position)| position)
@@ -237,6 +242,10 @@ pub(crate) struct Aligned<'a> {
     rows: &'a RowMatches,
     sample: &'a RowSample,
     digest: fn(&[CanonicalValue]) -> u128,
+    /// Whether digests may stream natively off the arrow columns. True under
+    /// the default digest and false under an injected one, whose forced
+    /// collisions the native path could not reproduce.
+    native_digest: bool,
     cache: HashMap<(Side, usize, ComparisonPlan), Projection>,
     verified: HashMap<(usize, usize, ComparisonPlan), bool>,
     measured: HashMap<(Over, usize, usize, ComparisonPlan), Agreement>,
@@ -268,11 +277,15 @@ impl<'a> Aligned<'a> {
         rows: &'a RowMatches,
         sample: &'a RowSample,
     ) -> Self {
-        Self::with_digest(old, new, rows, sample, sequence_hash)
+        let mut aligned = Self::with_digest(old, new, rows, sample, sequence_hash);
+        aligned.native_digest = true;
+        aligned
     }
 
     /// The digest is injectable so a test can force every column to collide,
-    /// which is the only way to reach the verification behind it.
+    /// which is the only way to reach the verification behind it. An injected
+    /// digest disables the native streaming path, which computes the real
+    /// digests by construction.
     pub(crate) fn with_digest(
         old: &'a RecordBatch,
         new: &'a RecordBatch,
@@ -286,6 +299,7 @@ impl<'a> Aligned<'a> {
             rows,
             sample,
             digest,
+            native_digest: false,
             cache: HashMap::new(),
             verified: HashMap::new(),
             measured: HashMap::new(),
@@ -325,9 +339,16 @@ impl<'a> Aligned<'a> {
         }
         self.ensure_digest(plan, Side::Old, old);
         self.ensure_digest(plan, Side::New, new);
-        let old_column = &self.cache[&(Side::Old, old, plan)];
-        let new_column = &self.cache[&(Side::New, new, plan)];
-        let equal = old_column.digest == new_column.digest && old_column.full == new_column.full;
+        let old_digest = self.cache[&(Side::Old, old, plan)].digest;
+        let new_digest = self.cache[&(Side::New, new, plan)].digest;
+        // Differing digests are differing values, so only digest-equal pairs
+        // — where a collision could still hide a difference — materialize and
+        // compare the values themselves.
+        let equal = old_digest == new_digest && {
+            self.ensure_full(plan, Side::Old, old);
+            self.ensure_full(plan, Side::New, new);
+            self.cache[&(Side::Old, old, plan)].full == self.cache[&(Side::New, new, plan)].full
+        };
         self.verified.insert((old, new, plan), equal);
         Some(equal)
     }
@@ -521,14 +542,43 @@ impl<'a> Aligned<'a> {
     }
 
     fn ensure_digest(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        let entry = self.cache.entry((side, index, plan)).or_default();
+        if entry.digest.is_some() {
+            return;
+        }
+        // With no projection built yet, an eligible same-type column digests
+        // straight off the arrow array — the same digest the materialized
+        // values produce, by construction, without the `Vec<CanonicalValue>`.
+        // A projection already in hand digests through it instead, and an
+        // injected digest always materializes, its collisions being the point.
+        if entry.full.is_none() && self.native_digest {
+            let column = match side {
+                Side::Old => self.old.column(index),
+                Side::New => self.new.column(index),
+            };
+            if let Some(hasher) = NativeHasher::for_column(column.as_ref(), plan) {
+                let digest = sequence_hash_of(
+                    self.rows.matched.len(),
+                    self.rows.matched.iter().map(|&(old_row, new_row)| {
+                        hasher.hash(match side {
+                            Side::Old => old_row,
+                            Side::New => new_row,
+                        })
+                    }),
+                );
+                self.cache
+                    .get_mut(&(side, index, plan))
+                    .expect("entered above")
+                    .digest = Some(digest);
+                return;
+            }
+        }
         self.ensure_full(plan, side, index);
         let entry = self
             .cache
             .get_mut(&(side, index, plan))
             .expect("ensured above");
-        if entry.digest.is_none() {
-            entry.digest = Some((self.digest)(entry.full.as_deref().expect("ensured above")));
-        }
+        entry.digest = Some((self.digest)(entry.full.as_deref().expect("ensured above")));
     }
 
     fn ensure_counts(&mut self, plan: ComparisonPlan, side: Side, index: usize) {

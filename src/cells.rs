@@ -1,8 +1,32 @@
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch};
 
-use crate::compare::ComparisonPlan;
+use crate::compare::{CanonicalValue, ComparisonPlan, NativeEq};
 use crate::rows::RowMatches;
 use crate::schema::ColumnMap;
+
+/// One column pair's equality question, answered natively where the type has
+/// a written equivalence argument and over materialized canonical values
+/// everywhere else.
+enum CellEq<'a> {
+    Native(NativeEq<'a>),
+    Canonical(Vec<CanonicalValue>, Vec<CanonicalValue>),
+}
+
+impl<'a> CellEq<'a> {
+    fn for_pair(old: &'a dyn Array, new: &'a dyn Array, plan: ComparisonPlan) -> Self {
+        match NativeEq::for_pair(old, new) {
+            Some(native) => CellEq::Native(native),
+            None => CellEq::Canonical(plan.canonicalize_old(old), plan.canonicalize_new(new)),
+        }
+    }
+
+    fn equal(&self, old_row: usize, new_row: usize) -> bool {
+        match self {
+            CellEq::Native(native) => native.equal(old_row, new_row),
+            CellEq::Canonical(old, new) => old[old_row] == new[new_row],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CellChanges {
@@ -92,18 +116,25 @@ pub(crate) fn compare_cells(
                 new.column(identity.new).data_type(),
             )
         {
-            let old_values = plan.canonicalize_old(old.column(identity.old).as_ref());
-            let new_values = plan.canonicalize_new(new.column(identity.new).as_ref());
+            // A same-type pair with a clean equivalence argument is compared
+            // straight off the arrow arrays; everything else materializes the
+            // canonical values as before. Same verdicts either way — the
+            // native comparator exists only where that is provable.
+            let equality = CellEq::for_pair(
+                old.column(identity.old).as_ref(),
+                new.column(identity.new).as_ref(),
+                plan,
+            );
             for &(old_row, new_row) in &rows.matched {
-                if old_values[old_row] != new_values[new_row] {
+                if !equality.equal(old_row, new_row) {
                     changed_rows.push((old_row, new_row));
                 }
             }
-            // The same canonicalized columns serve the one-to-many comparison,
-            // so a fanout costs no extra pass over the data.
+            // The same comparator serves the one-to-many comparison, so a
+            // fanout costs no extra pass over the data.
             for (group, cells) in rows.fanout.iter().zip(&mut fanout_cells) {
                 for &new_row in &group.new {
-                    if old_values[group.old] != new_values[new_row] {
+                    if !equality.equal(group.old, new_row) {
                         cells.push(ChangedCell {
                             old_row: group.old,
                             old_column: identity.old,
@@ -153,6 +184,25 @@ mod tests {
 
     fn changes(old: &RecordBatch, new: &RecordBatch) -> super::CellChanges {
         changes_with(old, new, &["id"])
+    }
+
+    /// A dictionary column takes the canonicalizing fallback — `NativeEq`
+    /// refuses it — and its cells still compare by logical value.
+    #[test]
+    fn dictionary_columns_fall_back_and_still_compare() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "label" => dict["a", "b", "a"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "label" => dict["a", "x", "a"],
+        };
+
+        let changes = changes(&old, &new);
+
+        assert_eq!(changes.columns.len(), 1);
+        assert_eq!(changes.columns[0].rows, [(1, 1)]);
     }
 
     /// Compare cells under a specific key, or under a guessed one when `key` is

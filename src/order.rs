@@ -27,6 +27,11 @@ fn minimal_moves(identities: &[(usize, usize)]) -> Vec<(usize, usize)> {
     debug_assert!(identities.windows(2).all(|pair| pair[0].0 < pair[1].0));
 
     let new_positions = identities.iter().map(|(_, new)| *new).collect::<Vec<_>>();
+    // Already in order — the commonest case of all — means nothing moved, and
+    // the answer is known before any tree is built.
+    if new_positions.is_sorted() {
+        return Vec::new();
+    }
     let mut ranks = new_positions.clone();
     ranks.sort_unstable();
     ranks.dedup();

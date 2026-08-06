@@ -14,8 +14,10 @@ Every scenario runs over rows {1 000, 100 000, 1 000 000} by columns {10, 100, 1
 | `rename_and_modify` | k drops against k adds, each pair ~5% edited | the quadratic approximate stage: no pair exact, every pair measured |
 | `swapped` | adjacent same-named column pairs exchanged | the swap adversary: every identity rewritten, every crossing measured |
 | `full_rewrite` | every non-key value changed | the summarization adversary and the cost of the complete cell diff |
+| `identical_strings` | the same all-string table twice | the string floor: cell comparison over values that clone per value when materialized |
+| `renamed_strings` | every string column renamed in place, distinct values | the digest join and rename verification over string columns |
 
-`identical` and `renamed_distinct` are the non-adversarial scenarios; the other four are the adversaries the budgets exist to cut.
+`identical`, `identical_strings`, `renamed_distinct`, and `renamed_strings` are the non-adversarial scenarios; the other four are the adversaries the budgets exist to cut.
 
 ## The acceptance rule for the default budgets
 
@@ -25,9 +27,24 @@ The default multiples — 20 for renames, 5 for swaps — were tuned under one f
 
 Two readings to keep straight when a ratio looks bad. First, `full_rewrite`'s overage — and every all-cells-change scenario's — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Second, `renamed_distinct`'s rise past 100k rows is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule requires of a non-adversarial scenario.
 
-## Baseline (2026-08-06, Apple Silicon, row-denominated defaults)
+## Baseline (2026-08-06, Apple Silicon, after the same-type fast paths)
 
-Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces.
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. The fast-path step halved the floor again — native cell comparison plus the `KeyIndex`, `minimal_moves`, and `RowSample` cleanups — so several multipliers rose while every absolute time fell or held; check a suspicious ratio against the prior table's absolute times before reading it as a regression. The step's own wins, output-identical by construction and verified against the prior build: `identical_strings` 1M×10 fell 804 ms → 226 ms and 100k×100 572 ms → 100 ms; `renamed_strings` fell ~15–20% and its remaining cost is rename verification and informativeness materializing string values, which the step deliberately kept and the leads in `plan-next.md` record.
+
+| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
+|---|---|---|---|---|---|---|
+| `identical` | 0.64 ms | 6.4 ms | 68 ms | 14 ms | 51 ms | 207 ms |
+| `identical_strings` | 3.62× | 3.64× | 3.48× | 1.40× | 1.94× | 1.09× |
+| `renamed_distinct` | 1.37× | 1.37× | 1.34× | 6.57× | 19.32× | 6.78× |
+| `renamed_strings` | 4.14× | 4.15× | 3.94× | 21.43× | 59.40× | 22.10× |
+| `renamed_constant` | 1.41× | 1.31× | 1.29× | 6.70× | 16.22× | 4.65× |
+| `rename_and_modify` | 2.28× | 3.37× | 3.35× | 4.00× | 41.09× | 2.36× |
+| `swapped` | 1.50× | 2.51× | 2.77× | 1.74× | 18.92× | 1.13× |
+| `full_rewrite` | 2.38× | 2.59× | 2.79× | 8.60× | 37.01× | 6.03× |
+
+## Prior baseline (2026-08-06, Apple Silicon, row-denominated defaults, before the fast paths)
+
+The row-budget tuning run, kept as the immediate comparison; older baselines (2026-08-05 fixed pairs, 2026-08-04 original tuning) live in this file's git history.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -37,32 +54,6 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `rename_and_modify` | 1.95× | 2.74× | 2.85× | 2.78× | 16.12× | 1.95× |
 | `swapped` | 1.33× | 2.29× | 2.43× | 1.25× | 7.12× | 1.02× |
 | `full_rewrite` | 1.98× | 2.22× | 2.51× | 4.72× | 13.12× | 3.39× |
-
-## Prior baseline (2026-08-05, Apple Silicon, fixed pair budgets, after the constant-factor step)
-
-The constant-factor step's run under the 2048-pair budgets, kept for comparison. Its third reading — pair-denominated budgets drifting from the row-scaled bar the leaner floor exposed — is resolved by the row-denominated scheme above.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 0.85 ms | 7.6 ms | 76 ms | 29 ms | 138 ms | 437 ms |
-| `renamed_distinct` | 1.14× | 1.19× | 1.24× | 3.52× | 7.91× | 3.44× |
-| `renamed_constant` | 1.02× | 1.03× | 0.67× | 3.30× | 5.80× | 2.30× |
-| `rename_and_modify` | 1.78× | 2.67× | 1.26× | 2.92× | 5.74× | 1.84× |
-| `swapped` | 1.23× | 3.41× | 2.16× | 1.33× | 9.69× | 0.97× |
-| `full_rewrite` | 1.87× | 3.31× | 2.19× | 4.36× | 9.78× | 3.19× |
-
-## Prior baseline (2026-08-04, Apple Silicon, tuned defaults)
-
-The tuning run for the bounded-reconciliation step's default budgets, kept for comparison; every 2026-08-05 point is absolutely faster. Points re-measured after the pair budgets moved to 2048 are marked †; the untouched points are from the 20 000-unit run and only overstate that day's ratios.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 2.5 ms | 20 ms | 195 ms | 258 ms | 1.95 s | 3.59 s |
-| `renamed_distinct` | 1.03× | 1.01× | 1.01× | 1.06× | 1.15× | 1.12× |
-| `renamed_constant` | 0.81× | 0.89×† | 0.74× | 0.94× | 2.11× | 0.76× |
-| `rename_and_modify` | 1.48× | 2.2׆ | 2.26× | 1.14× | 3.53× | 1.04× |
-| `swapped` | 1.25× | 2.6׆ | 2.93× | 1.07× | 2.28× | 1.01× |
-| `full_rewrite` | 1.42× | 4.50× | 2.86× | 1.40× | 2.66× | 1.31× |
 
 ## Profiling a point
 

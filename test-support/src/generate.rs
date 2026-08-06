@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{Field, Schema};
 
 /// An identical pair: the floor every bound is compared against, the run
@@ -108,11 +108,45 @@ pub fn full_rewrite(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
     (old, new)
 }
 
+/// An identical all-string pair: the floor for string tables, where every
+/// value clones its bytes during canonicalization and the same linear pass
+/// costs what the integer floor hides.
+pub fn identical_strings(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let build = || {
+        table(
+            names("c", columns),
+            (0..columns).map(|column| string_column(rows, column)),
+        )
+    };
+    (build(), build())
+}
+
+/// Every string column renamed in place with distinct values: the digest
+/// join's string case, resolved by the positional pre-pass like its integer
+/// counterpart.
+pub fn renamed_strings(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let values = |prefix| {
+        table(
+            names(prefix, columns),
+            (0..columns).map(|column| string_column(rows, column)),
+        )
+    };
+    (values("old"), values("new"))
+}
+
 /// A value distinct across both coordinates, so unrelated columns never agree
 /// and a column's values never repeat: informative everywhere, colliding
 /// nowhere. Deterministic by construction.
 fn distinct(column: usize, row: usize) -> i64 {
     (row as i64) * 1_000_003 + (column as i64)
+}
+
+/// The string spelling of [`distinct`], with a prefix so the values exercise
+/// real byte comparison rather than parsing back into integers.
+fn string_column(rows: usize, column: usize) -> ArrayRef {
+    Arc::new(StringArray::from_iter_values(
+        (0..rows).map(|row| format!("value-{}", distinct(column, row))),
+    ))
 }
 
 fn names(prefix: &str, columns: usize) -> Vec<String> {
