@@ -7,6 +7,7 @@ mod hint;
 mod human;
 mod input;
 mod key;
+mod maps;
 mod model;
 mod order;
 mod reconsider;

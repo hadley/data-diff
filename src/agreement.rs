@@ -8,11 +8,13 @@
 
 use std::collections::HashMap;
 
-use arrow_array::RecordBatch;
+use arrow_array::{RecordBatch, UInt64Array};
+use arrow_select::take::take;
 
 use crate::Side;
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash};
 use crate::key::ResolvedKey;
+use crate::maps::FastMap;
 use crate::rows::RowMatches;
 
 /// The share of aligned rows a pair must agree in to be one column.
@@ -164,18 +166,10 @@ impl RowSample {
         Self(None)
     }
 
+    /// The digests were computed once when the key was resolved; selection
+    /// reads them back rather than re-hashing, so forcing a collision here
+    /// means resolving the key with an injected hash.
     pub(crate) fn select(key: &ResolvedKey, rows: &RowMatches, cap: usize) -> Self {
-        Self::with_hash(key, rows, cap, sequence_hash)
-    }
-
-    /// The hash is injectable so a test can force every key to collide, which
-    /// is the only way to reach the tie-break.
-    pub(crate) fn with_hash(
-        key: &ResolvedKey,
-        rows: &RowMatches,
-        cap: usize,
-        hash: fn(&[CanonicalValue]) -> u128,
-    ) -> Self {
         if rows.matched.len() <= cap {
             return Self(None);
         }
@@ -183,7 +177,7 @@ impl RowSample {
             .matched
             .iter()
             .enumerate()
-            .map(|(position, &(old_row, _))| (hash(&key.old[old_row]), position))
+            .map(|(position, &(old_row, _))| (key.old.digest(old_row), position))
             .collect::<Vec<_>>();
         ranked.sort_unstable();
         let mut positions = ranked[..cap]
@@ -230,11 +224,23 @@ pub(crate) struct Aligned<'a> {
     measured: HashMap<(Over, usize, usize, ComparisonPlan), Agreement>,
 }
 
-/// One column's values over the matched rows, with what can be read off them.
+/// One column's projections, each piece built on first demand and kept.
+///
+/// A sampled measurement needs only `sampled`, which canonicalizes just the
+/// sampled rows — the point of the split: answering a sample-sized question
+/// must not cost a full-column pass. The full pieces are built when a
+/// full-row question first asks — a digest, a verification, or the exact
+/// stage's informativeness measurement — and never before.
+#[derive(Default)]
 struct Projection {
-    digest: u128,
-    values: Vec<CanonicalValue>,
-    counts: HashMap<CanonicalValue, u64>,
+    /// Values over every matched row, in matching order.
+    full: Option<Vec<CanonicalValue>>,
+    /// Values over the sampled rows only, in sample order.
+    sampled: Option<Vec<CanonicalValue>>,
+    /// The digest of `full`.
+    digest: Option<u128>,
+    /// Value frequencies over `full`.
+    counts: Option<FastMap<CanonicalValue, u64>>,
 }
 
 impl<'a> Aligned<'a> {
@@ -274,8 +280,10 @@ impl<'a> Aligned<'a> {
     /// design accepts for exact inference; digests only decide which pairs are
     /// worth comparing, so a collision cannot invent a rename.
     pub(crate) fn digest(&mut self, plan: ComparisonPlan, side: Side, index: usize) -> u128 {
-        self.fill(plan, side, index);
-        self.cache[&(side, index, plan)].digest
+        self.ensure_digest(plan, side, index);
+        self.cache[&(side, index, plan)]
+            .digest
+            .expect("ensure_digest built the digest")
     }
 
     /// Whether the two columns hold equal values in every matched row.
@@ -295,12 +303,11 @@ impl<'a> Aligned<'a> {
         if !meter.charge() {
             return None;
         }
-        self.fill(plan, Side::Old, old);
-        self.fill(plan, Side::New, new);
+        self.ensure_digest(plan, Side::Old, old);
+        self.ensure_digest(plan, Side::New, new);
         let old_column = &self.cache[&(Side::Old, old, plan)];
         let new_column = &self.cache[&(Side::New, new, plan)];
-        let equal =
-            old_column.digest == new_column.digest && old_column.values == new_column.values;
+        let equal = old_column.digest == new_column.digest && old_column.full == new_column.full;
         self.verified.insert((old, new, plan), equal);
         Some(equal)
     }
@@ -353,33 +360,42 @@ impl<'a> Aligned<'a> {
         if !meter.charge() {
             return None;
         }
-        self.fill(plan, Side::Old, old);
-        self.fill(plan, Side::New, new);
-        let old_column = &self.cache[&(Side::Old, old, plan)];
-        let new_column = &self.cache[&(Side::New, new, plan)];
         let agreement = match over {
-            Over::Full => Agreement {
-                rows: old_column.values.len() as u64,
-                agreeing: old_column
-                    .values
-                    .iter()
-                    .zip(&new_column.values)
-                    .filter(|(old, new)| old == new)
-                    .count() as u64,
-                expected: expected(&old_column.counts, &new_column.counts),
-            },
+            Over::Full => {
+                self.ensure_counts(plan, Side::Old, old);
+                self.ensure_counts(plan, Side::New, new);
+                let old_column = &self.cache[&(Side::Old, old, plan)];
+                let new_column = &self.cache[&(Side::New, new, plan)];
+                let old_values = old_column.full.as_deref().expect("counts built the values");
+                let new_values = new_column.full.as_deref().expect("counts built the values");
+                Agreement {
+                    rows: old_values.len() as u64,
+                    agreeing: old_values
+                        .iter()
+                        .zip(new_values)
+                        .filter(|(old, new)| old == new)
+                        .count() as u64,
+                    expected: expected(
+                        old_column.counts.as_ref().expect("ensured above"),
+                        new_column.counts.as_ref().expect("ensured above"),
+                    ),
+                }
+            }
             Over::Sampled => {
-                let positions = self
-                    .sample
-                    .0
+                self.ensure_sampled(plan, Side::Old, old);
+                self.ensure_sampled(plan, Side::New, new);
+                let old_values = self.cache[&(Side::Old, old, plan)]
+                    .sampled
                     .as_deref()
-                    .expect("a full sample measures as Over::Full");
-                let mut old_counts: HashMap<&CanonicalValue, u64> = HashMap::new();
-                let mut new_counts: HashMap<&CanonicalValue, u64> = HashMap::new();
+                    .expect("ensured above");
+                let new_values = self.cache[&(Side::New, new, plan)]
+                    .sampled
+                    .as_deref()
+                    .expect("ensured above");
+                let mut old_counts: FastMap<&CanonicalValue, u64> = FastMap::default();
+                let mut new_counts: FastMap<&CanonicalValue, u64> = FastMap::default();
                 let mut agreeing = 0_u64;
-                for &position in positions {
-                    let old_value = &old_column.values[position];
-                    let new_value = &new_column.values[position];
+                for (old_value, new_value) in old_values.iter().zip(new_values) {
                     if old_value == new_value {
                         agreeing += 1;
                     }
@@ -387,7 +403,7 @@ impl<'a> Aligned<'a> {
                     *new_counts.entry(new_value).or_default() += 1;
                 }
                 Agreement {
-                    rows: positions.len() as u64,
+                    rows: old_values.len() as u64,
                     agreeing,
                     expected: expected(&old_counts, &new_counts),
                 }
@@ -397,14 +413,18 @@ impl<'a> Aligned<'a> {
         Some(agreement)
     }
 
-    fn fill(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
-        if self.cache.contains_key(&(side, index, plan)) {
+    /// The full projection: every matched row, canonicalized, in matching
+    /// order.
+    ///
+    /// `rows.matched` is ordered by old position and holds each pair's new
+    /// position alongside it, so projecting each side through its own half
+    /// of the pair puts both columns in one order without materializing
+    /// aligned tables.
+    fn ensure_full(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        let entry = self.cache.entry((side, index, plan)).or_default();
+        if entry.full.is_some() {
             return;
         }
-        // `rows.matched` is ordered by old position and holds each pair's new
-        // position alongside it, so projecting each side through its own half
-        // of the pair puts both columns in one order without materializing
-        // aligned tables.
         let values = match side {
             Side::Old => {
                 let column = plan.canonicalize_old(self.old.column(index).as_ref());
@@ -415,18 +435,84 @@ impl<'a> Aligned<'a> {
                 project(&column, self.rows.matched.iter().map(|&(_, new)| new))
             }
         };
-        let mut counts: HashMap<CanonicalValue, u64> = HashMap::new();
-        for value in &values {
-            *counts.entry(value.clone()).or_default() += 1;
+        self.cache
+            .get_mut(&(side, index, plan))
+            .expect("entered above")
+            .full = Some(values);
+    }
+
+    /// The sampled projection: only the sampled matched rows, canonicalized.
+    ///
+    /// Where the full projection already exists it is reused; otherwise the
+    /// sampled rows are taken out of the arrow column first and only they are
+    /// canonicalized, which is what keeps a sampled measurement sample-sized.
+    /// Canonicalization is value-wise — each element depends only on its own
+    /// value and the plan — so canonicalizing a taken subset yields exactly
+    /// the subset of the canonicalized whole.
+    fn ensure_sampled(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        let entry = self.cache.entry((side, index, plan)).or_default();
+        if entry.sampled.is_some() {
+            return;
         }
-        self.cache.insert(
-            (side, index, plan),
-            Projection {
-                digest: (self.digest)(&values),
-                values,
-                counts,
-            },
-        );
+        let positions = self
+            .sample
+            .0
+            .as_deref()
+            .expect("a full sample measures as Over::Full");
+        let values = if let Some(full) = entry.full.as_deref() {
+            project(full, positions.iter().copied())
+        } else {
+            let indices: UInt64Array = positions
+                .iter()
+                .map(|&position| {
+                    let (old_row, new_row) = self.rows.matched[position];
+                    Some(match side {
+                        Side::Old => old_row as u64,
+                        Side::New => new_row as u64,
+                    })
+                })
+                .collect();
+            let column = match side {
+                Side::Old => self.old.column(index),
+                Side::New => self.new.column(index),
+            };
+            let taken = take(column.as_ref(), &indices, None)
+                .expect("matched rows are in bounds by construction");
+            match side {
+                Side::Old => plan.canonicalize_old(taken.as_ref()),
+                Side::New => plan.canonicalize_new(taken.as_ref()),
+            }
+        };
+        self.cache
+            .get_mut(&(side, index, plan))
+            .expect("entered above")
+            .sampled = Some(values);
+    }
+
+    fn ensure_digest(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        self.ensure_full(plan, side, index);
+        let entry = self
+            .cache
+            .get_mut(&(side, index, plan))
+            .expect("ensured above");
+        if entry.digest.is_none() {
+            entry.digest = Some((self.digest)(entry.full.as_deref().expect("ensured above")));
+        }
+    }
+
+    fn ensure_counts(&mut self, plan: ComparisonPlan, side: Side, index: usize) {
+        self.ensure_full(plan, side, index);
+        let entry = self
+            .cache
+            .get_mut(&(side, index, plan))
+            .expect("ensured above");
+        if entry.counts.is_none() {
+            let mut counts: FastMap<CanonicalValue, u64> = FastMap::default();
+            for value in entry.full.as_deref().expect("ensured above") {
+                *counts.entry(value.clone()).or_default() += 1;
+            }
+            entry.counts = Some(counts);
+        }
     }
 }
 
@@ -435,9 +521,9 @@ impl<'a> Aligned<'a> {
 /// Each term is a product of two row counts, so it is widened before it is
 /// formed rather than after. Integer addition is associative, so summing in
 /// hash order stays deterministic.
-fn expected<V: std::hash::Hash + Eq>(
-    old_counts: &HashMap<V, u64>,
-    new_counts: &HashMap<V, u64>,
+fn expected<V: std::hash::Hash + Eq, S: std::hash::BuildHasher>(
+    old_counts: &HashMap<V, u64, S>,
+    new_counts: &HashMap<V, u64, S>,
 ) -> u128 {
     old_counts
         .iter()
@@ -792,12 +878,13 @@ mod tests {
             key: vec!["id".into()],
             ..DiffOptions::default()
         };
-        let key = resolve_key(&old, &new, &options).unwrap();
+        let mut key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
+        // Force every key digest alike, so nothing but the tie-break chooses,
+        // and the tie-break is position in the matching — old-row order.
+        key.old = key.old.clone().rehashed(|_: &[CanonicalValue]| 0);
 
-        // Every key digests alike, so nothing but the tie-break chooses, and
-        // the tie-break is position in the matching — old-row order.
-        let sample = RowSample::with_hash(&key, &rows, 2, |_: &[CanonicalValue]| 0);
+        let sample = RowSample::select(&key, &rows, 2);
 
         assert_eq!(sample.0, Some(vec![0, 1]));
     }
@@ -816,10 +903,12 @@ mod tests {
             key: vec!["id".into()],
             ..DiffOptions::default()
         };
-        let key = resolve_key(&old, &new, &options).unwrap();
+        let mut key = resolve_key(&old, &new, &options).unwrap();
         let rows = match_rows(&key);
-        // Force the sample onto the two agreeing rows.
-        let sample = RowSample::with_hash(&key, &rows, 2, |_: &[CanonicalValue]| 0);
+        // Force every digest alike so the tie-break selects the first two
+        // matched pairs, which are the two agreeing rows.
+        key.old = key.old.clone().rehashed(|_: &[CanonicalValue]| 0);
+        let sample = RowSample::select(&key, &rows, 2);
         let plan =
             ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
         let mut values = Aligned::new(&old, &new, &rows, &sample);
@@ -836,5 +925,134 @@ mod tests {
         assert_eq!(sampled.agreeing, 2);
         assert_eq!(full.rows, 4);
         assert_eq!(full.agreeing, 2);
+    }
+
+    #[test]
+    fn a_sampled_measurement_builds_no_full_projection() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 99, 98],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+        let sample = RowSample::select(&key, &rows, 2);
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+
+        values
+            .measure_sampled(&mut Meter::unlimited(), plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+
+        // The sampled question was answered from sample-sized pieces alone:
+        // no full projection, digest, or counts map exists for either side.
+        for side in [crate::Side::Old, crate::Side::New] {
+            let entry = &values.cache[&(side, 1, plan)];
+            assert_eq!(
+                entry.sampled.as_ref().map(Vec::len),
+                Some(2),
+                "the sampled piece is built, at sample size"
+            );
+            assert!(entry.full.is_none());
+            assert!(entry.digest.is_none());
+            assert!(entry.counts.is_none());
+        }
+    }
+
+    #[test]
+    fn a_full_question_after_a_sampled_one_builds_and_agrees() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+        let sample = RowSample::select(&key, &rows, 2);
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::unlimited();
+
+        values
+            .measure_sampled(&mut meter, plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+        // The later full-row questions still answer over every matched row,
+        // and identical columns still digest and verify alike.
+        assert_eq!(
+            values.digest(plan, crate::Side::Old, 1),
+            values.digest(plan, crate::Side::New, 1)
+        );
+        assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
+        let full = values
+            .measure_full(&mut meter, plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+        assert_eq!(full.rows, 4);
+        assert_eq!(full.agreeing, 4);
+    }
+
+    /// The sampled projection canonicalizes only the taken rows, so it must
+    /// equal the same positions of the full projection even under a plan that
+    /// parses values — canonicalization is value-wise, which this pins.
+    #[test]
+    fn taken_and_projected_sampled_values_agree_under_a_parsing_plan() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => ["1.0", "2e0", "x", "4"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [1, 2, 3, 4],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+        let sample = RowSample::select(&key, &rows, 2);
+        let positions = sample.0.clone().expect("four rows exceed a cap of two");
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+
+        // One Aligned answers the sampled question first (take, then
+        // canonicalize); the other builds the full projection first, making
+        // the sampled piece a subset of it. Both must hold the same values.
+        let mut taken = Aligned::new(&old, &new, &rows, &sample);
+        taken
+            .measure_sampled(&mut Meter::unlimited(), plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+        let mut projected = Aligned::new(&old, &new, &rows, &sample);
+        projected.digest(plan, crate::Side::Old, 1);
+        projected
+            .measure_sampled(&mut Meter::unlimited(), plan, 1, 1)
+            .expect("an unlimited meter funds every measurement");
+
+        let from_take = taken.cache[&(crate::Side::Old, 1, plan)]
+            .sampled
+            .clone()
+            .expect("measured above");
+        let entry = &projected.cache[&(crate::Side::Old, 1, plan)];
+        let from_full = entry.sampled.clone().expect("measured above");
+        let full = entry.full.clone().expect("digest built the projection");
+        assert_eq!(from_take, from_full);
+        for (at, &position) in positions.iter().enumerate() {
+            assert_eq!(from_take[at], full[position]);
+        }
     }
 }

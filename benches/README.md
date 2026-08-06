@@ -21,11 +21,26 @@ Every scenario runs over rows {1 000, 100 000, 1 000 000} by columns {10, 100, 1
 
 The rule is measured rather than felt, and it is written in ratios against the same machine's own runs so it does not depend on the hardware: with the default budgets, at every grid point, each bounded stage must complete within twice the same-sized `identical` run — read the stage's cost as the scenario's time minus `identical`'s at that size — and the non-adversarial scenarios must report nothing in `Diff::incomplete`. When a constant changes, re-run the grid (or at least the previously binding points) and check both halves.
 
-Two readings to keep straight when a ratio looks bad. First, a fixed budget binds hardest at the grid's small end, where a pair examination — up to a sample's worth of rows — can rival the whole linear pass; that is why the pair budgets sit at 2048, one halving below the 4096-row sample, after the 20 000 starting points failed the rule at 1000×100 (2026-08-04). Second, `full_rewrite`'s overage is not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut.
+Three readings to keep straight when a ratio looks bad. First, a fixed budget binds hardest at the grid's small end, where a pair examination — up to a sample's worth of rows — can rival the whole linear pass; that is why the pair budgets sit at 2048, one halving below the 4096-row sample, after the 20 000 starting points failed the rule at 1000×100 (2026-08-04). Second, `full_rewrite`'s overage — and `swapped`'s, whose cells likewise all change — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Third, the constant-factor step (2026-08-05) cut the `identical` floor 9–14× while the adversaries fell 2–4×, so several ratios now read above the bar even though every point got absolutely faster; the profiles behind the 2026-08-05 table attribute those overages to budgeted work priced in rows — `renamed_constant`'s residue is ~100 full-row verifications at 100k×10, far under the 2048-pair budget, but a verification unit costs a column pass while the bar shrank to about twenty — and to the retained cell assembly above, not to any search that grew. Re-tuning the constants against the lean floor (or re-expressing the pair budgets in row-touch units, so budget and bar scale together) changes which inferences run on real tables, which the constant-factor step's byte-identical charter forbade; it is queued in `plan-next.md` as its own step, and until it lands the 2026-08-04 constants stand.
 
-## Baseline (2026-08-04, Apple Silicon, tuned defaults)
+## Baseline (2026-08-05, Apple Silicon, tuned defaults, after the constant-factor step)
 
-Ratios of scenario time to `identical` at the same size, from the tuning run for the bounded-reconciliation step's default budgets; `identical` absolute times on the second row. Points re-measured after the pair budgets moved to 2048 are marked †; the untouched points are from the 20 000-unit run and only overstate today's ratios.
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row.
+
+| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
+|---|---|---|---|---|---|---|
+| `identical` | 0.85 ms | 7.6 ms | 76 ms | 29 ms | 138 ms | 437 ms |
+| `renamed_distinct` | 1.14× | 1.19× | 1.24× | 3.52× | 7.91× | 3.44× |
+| `renamed_constant` | 1.02× | 1.03× | 0.67× | 3.30× | 5.80× | 2.30× |
+| `rename_and_modify` | 1.78× | 2.67× | 1.26× | 2.92× | 5.74× | 1.84× |
+| `swapped` | 1.23× | 3.41× | 2.16× | 1.33× | 9.69× | 0.97× |
+| `full_rewrite` | 1.87× | 3.31× | 2.19× | 4.36× | 9.78× | 3.19× |
+
+`renamed_distinct`'s rise is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — now visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule's second half requires.
+
+## Prior baseline (2026-08-04, Apple Silicon, tuned defaults)
+
+The tuning run for the bounded-reconciliation step's default budgets, kept for comparison; every 2026-08-05 point is absolutely faster. Points re-measured after the pair budgets moved to 2048 are marked †; the untouched points are from the 20 000-unit run and only overstate that day's ratios.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -45,4 +60,4 @@ cargo build --release --example <name>
 ./target/release/examples/<name> & sample $! 10 -file profile.txt
 ```
 
-The "Sort by top of stack" section at the end of `profile.txt` is usually enough. The 2026-08-04 profile of `identical/1000000x10` is recorded in `plan-next.md`'s constant-factor item: roughly 40% allocator traffic and 30% eager projection work, with the necessary linear passes a small minority.
+The "Sort by top of stack" section at the end of `profile.txt` is usually enough. The 2026-08-05 profiles that drove the constant-factor step are recorded in that step's `plan.md`: before it, roughly 57% of an identical million-row run was eager projection work behind sampled questions and ~25% was SipHash, with the necessary linear passes a small minority; after it, the top of the profile is those linear passes — key indexing, canonicalization, cell comparison, and the ordering LCS.

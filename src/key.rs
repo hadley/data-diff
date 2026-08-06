@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
+use crate::maps::DigestMap;
 use crate::schema::ColumnMap;
 use crate::{
     DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject,
@@ -13,8 +14,8 @@ use arrow_schema::Schema;
 pub(crate) struct ResolvedKey {
     pub basis: KeyBasis,
     pub columns: Vec<KeyColumn>,
-    pub old: Vec<Vec<CanonicalValue>>,
-    pub new: Vec<Vec<CanonicalValue>>,
+    pub old: KeyValues,
+    pub new: KeyValues,
     pub overlap: Option<KeyOverlap>,
     pub rejection: Option<KeyRejection>,
 }
@@ -25,56 +26,171 @@ pub(crate) struct KeyColumn {
     pub new: usize,
 }
 
+/// One side's key tuples: a flat width-strided store with each row's digest
+/// computed once at construction.
+///
+/// Row `i` is `values[i * width .. (i + 1) * width]`. The digests are the
+/// same `sequence_hash` every consumer used to recompute — index bucketing,
+/// row matching, and sample selection now all read them from here, so each
+/// tuple is hashed exactly once per side per pass. Storing rows flat rather
+/// than as one heap `Vec` each is the other half of the same bill.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct KeyValues {
+    width: usize,
+    values: Vec<CanonicalValue>,
+    digests: Vec<u128>,
+}
+
+impl KeyValues {
+    fn new(width: usize, values: Vec<CanonicalValue>) -> Self {
+        Self::with_hash(width, values, sequence_hash)
+    }
+
+    /// The hash is injectable so a test can force every digest to collide,
+    /// which is the only way to reach the equality confirmations and
+    /// tie-breaks behind the digests.
+    pub(crate) fn with_hash(
+        width: usize,
+        values: Vec<CanonicalValue>,
+        hash: fn(&[CanonicalValue]) -> u128,
+    ) -> Self {
+        assert!(width > 0, "a key has at least one component");
+        let digests = values.chunks_exact(width).map(hash).collect();
+        Self {
+            width,
+            values,
+            digests,
+        }
+    }
+
+    /// Interleave per-component columns into rows. The single-component key —
+    /// the common case — moves its column in whole instead of cloning it
+    /// value by value.
+    fn from_columns(mut columns: Vec<Vec<CanonicalValue>>, rows: usize) -> Self {
+        let width = columns.len();
+        if width == 1 {
+            return Self::new(1, columns.pop().expect("width is one"));
+        }
+        let mut values = Vec::with_capacity(rows * width);
+        for row in 0..rows {
+            values.extend(columns.iter().map(|column| column[row].clone()));
+        }
+        Self::new(width, values)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.digests.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.digests.is_empty()
+    }
+
+    pub(crate) fn row(&self, row: usize) -> &[CanonicalValue] {
+        &self.values[row * self.width..(row + 1) * self.width]
+    }
+
+    pub(crate) fn digest(&self, row: usize) -> u128 {
+        self.digests[row]
+    }
+
+    /// The rows as owned tuples, for asserting against literal expectations.
+    #[cfg(test)]
+    pub(crate) fn tuples(&self) -> Vec<Vec<CanonicalValue>> {
+        self.values
+            .chunks_exact(self.width)
+            .map(<[CanonicalValue]>::to_vec)
+            .collect()
+    }
+
+    /// The same rows under a different digest, for tests that force
+    /// collisions after resolution built the real thing.
+    #[cfg(test)]
+    pub(crate) fn rehashed(mut self, hash: fn(&[CanonicalValue]) -> u128) -> Self {
+        self.digests = self.values.chunks_exact(self.width).map(hash).collect();
+        self
+    }
+}
+
 /// The share of common key values a declared key may duplicate in `new` and
 /// still be read as fanout rather than as a broken key.
 ///
 /// `RejectionReason::ExcessiveFanout` carries the counts it was measured from.
 pub(crate) const MAX_FANOUT_PERCENT: usize = 10;
 
-/// Rows grouped by key hash, with equality confirmed on lookup.
+/// Rows grouped by key digest, with equality confirmed on lookup.
 ///
 /// A bucket can hold rows with different keys, so a collision must never decide
 /// membership; confirming equality inside the bucket is what key validation and
 /// row matching both need, and sharing it keeps that reasoning in one place.
+///
+/// The digests come precomputed from [`KeyValues`], so building the index and
+/// looking rows up never hashes a tuple. Buckets share two flat vectors rather
+/// than owning a `Vec` each: a unique key — most keys — costs no dedicated
+/// heap allocation.
 pub(crate) struct KeyIndex<'a> {
-    keys: &'a [Vec<CanonicalValue>],
-    buckets: HashMap<u128, Vec<usize>>,
-    hash: fn(&[CanonicalValue]) -> u128,
+    keys: &'a KeyValues,
+    /// Digest to bucket id, ids assigned in first-occurrence order.
+    buckets: DigestMap<usize>,
+    /// Bucket id to its range in `rows`; one final entry closes the last.
+    offsets: Vec<usize>,
+    /// Row indices grouped by bucket, ascending within each bucket.
+    rows: Vec<usize>,
 }
 
 impl<'a> KeyIndex<'a> {
-    pub(crate) fn new(keys: &'a [Vec<CanonicalValue>]) -> Self {
-        Self::with_hash(keys, sequence_hash)
-    }
-
-    /// The bucketing is parameterized by its hash so a test can force every key
-    /// into one bucket, which is the only way to reach the confirmation step.
-    fn with_hash(keys: &'a [Vec<CanonicalValue>], hash: fn(&[CanonicalValue]) -> u128) -> Self {
-        let mut buckets = HashMap::<u128, Vec<usize>>::new();
-        for (row, key) in keys.iter().enumerate() {
-            buckets.entry(hash(key)).or_default().push(row);
+    pub(crate) fn new(keys: &'a KeyValues) -> Self {
+        let mut buckets = DigestMap::default();
+        let mut counts: Vec<usize> = Vec::new();
+        for row in 0..keys.len() {
+            let next = counts.len();
+            let id = *buckets.entry(keys.digest(row)).or_insert(next);
+            if id == next {
+                counts.push(0);
+            }
+            counts[id] += 1;
+        }
+        let mut offsets = Vec::with_capacity(counts.len() + 1);
+        let mut total = 0;
+        offsets.push(0);
+        for count in &counts {
+            total += count;
+            offsets.push(total);
+        }
+        // Reuse the counts as per-bucket write cursors; visiting rows in
+        // ascending order keeps every bucket ascending.
+        let mut cursors: Vec<usize> = offsets[..counts.len()].to_vec();
+        let mut rows = vec![0; keys.len()];
+        for row in 0..keys.len() {
+            let id = buckets[&keys.digest(row)];
+            rows[cursors[id]] = row;
+            cursors[id] += 1;
         }
         Self {
             keys,
             buckets,
-            hash,
+            offsets,
+            rows,
         }
     }
 
     /// The rows whose key equals `key`, in ascending row order.
     ///
-    /// Buckets are filled in row order and filtered rather than sorted, so the
-    /// result never depends on hash iteration order.
+    /// The digest accompanies the key rather than being recomputed here; it
+    /// only chooses the bucket, and the equality filter decides membership, so
+    /// a collision cannot manufacture a match.
     pub(crate) fn rows<'b>(
         &'b self,
         key: &'b [CanonicalValue],
+        digest: u128,
     ) -> impl Iterator<Item = usize> + 'b {
         self.buckets
-            .get(&(self.hash)(key))
+            .get(&digest)
             .into_iter()
-            .flatten()
+            .flat_map(move |&id| self.rows[self.offsets[id]..self.offsets[id + 1]].iter())
             .copied()
-            .filter(move |&row| self.keys[row] == key)
+            .filter(move |&row| self.keys.row(row) == key)
     }
 }
 
@@ -112,10 +228,13 @@ pub(crate) fn resolve_key(
 /// across sides exactly when the positions are equal — so positional matching
 /// is the ordinary algorithm over these values rather than a path beside it.
 pub(crate) fn positional_key(old: &RecordBatch, new: &RecordBatch, basis: KeyBasis) -> ResolvedKey {
-    fn positions(rows: usize) -> Vec<Vec<CanonicalValue>> {
-        (0..rows)
-            .map(|row| vec![CanonicalValue::Int(row as i64)])
-            .collect()
+    fn positions(rows: usize) -> KeyValues {
+        KeyValues::new(
+            1,
+            (0..rows)
+                .map(|row| CanonicalValue::Int(row as i64))
+                .collect(),
+        )
     }
 
     ResolvedKey {
@@ -172,8 +291,8 @@ fn declared_key(
     // through that identity, which the name check cannot see.
     validate_distinct(&columns, components)?;
 
-    let old_keys = transpose(old.num_rows(), &old_components);
-    let new_keys = transpose(new.num_rows(), &new_components);
+    let old_keys = KeyValues::from_columns(old_components, old.num_rows());
+    let new_keys = KeyValues::from_columns(new_components, new.num_rows());
     validate_present(&old_keys, components, Side::Old)?;
     validate_present(&new_keys, components, Side::New)?;
     // Uniqueness and fanout are properties of the tuple rather than of any one
@@ -434,8 +553,8 @@ pub(crate) fn guess_key(
     })
 }
 
-fn single_component_rows(values: Vec<CanonicalValue>) -> Vec<Vec<CanonicalValue>> {
-    values.into_iter().map(|value| vec![value]).collect()
+fn single_component_rows(values: Vec<CanonicalValue>) -> KeyValues {
+    KeyValues::new(1, values)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -499,8 +618,8 @@ fn candidate_overlap(
 fn buckets(
     values: &[CanonicalValue],
     hash: impl Fn(&CanonicalValue) -> u128,
-) -> HashMap<u128, Vec<usize>> {
-    let mut buckets = HashMap::<u128, Vec<usize>>::new();
+) -> DigestMap<Vec<usize>> {
+    let mut buckets = DigestMap::<Vec<usize>>::default();
     for (row, value) in values.iter().enumerate() {
         buckets.entry(hash(value)).or_default().push(row);
     }
@@ -515,7 +634,7 @@ fn buckets(
 /// earlier row in its bucket holds an equal value.
 fn first_occurrences<'a>(
     values: &'a [CanonicalValue],
-    buckets: &'a HashMap<u128, Vec<usize>>,
+    buckets: &'a DigestMap<Vec<usize>>,
     hash: &'a impl Fn(&CanonicalValue) -> u128,
 ) -> impl Iterator<Item = usize> + 'a {
     values.iter().enumerate().filter_map(move |(row, value)| {
@@ -642,19 +761,13 @@ pub(crate) fn declared_components(keys: &[String]) -> Result<Declared, DiffError
     })
 }
 
-fn transpose(rows: usize, columns: &[Vec<CanonicalValue>]) -> Vec<Vec<CanonicalValue>> {
-    (0..rows)
-        .map(|row| columns.iter().map(|column| column[row].clone()).collect())
-        .collect()
-}
-
 fn validate_present(
-    keys: &[Vec<CanonicalValue>],
+    keys: &KeyValues,
     components: &[Component],
     side: Side,
 ) -> Result<(), KeyRejection> {
-    for (row, key) in keys.iter().enumerate() {
-        for (position, value) in key.iter().enumerate() {
+    for row in 0..keys.len() {
+        for (position, value) in keys.row(row).iter().enumerate() {
             if value.invalid_key() {
                 return Err(components[position]
                     .rejected(RejectionReason::InvalidValue { side, row: row + 1 }));
@@ -670,10 +783,13 @@ fn validate_present(
 /// aggregation, a deduplication, or an arbitrary pairing, so old-side
 /// duplication stays fatal. It is also what makes the fanout rate well defined,
 /// and is therefore checked first.
-fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), RejectionReason> {
+fn validate_unique_old(keys: &KeyValues) -> Result<(), RejectionReason> {
     let index = KeyIndex::new(keys);
-    for (row, key) in keys.iter().enumerate() {
-        let first = index.rows(key).next().expect("a row matches its own key");
+    for row in 0..keys.len() {
+        let first = index
+            .rows(keys.row(row), keys.digest(row))
+            .next()
+            .expect("a row matches its own key");
         if first != row {
             return Err(RejectionReason::NonUniqueOld {
                 first_row: first + 1,
@@ -693,14 +809,11 @@ fn validate_unique_old(keys: &[Vec<CanonicalValue>]) -> Result<(), RejectionReas
 /// fanout, so it contributes to neither count and cannot invalidate the key;
 /// with no shared keys at all both counts are zero, which is the design's
 /// convention that the rate is then zero.
-fn validate_fanout(
-    old_keys: &[Vec<CanonicalValue>],
-    new: &KeyIndex,
-) -> Result<(), RejectionReason> {
+fn validate_fanout(old_keys: &KeyValues, new: &KeyIndex) -> Result<(), RejectionReason> {
     let mut shared = 0;
     let mut affected = 0;
-    for key in old_keys {
-        match new.rows(key).count() {
+    for row in 0..old_keys.len() {
+        match new.rows(old_keys.row(row), old_keys.digest(row)).count() {
             0 => {}
             1 => shared += 1,
             _ => {
@@ -732,8 +845,8 @@ mod tests {
 
     use super::testing::{rejection, resolve_key};
     use super::{
-        KeyIndex, Overlap, candidate_overlap, declared_components, guess_key, validate_fanout,
-        validate_unique_old,
+        KeyIndex, KeyValues, Overlap, candidate_overlap, declared_components, guess_key,
+        validate_fanout, validate_unique_old,
     };
     #[cfg(test)]
     use crate::DiffOptions;
@@ -800,7 +913,7 @@ mod tests {
         assert!(key.columns.is_empty());
         assert_eq!(key.old.len(), 3);
         assert_eq!(key.new.len(), 2);
-        assert_eq!(key.old[..2], key.new[..]);
+        assert_eq!(key.old.tuples()[..2], key.new.tuples()[..]);
         assert!(key.rejection.is_none());
         assert!(validate_unique_old(&key.old).is_ok());
         assert!(validate_fanout(&key.old, &KeyIndex::new(&key.new)).is_ok());
@@ -1348,11 +1461,11 @@ mod tests {
 
         assert_eq!(key.basis, KeyBasis::Guessed);
         assert_eq!(
-            key.old,
+            key.old.tuples(),
             vec![vec![CanonicalValue::Int(1)], vec![CanonicalValue::Int(2)]]
         );
         assert_eq!(
-            key.new,
+            key.new.tuples(),
             vec![vec![CanonicalValue::Int(2)], vec![CanonicalValue::Int(3)]]
         );
         assert_eq!(
@@ -1534,19 +1647,48 @@ mod tests {
     }
 
     #[test]
-    fn a_key_index_confirms_equality_within_a_bucket() {
-        let keys = vec![
-            vec![CanonicalValue::Int(1)],
-            vec![CanonicalValue::Int(2)],
-            vec![CanonicalValue::Int(1)],
-        ];
-        let index = KeyIndex::with_hash(&keys, |_| 0);
+    fn key_values_interleave_components_into_rows() {
+        let keys = KeyValues::from_columns(
+            vec![
+                vec![CanonicalValue::Int(1), CanonicalValue::Int(2)],
+                vec![CanonicalValue::Int(10), CanonicalValue::Int(20)],
+            ],
+            2,
+        );
 
-        // Every key shares one bucket, so only the confirmation step can
-        // separate them, and the rows stay in ascending order.
-        assert_eq!(index.rows(&keys[0]).collect::<Vec<_>>(), [0, 2]);
-        assert_eq!(index.rows(&keys[1]).collect::<Vec<_>>(), [1]);
-        assert!(index.rows(&[CanonicalValue::Int(3)]).next().is_none());
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys.row(0),
+            [CanonicalValue::Int(1), CanonicalValue::Int(10)]
+        );
+        assert_eq!(
+            keys.row(1),
+            [CanonicalValue::Int(2), CanonicalValue::Int(20)]
+        );
+        // The stored digest is the same sequence hash any consumer would have
+        // computed from the tuple.
+        assert_eq!(keys.digest(0), super::sequence_hash(keys.row(0)));
+        assert_ne!(keys.digest(0), keys.digest(1));
+    }
+
+    #[test]
+    fn a_key_index_confirms_equality_within_a_bucket() {
+        let keys = KeyValues::with_hash(
+            1,
+            vec![
+                CanonicalValue::Int(1),
+                CanonicalValue::Int(2),
+                CanonicalValue::Int(1),
+            ],
+            |_| 0,
+        );
+        let index = KeyIndex::new(&keys);
+
+        // Every key digests alike, so only the confirmation step can separate
+        // them, and the rows stay in ascending order.
+        assert_eq!(index.rows(keys.row(0), 0).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(index.rows(keys.row(1), 0).collect::<Vec<_>>(), [1]);
+        assert!(index.rows(&[CanonicalValue::Int(3)], 0).next().is_none());
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::maps::DigestMap;
+
 use arrow_array::RecordBatch;
 use arrow_schema::DataType;
 
@@ -233,7 +235,7 @@ struct DigestJoin {
     /// Distinct added data types, each with its `(position, column)` pairs in
     /// add order: the position indexes the added list, the column the table.
     groups: Vec<(DataType, Vec<(usize, usize)>)>,
-    buckets: HashMap<ComparisonPlan, HashMap<u128, Vec<usize>>>,
+    buckets: HashMap<ComparisonPlan, DigestMap<Vec<usize>>>,
     folded: HashSet<(ComparisonPlan, usize)>,
 }
 

@@ -8,7 +8,7 @@ use arrow_buffer::i256;
 use arrow_cast::cast;
 use arrow_row::{RowConverter, SortField};
 use arrow_schema::{DataType, TimeUnit};
-use xxhash_rust::xxh3::xxh3_128_with_seed;
+use xxhash_rust::xxh3::{Xxh3 as Xxh3State, xxh3_128_with_seed};
 
 /// Whether a timestamp type carries a timezone.
 ///
@@ -882,20 +882,86 @@ fn parse_exponent(bytes: &[u8]) -> Option<i64> {
     }
 }
 
+/// The buffered reference the streaming production path is tested against;
+/// injectable so a collision can be forced, which only tests do.
+#[cfg(test)]
 pub(crate) trait StableHasher {
     fn hash(&self, bytes: &[u8]) -> u128;
 }
 
+#[cfg(test)]
 pub(crate) struct Xxh3;
 
+#[cfg(test)]
 impl StableHasher for Xxh3 {
     fn hash(&self, bytes: &[u8]) -> u128 {
         xxh3_128_with_seed(bytes, 0)
     }
 }
 
+/// Where encoded bytes go. One `encode_value` serves every consumer — the
+/// production hash streams, the injectable [`StableHasher`] path buffers — so
+/// no two spellings of the encoding can drift apart.
+trait Sink {
+    fn write(&mut self, bytes: &[u8]);
+}
+
+impl Sink for Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+impl Sink for Xxh3State {
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
+/// Encodings at most this long are hashed in one shot from the stack; only
+/// longer ones pay for streaming state. Every fixed-size variant fits — the
+/// largest is `Rational` at 41 bytes — so the split is really short strings
+/// against long ones.
+const INLINE: usize = 256;
+
+/// A stack buffer for the one-shot path. Callers check [`encoded_len`] first;
+/// the slice indexing turns a miscounted write into a panic rather than a
+/// truncated hash.
+struct Inline {
+    buf: [u8; INLINE],
+    len: usize,
+}
+
+impl Inline {
+    fn new() -> Self {
+        Self {
+            buf: [0; INLINE],
+            len: 0,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl Sink for Inline {
+    fn write(&mut self, bytes: &[u8]) {
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+}
+
 pub(crate) fn stable_hash(value: &CanonicalValue) -> u128 {
-    hash_with(value, &Xxh3)
+    if encoded_len(value) <= INLINE {
+        let mut inline = Inline::new();
+        encode_value(value, &mut inline);
+        xxh3_128_with_seed(inline.bytes(), 0)
+    } else {
+        let mut state = Xxh3State::with_seed(0);
+        encode_value(value, &mut state);
+        state.digest128()
+    }
 }
 
 /// Hash an ordered sequence of values.
@@ -905,53 +971,79 @@ pub(crate) fn stable_hash(value: &CanonicalValue) -> u128 {
 /// hashing them the same way keeps row identity and column identity on one
 /// definition of equality.
 pub(crate) fn sequence_hash(values: &[CanonicalValue]) -> u128 {
-    let mut bytes = Vec::with_capacity(8 + values.len() * 24);
-    bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    // The frame is 8 bytes of length plus 24 per value.
+    if values.len() <= (INLINE - 8) / 24 {
+        let mut inline = Inline::new();
+        encode_sequence(values, &mut inline);
+        xxh3_128_with_seed(inline.bytes(), 0)
+    } else {
+        let mut state = Xxh3State::with_seed(0);
+        encode_sequence(values, &mut state);
+        state.digest128()
+    }
+}
+
+fn encode_sequence(values: &[CanonicalValue], sink: &mut impl Sink) {
+    sink.write(&(values.len() as u64).to_le_bytes());
     for value in values {
         let hash = stable_hash(value).to_le_bytes();
-        bytes.extend_from_slice(&(hash.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&hash);
+        sink.write(&(hash.len() as u64).to_le_bytes());
+        sink.write(&hash);
     }
-    xxh3_128_with_seed(&bytes, 0)
 }
 
-fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
-    let mut bytes = Vec::new();
+fn encoded_len(value: &CanonicalValue) -> usize {
     match value {
-        CanonicalValue::Null => bytes.push(0),
-        CanonicalValue::Boolean(value) => {
-            bytes.push(1);
-            bytes.push(u8::from(*value));
-        }
+        CanonicalValue::Null => 1,
+        CanonicalValue::Boolean(_) => 2,
+        CanonicalValue::Int(_) | CanonicalValue::Double(_) => 9,
+        CanonicalValue::Nanos(_) => 17,
+        CanonicalValue::Rational(_) => 41,
+        CanonicalValue::String(value)
+        | CanonicalValue::UnparsedString(value)
+        | CanonicalValue::Opaque(value) => 9 + value.len(),
+    }
+}
+
+fn encode_value(value: &CanonicalValue, sink: &mut impl Sink) {
+    match value {
+        CanonicalValue::Null => sink.write(&[0]),
+        CanonicalValue::Boolean(value) => sink.write(&[1, u8::from(*value)]),
         CanonicalValue::Int(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[2]);
+            sink.write(&value.to_le_bytes());
         }
         CanonicalValue::Double(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[3]);
+            sink.write(&value.to_le_bytes());
         }
-        CanonicalValue::String(value) => encode_bytes(4, value, &mut bytes),
-        CanonicalValue::UnparsedString(value) => encode_bytes(5, value, &mut bytes),
-        CanonicalValue::Opaque(value) => encode_bytes(6, value, &mut bytes),
+        CanonicalValue::String(value) => encode_bytes(4, value, sink),
+        CanonicalValue::UnparsedString(value) => encode_bytes(5, value, sink),
+        CanonicalValue::Opaque(value) => encode_bytes(6, value, sink),
         CanonicalValue::Nanos(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_le_bytes());
+            sink.write(&[7]);
+            sink.write(&value.to_le_bytes());
         }
         CanonicalValue::Rational(value) => {
-            bytes.push(8);
-            bytes.extend_from_slice(&value.mantissa);
-            bytes.extend_from_slice(&value.exp2.to_le_bytes());
-            bytes.extend_from_slice(&value.exp5.to_le_bytes());
+            sink.write(&[8]);
+            sink.write(&value.mantissa);
+            sink.write(&value.exp2.to_le_bytes());
+            sink.write(&value.exp5.to_le_bytes());
         }
     }
-    hasher.hash(&bytes)
 }
 
-fn encode_bytes(tag: u8, value: &[u8], output: &mut Vec<u8>) {
-    output.push(tag);
-    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    output.extend_from_slice(value);
+fn encode_bytes(tag: u8, value: &[u8], sink: &mut impl Sink) {
+    sink.write(&[tag]);
+    sink.write(&(value.len() as u64).to_le_bytes());
+    sink.write(value);
+}
+
+#[cfg(test)]
+fn hash_with(value: &CanonicalValue, hasher: &impl StableHasher) -> u128 {
+    let mut bytes = Vec::new();
+    encode_value(value, &mut bytes);
+    hasher.hash(&bytes)
 }
 
 #[cfg(test)]
@@ -970,7 +1062,8 @@ mod tests {
     use test_support::column;
 
     use super::{
-        CanonicalValue, ComparisonPlan, StableHasher, equal_after_hash, parse_exact_i64,
+        CanonicalValue, ComparisonPlan, INLINE, StableHasher, Xxh3, encode_sequence,
+        equal_after_hash, hash_with, parse_exact_i64, rational_of_double, sequence_hash,
         stable_hash,
     };
 
@@ -1624,6 +1717,98 @@ mod tests {
         let (old, new) = values(column!(["1.0"]), column!([1]));
         assert_eq!(old, new);
         assert_eq!(stable_hash(&old[0]), stable_hash(&new[0]));
+    }
+
+    /// The digests row sampling selects by, pinned as literals (captured
+    /// 2026-08-05). These are load-bearing values, not an implementation
+    /// detail: the bottom-k key digests choose which rows sampled inference
+    /// measures, so a changed digest silently changes output on large tables.
+    /// A failure here means the encoding or the hash moved, and the sampled
+    /// baselines moved with it.
+    #[test]
+    fn stable_hash_digests_are_pinned() {
+        let cases: [(CanonicalValue, u128); 10] = [
+            (CanonicalValue::Null, 0xa6cd5e9392000f6ac44bdff4074eecdb),
+            (
+                CanonicalValue::Boolean(true),
+                0x50e58cbd6ada00a1070d80d6a76865f3,
+            ),
+            (CanonicalValue::Int(42), 0x932241402dd83e6bf37f9a8d5d376ff9),
+            (
+                CanonicalValue::Double(1.5f64.to_bits()),
+                0x2d0719929098c2ee4848f1440928d509,
+            ),
+            (
+                CanonicalValue::String(b"hello".to_vec()),
+                0x09883e13ee49e90df19b452684f6edfb,
+            ),
+            (
+                CanonicalValue::UnparsedString(b"1.5x".to_vec()),
+                0x7636d752bb08d959706440445ccac165,
+            ),
+            (
+                CanonicalValue::Nanos(1_000_000_000),
+                0xd63c4f3c54038e1149f0d2ea94e0c878,
+            ),
+            (
+                CanonicalValue::Opaque(vec![1, 2, 3]),
+                0x3ec6974d8d3d978aed59221690025f10,
+            ),
+            (
+                CanonicalValue::String(vec![b'x'; 1024]),
+                0x7f6465c271757c6e2af2181384d2c8a2,
+            ),
+            (
+                CanonicalValue::Rational(rational_of_double(0.1).expect("0.1 is finite")),
+                0x58510aaaf0e60291cfe04dd9ad61e405,
+            ),
+        ];
+        for (value, digest) in &cases {
+            assert_eq!(stable_hash(value), *digest, "digest moved for {value:?}");
+        }
+    }
+
+    /// Sequence digests pinned the same way (captured 2026-08-05): key tuples
+    /// and column digests both come from `sequence_hash`.
+    #[test]
+    fn sequence_hash_digests_are_pinned() {
+        assert_eq!(sequence_hash(&[]), 0x2c0a8a99dc147d5445c3b49d035665b2);
+        assert_eq!(
+            sequence_hash(&[
+                CanonicalValue::Int(1),
+                CanonicalValue::String(b"a".to_vec()),
+            ]),
+            0x9d030fe3a00f96cab4d0c049492c1de1
+        );
+        let column: Vec<CanonicalValue> = (0..1000).map(CanonicalValue::Int).collect();
+        assert_eq!(sequence_hash(&column), 0x6defbb4dd2223299d3628af6c544ba61);
+    }
+
+    /// The one-shot stack path and the streaming path must agree with the
+    /// buffered encoding either side of the `INLINE` boundary, where a string
+    /// payload of `INLINE - 9` bytes is the last one-shot value.
+    #[test]
+    fn inline_and_streaming_paths_agree_with_the_buffered_encoding() {
+        for len in [0, 5, INLINE - 10, INLINE - 9, INLINE - 8, 1024, 4096] {
+            let value = CanonicalValue::String(vec![b'x'; len]);
+            assert_eq!(
+                stable_hash(&value),
+                hash_with(&value, &Xxh3),
+                "paths disagree at payload length {len}"
+            );
+        }
+        // Sequences cross their own boundary at (INLINE - 8) / 24 values.
+        let boundary = (INLINE - 8) / 24;
+        for len in [0, 1, boundary, boundary + 1, 100] {
+            let values: Vec<CanonicalValue> = (0..len as i64).map(CanonicalValue::Int).collect();
+            let mut frame = Vec::new();
+            encode_sequence(&values, &mut frame);
+            assert_eq!(
+                sequence_hash(&values),
+                Xxh3.hash(&frame),
+                "sequence paths disagree at {len} values"
+            );
+        }
     }
 
     #[test]
