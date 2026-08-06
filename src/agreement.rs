@@ -13,7 +13,8 @@ use arrow_select::take::take;
 
 use crate::Side;
 use crate::compare::{
-    CanonicalValue, ComparisonPlan, NativeHasher, sequence_hash, sequence_hash_of,
+    CanonicalValue, ComparisonPlan, NativeEq, NativeHasher, native_agreement, sequence_hash,
+    sequence_hash_of,
 };
 use crate::key::ResolvedKey;
 use crate::maps::FastMap;
@@ -242,13 +243,24 @@ pub(crate) struct Aligned<'a> {
     rows: &'a RowMatches,
     sample: &'a RowSample,
     digest: fn(&[CanonicalValue]) -> u128,
-    /// Whether digests may stream natively off the arrow columns. True under
-    /// the default digest and false under an injected one, whose forced
-    /// collisions the native path could not reproduce.
-    native_digest: bool,
+    /// Whether digests, verifications, and full-row measurements may run
+    /// natively off the arrow columns. True under the default digest and
+    /// false under an injected one, whose forced collisions the native paths
+    /// could not reproduce — so every forced-collision test still drives the
+    /// materialized machinery it was written to reach.
+    native: bool,
     cache: HashMap<(Side, usize, ComparisonPlan), Projection>,
     verified: HashMap<(usize, usize, ComparisonPlan), bool>,
     measured: HashMap<(Over, usize, usize, ComparisonPlan), Agreement>,
+    /// Full-row questions asked per column, deciding native against
+    /// materialized: the native pass wins when a column is asked once or
+    /// twice — a diagonal claim is exactly a verification plus an
+    /// informativeness measurement — while a column many pairs keep asking
+    /// about amortizes better through one materialization, whose projection
+    /// and counts every later question reuses. The counter advances in the
+    /// deterministic examination order, so the choice is a pure function of
+    /// the input; both paths produce identical answers regardless.
+    full_questions: HashMap<(Side, usize, ComparisonPlan), u32>,
 }
 
 /// One column's projections, each piece built on first demand and kept.
@@ -278,7 +290,7 @@ impl<'a> Aligned<'a> {
         sample: &'a RowSample,
     ) -> Self {
         let mut aligned = Self::with_digest(old, new, rows, sample, sequence_hash);
-        aligned.native_digest = true;
+        aligned.native = true;
         aligned
     }
 
@@ -299,10 +311,11 @@ impl<'a> Aligned<'a> {
             rows,
             sample,
             digest,
-            native_digest: false,
+            native: false,
             cache: HashMap::new(),
             verified: HashMap::new(),
             measured: HashMap::new(),
+            full_questions: HashMap::new(),
         }
     }
 
@@ -342,15 +355,54 @@ impl<'a> Aligned<'a> {
         let old_digest = self.cache[&(Side::Old, old, plan)].digest;
         let new_digest = self.cache[&(Side::New, new, plan)].digest;
         // Differing digests are differing values, so only digest-equal pairs
-        // — where a collision could still hide a difference — materialize and
-        // compare the values themselves.
-        let equal = old_digest == new_digest && {
-            self.ensure_full(plan, Side::Old, old);
-            self.ensure_full(plan, Side::New, new);
-            self.cache[&(Side::Old, old, plan)].full == self.cache[&(Side::New, new, plan)].full
-        };
+        // — where a collision could still hide a difference — compare the
+        // values themselves: in place for an eligible same-type pair, over
+        // materialized projections for everything else.
+        let equal = old_digest == new_digest && self.values_equal(plan, old, new);
         self.verified.insert((old, new, plan), equal);
         Some(equal)
+    }
+
+    /// Whether the two columns hold equal values in every matched row, values
+    /// actually compared.
+    fn values_equal(&mut self, plan: ComparisonPlan, old: usize, new: usize) -> bool {
+        if self.native_worthwhile(plan, old, new)
+            && let Some(native) = NativeEq::under_plan(
+                self.old.column(old).as_ref(),
+                self.new.column(new).as_ref(),
+                plan,
+            )
+        {
+            return self
+                .rows
+                .matched
+                .iter()
+                .all(|&(old_row, new_row)| native.equal(old_row, new_row));
+        }
+        self.ensure_full(plan, Side::Old, old);
+        self.ensure_full(plan, Side::New, new);
+        self.cache[&(Side::Old, old, plan)].full == self.cache[&(Side::New, new, plan)].full
+    }
+
+    /// Whether a first-time full-row question about this pair should run
+    /// natively, advancing each column's question count as it decides.
+    fn native_worthwhile(&mut self, plan: ComparisonPlan, old: usize, new: usize) -> bool {
+        if !self.native {
+            return false;
+        }
+        let old_asked = self
+            .full_questions
+            .entry((Side::Old, old, plan))
+            .or_default();
+        let old_before = *old_asked;
+        *old_asked += 1;
+        let new_asked = self
+            .full_questions
+            .entry((Side::New, new, plan))
+            .or_default();
+        let new_before = *new_asked;
+        *new_asked += 1;
+        old_before < 2 && new_before < 2
     }
 
     /// Count what the two columns agree about over every matched row.
@@ -414,23 +466,43 @@ impl<'a> Aligned<'a> {
         }
         let agreement = match over {
             Over::Full => {
-                self.ensure_counts(plan, Side::Old, old);
-                self.ensure_counts(plan, Side::New, new);
-                let old_column = &self.cache[&(Side::Old, old, plan)];
-                let new_column = &self.cache[&(Side::New, new, plan)];
-                let old_values = old_column.full.as_deref().expect("counts built the values");
-                let new_values = new_column.full.as_deref().expect("counts built the values");
-                Agreement {
-                    rows: old_values.len() as u64,
-                    agreeing: old_values
-                        .iter()
-                        .zip(new_values)
-                        .filter(|(old, new)| old == new)
-                        .count() as u64,
-                    expected: expected(
-                        old_column.counts.as_ref().expect("ensured above"),
-                        new_column.counts.as_ref().expect("ensured above"),
-                    ),
+                // An eligible same-type pair measures in one native pass —
+                // the same counts the materialized path produces, because the
+                // per-type keys partition values exactly as canonical values
+                // do — and everything else materializes as before.
+                let native = self.native_worthwhile(plan, old, new).then(|| {
+                    native_agreement(
+                        self.old.column(old).as_ref(),
+                        self.new.column(new).as_ref(),
+                        plan,
+                        &self.rows.matched,
+                    )
+                });
+                if let Some(Some((rows, agreeing, expected))) = native {
+                    Agreement {
+                        rows,
+                        agreeing,
+                        expected,
+                    }
+                } else {
+                    self.ensure_counts(plan, Side::Old, old);
+                    self.ensure_counts(plan, Side::New, new);
+                    let old_column = &self.cache[&(Side::Old, old, plan)];
+                    let new_column = &self.cache[&(Side::New, new, plan)];
+                    let old_values = old_column.full.as_deref().expect("counts built the values");
+                    let new_values = new_column.full.as_deref().expect("counts built the values");
+                    Agreement {
+                        rows: old_values.len() as u64,
+                        agreeing: old_values
+                            .iter()
+                            .zip(new_values)
+                            .filter(|(old, new)| old == new)
+                            .count() as u64,
+                        expected: expected(
+                            old_column.counts.as_ref().expect("ensured above"),
+                            new_column.counts.as_ref().expect("ensured above"),
+                        ),
+                    }
                 }
             }
             Over::Sampled => {
@@ -551,7 +623,7 @@ impl<'a> Aligned<'a> {
         // values produce, by construction, without the `Vec<CanonicalValue>`.
         // A projection already in hand digests through it instead, and an
         // injected digest always materializes, its collisions being the point.
-        if entry.full.is_none() && self.native_digest {
+        if entry.full.is_none() && self.native {
             let column = match side {
                 Side::Old => self.old.column(index),
                 Side::New => self.new.column(index),
@@ -900,6 +972,45 @@ mod tests {
         assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
         assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
         assert_eq!(values.verify(&mut meter, plan, 1, 0), None);
+    }
+
+    /// The native paths and the materialized machinery — reached through the
+    /// injected digest, which disables them — must agree on verification
+    /// verdicts and on every `Agreement` field, equal and unequal pairs alike.
+    #[test]
+    fn native_and_materialized_paths_answer_alike() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => ["a", "b", "c", "d"],
+            "other" => ["a", "b", "x", "y"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => ["a", "b", "c", "d"],
+            "other" => ["a", "b", "c", "d"],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut native = Aligned::new(&old, &new, &rows, &sample);
+        // The real digest, injected: same digests, materialized paths.
+        let mut materialized =
+            Aligned::with_digest(&old, &new, &rows, &sample, crate::compare::sequence_hash);
+        let mut meter = Meter::unlimited();
+
+        for (old_index, new_index) in [(1, 1), (2, 2), (1, 2), (2, 1)] {
+            assert_eq!(
+                native.verify(&mut meter, plan, old_index, new_index),
+                materialized.verify(&mut meter, plan, old_index, new_index),
+                "verification verdicts diverged at ({old_index}, {new_index})"
+            );
+            assert_eq!(
+                native.measure_full(&mut meter, plan, old_index, new_index),
+                materialized.measure_full(&mut meter, plan, old_index, new_index),
+                "agreements diverged at ({old_index}, {new_index})"
+            );
+        }
     }
 
     #[test]

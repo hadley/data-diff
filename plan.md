@@ -1,82 +1,71 @@
 ---
-title: Same-type fast paths, gated on output identity
+title: Native verification and measurement for same-type pairs
 ---
 
 # Todo
 
-- [x] **Add the string-heavy generator scenarios.** `test-support` gains `identical_strings` — the same all-string table twice, distinct values shaped like the integer floor's — and `renamed_strings`, every string column renamed in place with distinct values, the digest join's string case. Both are non-adversarial, seeded and reproducible like the rest, and join the benchmark grid and `benches/README.md`'s scenario table. They exist because the integer grid understates what this step removes: every string value clones its bytes into `CanonicalValue`, and cell-comparison canonicalization measured only ~3% on integer fixtures (2026-08-05).
-- [x] **Take the string baseline before changing anything.** `cargo bench` over the two new scenarios plus a `sample` profile of `identical_strings` at 1M×10, recorded so the fast path's win is measured against evidence rather than assumed. The integer baseline is the 2026-08-06 table as it stands.
-- [x] **Build the native comparator for cleanly-arguable same-type pairs.** A `NativeEq` behind one constructor — `NativeEq::for_pair(old_column, new_column, plan)` returning `Option<Self>` — that answers `equal(old_row, new_row)` straight off the arrow arrays, with `None` falling back to the canonicalizing path. Eligible types, each with its equivalence argument written at the dispatch: booleans and every integer width (each maps bijectively into the canonical `i64`, `u64` by wrapping cast); `Utf8`/`LargeUtf8` against itself (string-vs-string keeps its bytes); `Float32`/`Float64` with the canonical normalization applied inline — NaN collapses to one bit pattern and both zeros to one — because raw bits would wrongly split `-0.0` from `0.0` and NaN payloads from each other; timestamps of identical unit and awareness and `Date32`/`Date64` against themselves (exact scaling is injective); decimals of identical precision and scale (a fixed scale makes mantissa equality value equality). Everything else falls back: dictionaries (logical-null and hydration subtleties), opaque columns (their canonical form *is* the comparison), and every cross-type or cross-unit pair. Null equals null and differs from every value, exactly as canonical `Null` does.
-- [x] **Use it in cell comparison.** `compare_cells` asks `NativeEq::for_pair` first and materializes two `Vec<CanonicalValue>` per column only on fallback; the matched-row loop and the fanout comparison consult the same comparator, so a fanout still costs no extra pass. The output is coordinates either way — nothing downstream reads the values `compare_cells` used to build.
-- [x] **Stream same-type digests straight from arrow.** `Aligned`'s digest piece gains a native path for the same eligible types: per matched row, encode the value's canonical byte frame directly from the array — the same tag-and-bytes `encode_value` writes for the value's `CanonicalValue`, produced without constructing it — into the per-value `stable_hash` and the column's `sequence_hash` frame. Digests stay bit-identical because the encoding is a pure function of the canonical value and the canonical value is a pure function of the raw value for exactly these types; the golden-digest tests plus a per-type native-equals-materialized digest test hold it there. Verification and counts still materialize on first demand, unchanged — the digest join's discovery pass is what stops paying for `Vec<CanonicalValue>`, and verification only runs on digest-equal candidates under the row budget.
-- [x] **Take the profiled ride-alongs.** Three output-identical cleanups the 2026-08-05 leads recorded, each a few lines beside the code it fixes: `KeyIndex::new` pre-sizes its digest map from the row count and remembers each row's bucket id from the counting pass instead of looking every digest up twice; `minimal_moves` returns empty on an already-increasing sequence before building the Fenwick tree, the commonest case of all; `RowSample::select` partitions with `select_nth_unstable` at the cap and sorts only the kept prefix — the selected set is identical because `(digest, position)` is a total order with distinct positions.
-- [x] **Verify output identity against the committed baseline.** Build `42bac58` in a worktree with the new generators copied in, and compare complete-`Diff` digests over every scenario — the six integer ones and the two string ones — at sizes that exercise sampling and budget exhaustion. Byte-identical everywhere is the gate this step's title promises; any divergence is a bug in an equivalence argument, not a tuning knob.
-- [x] **Re-run the grid and record it.** The benchmark grid including the new scenarios; `benches/README.md` gains the string rows in the current baseline table and the before/after for the string scenarios; the acceptance rule's recorded multipliers are refreshed where they moved and the non-adversarial half now covers the string scenarios too.
-- [x] **Update `design.md`.** The value-changes and rename sections record the fast path in a sentence each: same-type columns compare and digest natively where the canonical verdict is a pure function of the raw values, each type's argument lives at the dispatch, and any type without a clean argument keeps the canonicalizing path — an optimization with identical output, never a mode. The costs note stops attributing a full materialization to cell comparison and the digest join for eligible types.
-- [x] **Cover it.** Unit tests: for each eligible type, the native verdict equals the canonicalizing verdict over adversarial values — NaN payloads, `-0.0` against `0.0`, nulls on one and both sides, extreme integers per width, equal strings of unequal capacity, boundary decimals — pinned by comparing both paths over the same arrays; native digests equal materialized digests per type, alongside the golden digests; dictionary and cross-type pairs return `None` and fall back; the ride-alongs pin selection identity (forced-collision tie-break unchanged) and the early-out (an ordered matching yields no moves, a rotated one still does).
+- [x] **Extend the native machinery from equality to agreement.** `compare.rs` gains a native full-row measurement beside `NativeEq`: for an eligible same-type pair under its identity plan, one pass over the matched rows counts agreeing rows through the same per-type equality and accumulates both sides' value frequencies into borrowed-key maps — `&str` for strings, normalized bits for floats, the raw integer for the widths, mantissas for decimals — so an `Agreement` is produced with no `Vec<CanonicalValue>` and no cloned map keys. The counts group exactly as canonical values do because each eligible type's canonicalization is injective up to the comparator's inline normalization — the same per-type arguments `NativeEq` already wrote, consulted rather than restated — so `rows`, `agreeing`, and `expected` come out identical to the materialized path's, and `expected()` still sums commutatively in `u128`.
+- [x] **Verify natively.** `Aligned::verify`'s digest-equal branch asks the native comparator before materializing: an eligible pair confirms or refutes equality by comparing the arrays over every matched row, and only ineligible pairs still build both projections. The digest-differs shortcut, the memo, and the meter charge are untouched — a verification still costs its matched rows, and a collision is still caught by comparing values, just values read in place.
+- [x] **Measure natively.** `Aligned::measure` under `Over::Full` asks for the native agreement first and falls back to `ensure_counts` exactly as today; the memo key and the charged cost do not move, so a native and a materialized measurement of the same pair are interchangeable, which the shared memo already assumes. `Over::Sampled` stays on the take-then-canonicalize path: it reads at most a sample and was never the cost.
+- [x] **Gate on output identity against `45e4e72`.** The worktree comparison over all eight scenarios at sampling and exhaustion sizes, as the last two steps ran it; identical `Diff` digests everywhere, with any divergence read as a broken equivalence argument rather than a tolerance.
+- [x] **Re-run the grid and record it.** `benches/README.md` gets the fresh baseline table and the measured statement for `renamed_strings`, whose verification and informativeness materialization this step exists to remove (~4 of its ~4.6s at 1M×10, 2026-08-06); the acceptance rule's two measured halves are re-verified, non-adversarial completeness on the string scenarios included.
+- [x] **Update `design.md` and the leads.** The rename-inference section's fast-path sentence widens from discovery to verification and informativeness; the costs note stops attributing materialization to the exact stage for eligible types; the promoted lead leaves `plan-next.md` and what this step still does not touch — cross-type and dictionary pairs, the sampled paths — is stated where it was.
+- [x] **Cover it.** Per-type tests beside the existing ones: the native `Agreement` equals the canonicalizing `Agreement` — `rows`, `agreeing`, and `expected` all three — over the same adversarial arrays the verdict tests use, nulls and normalization cases included; native verification agrees with materialized verification on equal, unequal, and forced-collision pairs, the last through the injected digest that disables the native path; ineligible pairs fall back and still measure; the pinned rename suite passes unchanged.
 - [x] **Complete the acceptance pass.** `cargo build --workspace --all-targets`, `cargo test --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, byte-identical repeated runs, and `cargo bench` compiling and running.
 
 # Goal
 
-Cell comparison and exact-rename discovery each materialize two `Vec<CanonicalValue>` per column before comparing or hashing a single value, and for most real tables that materialization is pure ceremony: both sides are the same type, and the canonical equality verdict is a pure function of the raw arrow values. On the integer grid this ceremony is a few percent; on string tables every value clones its bytes into the enum, which is why the step starts by building the string scenarios that can measure it honestly. The fast path compares and digests straight off the arrow arrays for exactly the types where that is provably the same answer — each type's argument written down, every type without one falling back — so the output is bit-identical by construction and verified against the committed baseline, not assumed. Three small profiled cleanups from the 2026-08-05 leads ride along under the same gate.
+The fast-path step removed materialization from cell comparison and digest discovery, and its own measurement shows what is left: `renamed_strings` at 1M×10 spends ~4 of its ~4.6 seconds in exact-rename verification and informativeness, which still build two `Vec<CanonicalValue>` per candidate pair and a frequency map of cloned values per column. Both flow through single choke points in `Aligned` — `verify` and `measure` under `Over::Full` — and both need answers that are pure functions of the raw arrays for exactly the types the fast path already argued: equality per matched row, and value frequencies that group as canonical values group, which injectivity gives for free. This step extends the native machinery to those two questions, under the same gate as before — bit-identical output, verified against the committed baseline, with every ineligible type falling back to the materializing path it uses today.
 
-This is an optimization, never a mode: no flag, no changed answer, no weakened evidence. A collision still costs time and never correctness, because nothing here touches what hashes decide — the digest path produces the same digests from the same canonical bytes, and equality is still equality of values.
+Nothing about evidence or budgets moves: a verification still reads and is charged every matched row, a collision is still caught by comparing values, informativeness still consults real frequencies, and the memoized `Agreement` is the same numbers whichever path produced it.
 
 # Scope
 
 ## What changes
 
-- `test-support/src/generate.rs`, `benches/pipeline.rs`: the two string scenarios.
-- `src/compare.rs`: `NativeEq` and the native digest encoding, beside the canonicalization they mirror.
-- `src/cells.rs`: `compare_cells` consulting `NativeEq` before materializing.
-- `src/agreement.rs`: the digest piece's native path; `RowSample::select`'s partial sort.
-- `src/key.rs`: `KeyIndex::new` pre-sizing and single-lookup construction.
-- `src/order.rs`: the `minimal_moves` early-out.
-- `benches/README.md`, `design.md`, and the test suites.
+- `src/compare.rs`: the native full-row agreement beside `NativeEq`, with per-type borrowed-key counting.
+- `src/agreement.rs`: `verify`'s digest-equal branch and `measure`'s `Over::Full` arm consulting the native path first.
+- `benches/README.md`, `design.md`, `plan-next.md`, and the test suites.
 
 ## What stays and why
 
-- **Every canonical semantic.** Cross-type comparison, parsing, unit conversion, NaN and zero normalization, null rules — the fast path exists only where it reproduces them exactly, and the fallback is always the canonicalizing path itself, so no input can reach different semantics.
-- **Digest values, bit for bit.** The native encoding writes the same bytes `encode_value` writes; golden digests and per-type digest-equality tests pin it. Sampling, the digest join, and the budgets all read the same numbers as before.
-- **Verification and measurement materialization.** Digest-equal candidates are still verified over materialized values under the row budget; agreement is still measured over canonical values. Only discovery and cell equality stop materializing.
-- **Budgets, meters, and incompleteness reporting.** Untouched; charges are the same rows for the same examinations.
+- **Every threshold and rule.** Agreement, kappa, informativeness, mutual uniqueness — the native path produces the same `Agreement` counts, so every judgement downstream reads the same numbers.
+- **Charges and memos.** A full-row examination costs its matched rows whichever path answers it, and the memo stores the same value either way.
+- **The sampled paths.** `Over::Sampled` reads at most `agreement_rows` values through take-then-canonicalize; it was never the cost and stays untouched.
+- **The fallback.** Cross-type pairs, dictionaries, and opaque columns materialize exactly as today; the native path exists only where its answer is provably the same.
 
 ## Explicitly deferred
 
-- **Cross-representation fast paths.** Same family, different unit or scale (a seconds column against a milliseconds one) is a bijection argument away, but each widening deserves its own review; same `DataType` is the strict, obviously-sound start.
-- **Dictionary fast paths and opaque row-byte comparison.** Both have hydration and logical-null subtleties; both fall back today and lose only the optimization.
-- **Shrinking `CellCoordinate`.** A model change with its own trade-offs, recorded in the leads.
-- **Parallelism.** Different risk class; the per-column seams this step cleans up are where it would land later.
+- **Cross-representation widenings and dictionary hydration**, as before — each wants its own argument.
+- **`CellCoordinate` shrinking and parallelism**, still leads.
 
 # Design
 
-## The eligibility rule is an argument, not a type list
+## Frequencies group natively because canonicalization is injective
 
-A pair is eligible when the canonical equality verdict is a pure function of the raw values — equivalently, when canonicalization restricted to that type is injective up to the normalization the comparator applies inline. Each arm of `NativeEq::for_pair` states its argument in a sentence; anything that would need a paragraph falls back instead. That keeps the reviewer's question local — is this one argument sound? — and makes the default safe: falling back costs the materialization we pay today, never a wrong answer.
+`expected` is a sum over shared values of the two sides' frequency products, and its inputs are only the *partitions* of each column's matched values into equality classes. For every eligible type, raw equality (under the comparator's inline normalization) coincides with canonical equality — that is what eligibility means — so partitioning by borrowed raw keys yields the same classes, the same counts, and the same sum as partitioning by materialized canonical values. Nulls form one class keyed apart from every value, exactly as `CanonicalValue::Null` does. The per-type test asserts all three `Agreement` fields against the canonical path, so the argument is checked, not trusted.
 
-## Digests are the same bytes by construction
+## One pass, both questions
 
-The streaming hasher already separates encoding from hashing: `encode_value` writes a canonical byte frame into a `Sink`. The native digest path writes that same frame from the raw value without building the `CanonicalValue` in between, so bit-identity is a property of the code shape — one encoding, two producers — and the per-type test that native and materialized digests agree closes the loop.
+The native measurement walks the matched rows once, counting agreement and filling both frequency maps as it goes — the same shape as the materialized path's zip-plus-counts, minus the two materialized columns between the array and the arithmetic. Verification reuses the per-row equality alone with an early exit on the first disagreement, which the materialized `Vec` comparison also had.
 
-## Identity is verified against the baseline, not argued from it
+## The injected digest still reaches everything it reached
 
-The equivalence arguments justify the design; the worktree comparison proves the build. Complete-`Diff` digests against `42bac58` across every scenario and the exercised sampling and exhaustion paths make "output identity" an observed fact of this change, the same gate the constant-factor step used.
+Forced-collision tests disable the native digest through `with_digest`; the same flag governs native verification and measurement, so a test that forces every digest alike still drives the materialized machinery it was written to reach, and the fallback path keeps its full coverage.
 
 # Verification
 
-- Per-type native-equals-canonical verdict tests over adversarial values, and native-equals-materialized digest tests, in `src/compare.rs`'s test module beside the golden digests.
-- `compare_cells` pinned unchanged over its existing cases, plus a string-table case that exercises the native path and a dictionary case that exercises the fallback.
-- Ride-along pins: sample selection identical under the forced-collision digest; ordered matchings yield no moves and the existing move cases still yield theirs; `KeyIndex` behavior pinned by its existing tests.
-- The worktree output-identity comparison over all eight scenarios.
-- The full grid re-run recorded in `benches/README.md`, string scenarios included.
+- Per-type native-equals-canonical `Agreement` tests and native-equals-materialized verification tests in `src/compare.rs` and `src/agreement.rs`, over the adversarial fixtures the verdict tests established.
+- The pinned rename suite — pre-pass, digest join, budgets, uninformative refusals — passes unchanged.
+- The worktree output-identity comparison against `45e4e72` over all eight scenarios.
+- The grid re-run recorded in `benches/README.md`, with the `renamed_strings` before/after stated.
 
 # Definition of done
 
 This step is complete when:
 
-- same-type cell comparison and digest discovery run natively for every type with a written equivalence argument, and every other pair falls back to the canonicalizing path;
-- the string scenarios exist, their before/after is recorded, and the measured win is stated in `benches/README.md`;
-- output is verified bit-identical to `42bac58` across all scenarios, and digests are pinned by golden and per-type tests;
-- the three ride-along cleanups are in with their identity pins;
-- `design.md` records the fast path and its fallback rule; and
+- exact-rename verification and full-row measurement run natively for every eligible type and fall back everywhere else;
+- the native `Agreement` is proven equal to the canonical one per type, and output is verified bit-identical to `45e4e72` across all scenarios;
+- `renamed_strings`' before/after is measured and recorded, with the string scenarios still reporting nothing incomplete at any grid point;
+- `design.md`'s fast-path sentences and costs note cover verification and measurement, and the promoted lead has left `plan-next.md`; and
 - the full test suite, strict Clippy, formatting, and diff checks pass across the workspace.

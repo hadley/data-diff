@@ -10,6 +10,8 @@ use arrow_row::{RowConverter, SortField};
 use arrow_schema::{DataType, TimeUnit};
 use xxhash_rust::xxh3::{Xxh3 as Xxh3State, xxh3_128_with_seed};
 
+use crate::maps::FastMap;
+
 /// Whether a timestamp type carries a timezone.
 ///
 /// An aware timestamp names an instant — Arrow stores its value as a UTC epoch
@@ -375,6 +377,20 @@ impl<'a> NativeEq<'a> {
         })
     }
 
+    /// [`Self::for_pair`] with the plan gate [`NativeHasher`] applies: only
+    /// the type's own identity plan qualifies, a cross-type plan
+    /// canonicalizing into a domain the raw values alone do not determine.
+    pub(crate) fn under_plan(
+        old: &'a dyn Array,
+        new: &'a dyn Array,
+        plan: ComparisonPlan,
+    ) -> Option<Self> {
+        if ComparisonPlan::new(old.data_type(), old.data_type()) != Some(plan) {
+            return None;
+        }
+        Self::for_pair(old, new)
+    }
+
     pub(crate) fn equal(&self, old_row: usize, new_row: usize) -> bool {
         (self.0)(old_row, new_row)
     }
@@ -533,6 +549,121 @@ fn hashing<'a, A: Array + 'static>(
             hash(array, row)
         }
     }))
+}
+
+/// A full-row agreement measured straight off two same-type arrays: the row
+/// pairs compared, the pairs agreeing, and the expected-agreement numerator
+/// $\sum_v c_{old}(v) \, c_{new}(v)$, with no values materialized and no map
+/// keys cloned.
+///
+/// Eligible under the same arguments as [`NativeEq`], plus the plan gate
+/// [`NativeHasher`] applies: the pair's plan must be the type's own identity
+/// plan, because a cross-type plan canonicalizes into a shared domain the raw
+/// values alone do not determine. The frequency counts group exactly as
+/// canonical values do because each eligible type's key — the raw value up to
+/// the comparator's inline normalization — is injective into the canonical
+/// form, so partitioning by key yields the same equality classes, the same
+/// counts, and the same sum. Nulls form one class keyed apart from every
+/// value, exactly as `CanonicalValue::Null` does.
+pub(crate) fn native_agreement(
+    old: &dyn Array,
+    new: &dyn Array,
+    plan: ComparisonPlan,
+    pairs: &[(usize, usize)],
+) -> Option<(u64, u64, u128)> {
+    if old.data_type() != new.data_type()
+        || ComparisonPlan::new(old.data_type(), old.data_type()) != Some(plan)
+    {
+        return None;
+    }
+    Some(match old.data_type() {
+        DataType::Boolean => measure_keys::<BooleanArray, bool>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int8 => measure_keys::<Int8Array, i8>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int16 => measure_keys::<Int16Array, i16>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int32 => measure_keys::<Int32Array, i32>(old, new, |a, i| a.value(i), pairs),
+        DataType::Int64 => measure_keys::<Int64Array, i64>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt8 => measure_keys::<UInt8Array, u8>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt16 => measure_keys::<UInt16Array, u16>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt32 => measure_keys::<UInt32Array, u32>(old, new, |a, i| a.value(i), pairs),
+        DataType::UInt64 => measure_keys::<UInt64Array, u64>(old, new, |a, i| a.value(i), pairs),
+        DataType::Float32 => measure_keys::<Float32Array, u64>(
+            old,
+            new,
+            |a, i| canonical_double_bits(f64::from(a.value(i))),
+            pairs,
+        ),
+        DataType::Float64 => measure_keys::<Float64Array, u64>(
+            old,
+            new,
+            |a, i| canonical_double_bits(a.value(i)),
+            pairs,
+        ),
+        DataType::Utf8 => measure_keys::<StringArray, &str>(old, new, |a, i| a.value(i), pairs),
+        DataType::LargeUtf8 => {
+            measure_keys::<LargeStringArray, &str>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            measure_keys::<TimestampSecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            measure_keys::<TimestampMillisecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            measure_keys::<TimestampMicrosecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            measure_keys::<TimestampNanosecondArray, i64>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Date32 => measure_keys::<Date32Array, i32>(old, new, |a, i| a.value(i), pairs),
+        DataType::Date64 => measure_keys::<Date64Array, i64>(old, new, |a, i| a.value(i), pairs),
+        DataType::Decimal128(_, _) => {
+            measure_keys::<Decimal128Array, i128>(old, new, |a, i| a.value(i), pairs)
+        }
+        DataType::Decimal256(_, _) => {
+            measure_keys::<Decimal256Array, i256>(old, new, |a, i| a.value(i), pairs)
+        }
+        _ => return None,
+    })
+}
+
+/// One pass over the row pairs, counting agreement and both sides' value
+/// frequencies at once; the sum stays deterministic because every term is an
+/// unsigned integer and integer addition is associative.
+fn measure_keys<'a, A: Array + 'static, K: Eq + std::hash::Hash>(
+    old: &'a dyn Array,
+    new: &'a dyn Array,
+    key: impl Fn(&'a A, usize) -> K,
+    pairs: &[(usize, usize)],
+) -> (u64, u64, u128) {
+    let old = old
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    let new = new
+        .as_any()
+        .downcast_ref::<A>()
+        .expect("dispatched on the data type");
+    let mut old_counts: FastMap<Option<K>, u64> = FastMap::default();
+    let mut new_counts: FastMap<Option<K>, u64> = FastMap::default();
+    let mut agreeing = 0_u64;
+    for &(old_row, new_row) in pairs {
+        let old_key = (!old.is_null(old_row)).then(|| key(old, old_row));
+        let new_key = (!new.is_null(new_row)).then(|| key(new, new_row));
+        if old_key == new_key {
+            agreeing += 1;
+        }
+        *old_counts.entry(old_key).or_default() += 1;
+        *new_counts.entry(new_key).or_default() += 1;
+    }
+    let expected = old_counts
+        .iter()
+        .filter_map(|(key, count)| {
+            new_counts
+                .get(key)
+                .map(|shared| u128::from(*count) * u128::from(*shared))
+        })
+        .sum();
+    (pairs.len() as u64, agreeing, expected)
 }
 
 /// Encode a column outside the matrix as canonical row-format bytes.
@@ -1356,8 +1487,8 @@ mod tests {
 
     use super::{
         CanonicalValue, ComparisonPlan, INLINE, NativeEq, NativeHasher, StableHasher, Xxh3,
-        encode_sequence, equal_after_hash, hash_with, parse_exact_i64, rational_of_double,
-        sequence_hash, sequence_hash_of, stable_hash,
+        encode_sequence, equal_after_hash, hash_with, native_agreement, parse_exact_i64,
+        rational_of_double, sequence_hash, sequence_hash_of, stable_hash,
     };
 
     fn values(array: ArrayRef, other: ArrayRef) -> (Vec<CanonicalValue>, Vec<CanonicalValue>) {
@@ -2112,6 +2243,38 @@ mod tests {
             "column digest diverged for {:?}",
             old.data_type()
         );
+        // The native agreement must reproduce the materialized one — rows,
+        // agreeing, and the expected numerator, all three — over both a
+        // straight and a reversed pairing.
+        let rows = canonical_old.len().min(canonical_new.len());
+        let straight: Vec<(usize, usize)> = (0..rows).map(|row| (row, row)).collect();
+        let reversed: Vec<(usize, usize)> = (0..rows).map(|row| (row, rows - 1 - row)).collect();
+        for pairs in [straight, reversed] {
+            let mut old_counts = std::collections::HashMap::new();
+            let mut new_counts = std::collections::HashMap::new();
+            let mut agreeing = 0_u64;
+            for &(old_row, new_row) in &pairs {
+                if canonical_old[old_row] == canonical_new[new_row] {
+                    agreeing += 1;
+                }
+                *old_counts.entry(&canonical_old[old_row]).or_insert(0_u64) += 1;
+                *new_counts.entry(&canonical_new[new_row]).or_insert(0_u64) += 1;
+            }
+            let expected: u128 = old_counts
+                .iter()
+                .filter_map(|(value, count)| {
+                    new_counts
+                        .get(value)
+                        .map(|shared| u128::from(*count) * u128::from(*shared))
+                })
+                .sum();
+            assert_eq!(
+                native_agreement(old.as_ref(), new.as_ref(), plan, &pairs),
+                Some((pairs.len() as u64, agreeing, expected)),
+                "agreement diverged for {:?}",
+                old.data_type()
+            );
+        }
     }
 
     #[test]
@@ -2321,6 +2484,12 @@ mod tests {
         let parsing = ComparisonPlan::new(strings.data_type(), integers.data_type())
             .expect("strings compare against integers");
         assert!(NativeHasher::for_column(&strings, parsing).is_none());
+        assert!(native_agreement(&strings, &integers, parsing, &[(0, 0)]).is_none());
+        // The plan gate refuses even a same-type pair asked under a foreign
+        // plan, where its identity keys would group by the wrong domain.
+        let more_strings = StringArray::from(vec!["1", "2"]);
+        assert!(NativeEq::under_plan(&strings, &more_strings, parsing).is_none());
+        assert!(native_agreement(&strings, &more_strings, parsing, &[(0, 0)]).is_none());
 
         // Different units are different data types, even within one family.
         let seconds = TimestampSecondArray::from(vec![1]);

@@ -27,9 +27,24 @@ The default multiples — 20 for renames, 5 for swaps — were tuned under one f
 
 Two readings to keep straight when a ratio looks bad. First, `full_rewrite`'s overage — and every all-cells-change scenario's — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Second, `renamed_distinct`'s rise past 100k rows is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule requires of a non-adversarial scenario.
 
-## Baseline (2026-08-06, Apple Silicon, after the same-type fast paths)
+## Baseline (2026-08-06, Apple Silicon, after native verification and measurement)
 
-Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. The fast-path step halved the floor again — native cell comparison plus the `KeyIndex`, `minimal_moves`, and `RowSample` cleanups — so several multipliers rose while every absolute time fell or held; check a suspicious ratio against the prior table's absolute times before reading it as a regression. The step's own wins, output-identical by construction and verified against the prior build: `identical_strings` 1M×10 fell 804 ms → 226 ms and 100k×100 572 ms → 100 ms; `renamed_strings` fell ~15–20% and its remaining cost is rename verification and informativeness materializing string values, which the step deliberately kept and the leads in `plan-next.md` record.
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. Two steps' worth of floor collapse sit between this table and the prior one — the same-type fast paths halved the large floors and native full-sample measurement halved the 1000-row ones again — so multipliers are not comparable across tables without their absolute floors; every absolute point here is at or below its prior value. The verification-and-measurement step's own wins, bit-identical to the prior build on every scenario: `renamed_strings` 1M×10 fell 4.6 s → 1.7 s and 100k×100 3.0 s → 0.9 s, `renamed_distinct` 1M×10 1.4 s → 0.76 s. A column answers its first two full-row questions natively — a diagonal claim is exactly two — and materializes once when a third pair keeps asking, which is what holds the many-pairs-per-column adversaries (`rename_and_modify`, `renamed_constant`) at their materialized costs instead of re-counting per pair.
+
+| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
+|---|---|---|---|---|---|---|
+| `identical` | 0.31 ms | 2.5 ms | 26 ms | 15 ms | 54 ms | 215 ms |
+| `identical_strings` | 2.28× | 2.70× | 2.52× | 1.29× | 1.87× | 1.07× |
+| `renamed_distinct` | 1.73× | 1.91× | 1.88× | 3.69× | 8.32× | 3.52× |
+| `renamed_strings` | 3.23× | 4.18× | 3.82× | 6.99× | 16.71× | 7.41× |
+| `renamed_constant` | 3.00× | 2.75× | 2.67× | 6.53× | 11.96× | 4.63× |
+| `rename_and_modify` | 5.16× | 9.22× | 9.37× | 3.83× | 37.93× | 2.25× |
+| `swapped` | 3.59× | 6.17× | 6.80× | 1.59× | 17.47× | 1.09× |
+| `full_rewrite` | 5.43× | 6.08× | 6.93× | 8.37× | 33.91× | 5.71× |
+
+## Prior baseline (2026-08-06, Apple Silicon, after the same-type fast paths)
+
+The fast-path step's run, kept as the immediate comparison; older baselines live in this file's git history.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -41,19 +56,6 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `rename_and_modify` | 2.28× | 3.37× | 3.35× | 4.00× | 41.09× | 2.36× |
 | `swapped` | 1.50× | 2.51× | 2.77× | 1.74× | 18.92× | 1.13× |
 | `full_rewrite` | 2.38× | 2.59× | 2.79× | 8.60× | 37.01× | 6.03× |
-
-## Prior baseline (2026-08-06, Apple Silicon, row-denominated defaults, before the fast paths)
-
-The row-budget tuning run, kept as the immediate comparison; older baselines (2026-08-05 fixed pairs, 2026-08-04 original tuning) live in this file's git history.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 0.77 ms | 7.0 ms | 74 ms | 29 ms | 138 ms | 407 ms |
-| `renamed_distinct` | 1.26× | 1.27× | 1.28× | 3.49× | 7.76× | 3.84× |
-| `renamed_constant` | 1.16× | 1.13× | 1.11× | 3.22× | 5.84× | 2.53× |
-| `rename_and_modify` | 1.95× | 2.74× | 2.85× | 2.78× | 16.12× | 1.95× |
-| `swapped` | 1.33× | 2.29× | 2.43× | 1.25× | 7.12× | 1.02× |
-| `full_rewrite` | 1.98× | 2.22× | 2.51× | 4.72× | 13.12× | 3.39× |
 
 ## Profiling a point
 
