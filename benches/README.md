@@ -14,22 +14,27 @@ Every scenario runs over rows {1 000, 100 000, 1 000 000} by columns {10, 100, 1
 | `rename_and_modify` | k drops against k adds, each pair ~5% edited | the quadratic approximate stage: no pair exact, every pair measured |
 | `swapped` | adjacent same-named column pairs exchanged | the swap adversary: every identity rewritten, every crossing measured |
 | `full_rewrite` | every non-key value changed | the summarization adversary and the cost of the complete cell diff |
-| `identical_strings` | the same all-string table twice | the string floor: cell comparison over values that clone per value when materialized |
+| `identical_strings` | the same all-string table twice | the string floor: values that clone per value wherever the pipeline materializes |
 | `renamed_strings` | every string column renamed in place, distinct values | the digest join and rename verification over string columns |
 
 `identical`, `identical_strings`, `renamed_distinct`, and `renamed_strings` are the non-adversarial scenarios; the other four are the adversaries the budgets exist to cut.
 
 ## The acceptance rule for the default budgets
 
-The search budgets are row-denominated and proportional (2026-08-06): `rename_rows` and `swap_rows` default to a fixed number of row examinations per cell of the compared table, so "each bounded stage does at most that multiple of the work of reading the table" holds by construction, at every size and shape, on every machine. What the grid confirms is the two halves construction cannot: with the default budgets, at every grid point, the non-adversarial scenarios must report nothing in `Diff::incomplete`, and no scenario's time may exceed its multiplier of the same-sized `identical` run in the current baseline table — the recorded multipliers, not a universal constant, being the enforceable wall-clock half, with the all-cells-change overage attributed to retained cell assembly as below. When a constant changes, re-run the grid, re-verify both halves, and re-record the table.
+The search budgets are row-denominated and proportional: `rename_rows` and `swap_rows` default to a fixed number of row examinations per cell of the compared table, so "each bounded stage does at most that multiple of the work of reading the table" holds by construction, at every size and shape, on every machine. What the grid confirms is the two halves construction cannot:
 
-The default multiples — 20 for renames, 5 for swaps — were tuned under one further measured criterion: no grid point loses a completion the previous fixed 2048-pair budgets funded, verified by running both builds over the full grid and comparing `Diff::incomplete` point by point. The multiples sit just above the ten-column adversaries' analytic needs (~200 full-row rename examinations across eleven columns is ~18.2 rows per cell; a fully swapped ten-column table's crossing enumeration is ~4.5), and the comparison came out one-sided: every point matches, and 100k×100 completes three stages the pair budgets cut short — `rename_and_modify`'s renames, `swapped`'s enumeration, and `full_rewrite`'s swap check. Funding the swap enumeration there also made the run 30% faster, resolved swaps leaving no changed cells to assemble; funding `rename_and_modify`'s inference costs real time (its 16× below), which is the price of the completed answer rather than overhead.
+- with the default budgets, at every grid point, the non-adversarial scenarios report nothing in `Diff::incomplete`; and
+- no scenario's time exceeds its multiplier of the same-sized `identical` run recorded in the baseline table below.
 
-Two readings to keep straight when a ratio looks bad. First, `full_rewrite`'s overage — and every all-cells-change scenario's — is largely not the bounded stage: the capped summary fallback is a trivial linear pass, and the extra time is assembling the complete cell-level diff, which is a retained design invariant rather than a search a budget could cut. Second, `renamed_distinct`'s rise past 100k rows is the exact stage's full-column digest join — the unbudgeted linear pass the design accepts — visible against a floor that no longer buries it; it reports nothing incomplete at any grid point, as the rule requires of a non-adversarial scenario.
+When a constant changes, re-run the grid, re-verify both halves, and re-record the table — under one further criterion: no grid point may lose a completion the previous defaults funded, verified by running both builds over the grid and comparing `Diff::incomplete` point by point. The current multiples, their analytic floors, and the reasoning behind them are recorded in `design.md`'s computation-budgets section, which is where a re-tuning argument belongs.
 
-## Baseline (2026-08-06, Apple Silicon, after the u32 cell coordinates)
+## Reading a ratio
 
-Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. The u32 step's win is memory rather than time — the changed-cell vector, the largest thing a `Diff` retains, halves from 40 to 20 bytes per cell (400 MB to 200 MB at the 10⁷-cell grid cap) behind an input-validated ceiling of `u32::MAX` rows and columns — and every point here is within run noise of the prior table.
+Three principles keep a multiplier honest. First, multipliers are floor-relative: an optimization that shrinks the `identical` floor inflates every other scenario's ratio while their absolute times fall or hold, so cross-build comparisons must be made in absolute times, never by comparing multipliers across baselines. Second, the all-cells-change scenarios' overage is largely not the bounded search: the capped summary fallback is a trivial linear pass, and the bulk is assembling the complete cell-level diff, a retained design invariant no budget may cut. Third, the `renamed_*` scenarios' rise past 100k rows is the exact stage's full-column work — the unbudgeted linear pass the design accepts — and their `Diff::incomplete` staying empty is the claim to check, not their ratio.
+
+## Baseline (2026-08-06, Apple Silicon)
+
+Ratios of scenario time to `identical` at the same size; `identical` absolute times on the first row. These are the recorded multipliers the acceptance rule enforces. Prior baselines live in this file's git history; they are context, not a comparison method — see the next section for how a change is actually verified.
 
 | | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
 |---|---|---|---|---|---|---|
@@ -42,20 +47,9 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `swapped` | 3.10× | 4.25× | 4.70× | 1.04× | 3.51× | 0.97× |
 | `full_rewrite` | 4.17× | 4.31× | 4.73× | 5.89× | 14.88× | 4.95× |
 
-## Prior baseline (2026-08-06, Apple Silicon, after the sampled-counts cache and counting placement)
+## Verifying a change against the committed baseline
 
-The sampled-counts step's run, kept as the immediate comparison; older baselines live in this file's git history. Its wins over its own prior: sampled frequency maps built once per column instead of once per crossing measurement took `swapped` 100k×100 from 945 ms to 174 ms and `rename_and_modify` from 2.1 s to 0.52 s, and counting placement of the changed-cell list is most of `full_rewrite`'s drop to 0.75 s at the same point.
-
-| | 1k×10 | 1k×100 | 1k×1000 | 100k×10 | 100k×100 | 1M×10 |
-|---|---|---|---|---|---|---|
-| `identical` | 0.30 ms | 2.4 ms | 26 ms | 13 ms | 51 ms | 198 ms |
-| `identical_strings` | 2.23× | 2.68× | 2.55× | 1.41× | 2.06× | 1.09× |
-| `renamed_distinct` | 1.80× | 1.98× | 1.88× | 3.92× | 8.59× | 3.70× |
-| `renamed_strings` | 3.33× | 4.08× | 3.76× | 8.46× | 17.84× | 8.13× |
-| `renamed_constant` | 2.98× | 2.81× | 2.54× | 6.40× | 12.44× | 4.66× |
-| `rename_and_modify` | 4.58× | 7.73× | 7.85× | 2.88× | 10.20× | 2.23× |
-| `swapped` | 3.25× | 4.51× | 4.48× | 1.06× | 3.40× | 0.98× |
-| `full_rewrite` | 4.35× | 4.51× | 4.48× | 6.00× | 14.60× | 5.16× |
+Performance work on this pipeline gates on output identity, not on the numbers above: unless a step deliberately changes semantics with the owner's sign-off, its output must be byte-identical to the committed baseline's. The procedure that has carried every step so far: build the baseline commit in a `git worktree` (copying in any new generators), write a throwaway example that runs one scenario and prints an xxh3 digest of the complete `Diff`'s debug form, and compare the two builds' digests over every scenario at sizes that exercise both sampling (more than 4096 matched rows) and budget exhaustion. Any divergence is a bug in the change, not a tolerance to record.
 
 ## Profiling a point
 
@@ -66,4 +60,4 @@ cargo build --release --example <name>
 ./target/release/examples/<name> & sample $! 10 -file profile.txt
 ```
 
-The "Sort by top of stack" section at the end of `profile.txt` is usually enough. The 2026-08-05 profiles that drove the constant-factor step are recorded in that step's `plan.md`: before it, roughly 57% of an identical million-row run was eager projection work behind sampled questions and ~25% was SipHash, with the necessary linear passes a small minority; after it, the top of the profile is those linear passes — key indexing, canonicalization, cell comparison, and the ordering LCS.
+The "Sort by top of stack" section at the end of `profile.txt` is usually enough, and the call-graph section attributes what top-of-stack cannot. Re-profile before optimizing: the profile reshapes every time the totals shrink, and more than one queued lead has been overturned by the re-measurement that was supposed to confirm it.
