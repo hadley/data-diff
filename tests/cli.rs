@@ -21,11 +21,11 @@ fn help_describes_the_initial_interface() {
     Usage: data-diff [OPTIONS] <OLD> <NEW>
 
     Arguments:
-      <OLD>  Original Parquet file; '#missing' when the file does not exist
-      <NEW>  Modified Parquet file; '#missing' when the file does not exist
+      <OLD>  Original Parquet file; :missing when the file does not exist
+      <NEW>  Modified Parquet file; :missing when the file does not exist
 
     Options:
-          --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; '#row' matches rows by position; when omitted, a single-column key is guessed
+          --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; :row matches rows by position; when omitted, a single-column key is guessed
           --hint <HINT>    A hint, written as the output prints it, such as 'col_rename(old -> new)'; repeatable
           --hints <HINTS>  A file of hints, one per line, skipping blank lines and those starting with #
       -h, --help           Print help
@@ -112,7 +112,7 @@ fn falls_back_to_row_position_when_nothing_can_be_guessed() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    table_key([#row], basis: fallback)
+    table_key([:row], basis: fallback)
     col_edit(id, changes: 2)
     ");
 }
@@ -182,7 +182,7 @@ fn wholesale_change_without_a_key_reports_a_regeneration() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    table_key([#row], basis: fallback)
+    table_key([:row], basis: fallback)
     table_regenerate()
     ");
 }
@@ -197,7 +197,7 @@ fn declaring_row_position_reaches_the_same_key_deliberately() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "#row"])
+        .args(["--key", ":row"])
         .output()
         .unwrap();
 
@@ -205,7 +205,7 @@ fn declaring_row_position_reaches_the_same_key_deliberately() {
     // asked for and the other was arrived at.
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
-    table_key([#row], basis: declared)
+    table_key([:row], basis: declared)
     col_edit(id, changes: 2)
     ");
 }
@@ -220,7 +220,7 @@ fn row_position_cannot_be_compounded_with_a_column() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .args([old_path.as_os_str(), new_path.as_os_str()])
-        .args(["--key", "id,#row"])
+        .args(["--key", "id,:row"])
         .output()
         .unwrap();
 
@@ -228,7 +228,7 @@ fn row_position_cannot_be_compounded_with_a_column() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "key component \"#row\" matches rows by position and cannot be combined \
+        "key component \":row\" matches rows by position and cannot be combined \
          with a column\n"
     );
 }
@@ -504,7 +504,7 @@ fn reports_a_declared_key_that_fans_out_too_broadly() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     key_invalid([id], reason: excessive_fanout)
     ----
-    table_key([#row], basis: fallback)
+    table_key([:row], basis: fallback)
     row_add(3)
     row_edit(2, changes: 1)
     ");
@@ -805,7 +805,7 @@ fn a_missing_side_summarizes_the_file_that_exists() {
     common::write_parquet(&path, &table);
 
     let added = Command::new(env!("CARGO_BIN_EXE_data-diff"))
-        .arg("#missing")
+        .arg(":missing")
         .arg(path.as_os_str())
         .output()
         .unwrap();
@@ -819,7 +819,7 @@ fn a_missing_side_summarizes_the_file_that_exists() {
 
     let removed = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .arg(path.as_os_str())
-        .arg("#missing")
+        .arg(":missing")
         .output()
         .unwrap();
     assert!(removed.status.success());
@@ -838,45 +838,48 @@ fn contradictory_one_sided_instructions_are_refused() {
     common::write_parquet(&path, &table! { "id" => [1] });
 
     let both = Command::new(env!("CARGO_BIN_EXE_data-diff"))
-        .args(["#missing", "#missing"])
+        .args([":missing", ":missing"])
         .output()
         .unwrap();
     assert!(!both.status.success());
-    insta::assert_snapshot!(String::from_utf8(both.stderr).unwrap(), @r##"both sides are "#missing", so there is nothing to compare"##);
+    insta::assert_snapshot!(String::from_utf8(both.stderr).unwrap(), @r##"both sides are ":missing", so there is nothing to compare"##);
 
     let keyed = Command::new(env!("CARGO_BIN_EXE_data-diff"))
-        .arg("#missing")
+        .arg(":missing")
         .arg(path.as_os_str())
         .args(["--key", "id"])
         .output()
         .unwrap();
     assert!(!keyed.status.success());
-    insta::assert_snapshot!(String::from_utf8(keyed.stderr).unwrap(), @r##"a key cannot apply when one side is "#missing""##);
+    insta::assert_snapshot!(String::from_utf8(keyed.stderr).unwrap(), @r##"a key cannot apply when one side is ":missing""##);
 
     let hinted = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .arg(path.as_os_str())
-        .arg("#missing")
+        .arg(":missing")
         .args(["--hint", "col_drop(id)"])
         .output()
         .unwrap();
     assert!(!hinted.status.success());
-    insta::assert_snapshot!(String::from_utf8(hinted.stderr).unwrap(), @r##"hints cannot apply when one side is "#missing""##);
+    insta::assert_snapshot!(String::from_utf8(hinted.stderr).unwrap(), @r##"hints cannot apply when one side is ":missing""##);
 }
 
+// Windows forbids `:` in file names, so the collision this escape hatch
+// resolves cannot arise there.
+#[cfg(not(windows))]
 #[test]
 fn a_file_actually_named_missing_is_reachable_with_a_path() {
     let dir = common::TempDir::new();
-    let sentinel_named = dir.path().join("#missing");
+    let sentinel_named = dir.path().join(":missing");
     let other = dir.path().join("other.parquet");
     let table = table! { "id" => [1] };
     common::write_parquet(&sentinel_named, &table);
     common::write_parquet(&other, &table);
 
-    // Only the exact bare argument is the sentinel; `./#missing` has a
+    // Only the exact bare argument is the sentinel; `./:missing` has a
     // separator in it and is an ordinary file.
     let output = Command::new(env!("CARGO_BIN_EXE_data-diff"))
         .current_dir(dir.path())
-        .args(["./#missing"])
+        .args(["./:missing"])
         .arg(other.as_os_str())
         .args(["--key", "id"])
         .output()

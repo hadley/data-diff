@@ -678,16 +678,16 @@ impl Component {
 /// The component naming the key that matches rows by position.
 ///
 /// Reserved rather than looked up. A bare name in this format is letters,
-/// digits and underscores and never begins with `#`, so this cannot collide
-/// with any column the output writes bare; a column genuinely called `#row`
+/// digits and underscores and never begins with `:`, so this cannot collide
+/// with any column the output writes bare; a column genuinely called `:row`
 /// prints quoted and stays distinguishable, at the cost of never being
 /// declarable as a key itself.
-pub const POSITIONAL_COMPONENT: &str = "#row";
+pub const POSITIONAL_COMPONENT: &str = ":row";
 
 pub(crate) enum Declared {
     /// No `--key` at all, so a key is to be guessed.
     Guess,
-    /// `--key '#row'`: match rows by position, deliberately.
+    /// `--key :row`: match rows by position, deliberately.
     Positional,
     Components(Vec<Component>),
 }
@@ -736,7 +736,7 @@ pub(crate) fn declared_components(keys: &[String]) -> Result<Declared, DiffError
         if old.is_empty() || new.is_empty() {
             return Err(DiffError::EmptyKeyComponent);
         }
-        // Reaching here means the spelling is not `#row` alone, so an endpoint
+        // Reaching here means the spelling is not `:row` alone, so an endpoint
         // naming it is one half of a pair, which has no reading.
         if old == POSITIONAL_COMPONENT || new == POSITIONAL_COMPONENT {
             return Err(DiffError::CompoundPositionalKey);
@@ -896,7 +896,7 @@ mod tests {
     fn the_positional_component_is_a_whole_key_or_none_of_it() {
         // A positional key has no components to compound with, so both the
         // compound and the paired form are faults in the --key string itself.
-        for key in [&["id", "#row"][..], &["#row", "id"][..], &["id/#row"][..]] {
+        for key in [&["id", ":row"][..], &[":row", "id"][..], &["id/:row"][..]] {
             assert!(matches!(
                 declared_components(&key.iter().map(|k| (*k).to_owned()).collect::<Vec<_>>()),
                 Err(DiffError::CompoundPositionalKey)
@@ -909,7 +909,7 @@ mod tests {
         let old = table! { "label" => ["x", "x", "x"] };
         let new = table! { "label" => ["x", "x"] };
 
-        let key = resolve_key(&old, &new, &options(&["#row"])).unwrap();
+        let key = resolve_key(&old, &new, &options(&[":row"])).unwrap();
 
         // One key per row, distinct and therefore unique in `old` and incapable
         // of fanout, and no rejection because there is nothing to validate.

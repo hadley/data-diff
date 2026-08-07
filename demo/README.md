@@ -58,15 +58,15 @@ Both columns here repeat a value, so neither can be a key. Rather than give up, 
 
 ```console
 $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet
-table_key([#row], basis: fallback)
+table_key([:row], basis: fallback)
 row_edit(2, changes: 1)
 ```
 
 You can also ask for positional matching directly:
 
 ```console
-$ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key '#row'
-table_key([#row], basis: declared)
+$ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key :row
+table_key([:row], basis: declared)
 row_edit(2, changes: 1)
 ```
 
@@ -76,7 +76,7 @@ Positional matching only tells a useful story when most of the file is the same 
 
 ```console
 $ data-diff demo/regenerate-old.parquet demo/regenerate-new.parquet
-table_key([#row], basis: fallback)
+table_key([:row], basis: fallback)
 table_regenerate()
 ```
 
@@ -198,10 +198,10 @@ col_edit(day, type: Utf8 -> Date32)
 
 ## One-sided diffs
 
-A file that was added, or deleted, has nothing to compare against. Name the missing side `'#missing'` — quoted, because `#` starts a comment in most shells — and `data-diff` summarizes the file that exists: a table-level headline with the row count, then the columns. Every row is new (or gone) because the file is, so a list of rows says nothing the headline does not:
+A file that was added, or deleted, has nothing to compare against. Name the missing side `:missing`, and `data-diff` summarizes the file that exists: a table-level headline with the row count, then the columns. Every row is new (or gone) because the file is, so a list of rows says nothing the headline does not:
 
 ```console
-$ data-diff '#missing' demo/basic-new.parquet
+$ data-diff :missing demo/basic-new.parquet
 table_add(rows: 3)
 col_add(id)
 col_add(name)
@@ -209,7 +209,7 @@ col_add(score)
 ```
 
 ```console
-$ data-diff demo/basic-old.parquet '#missing'
+$ data-diff demo/basic-old.parquet :missing
 table_drop(rows: 3)
 col_drop(id)
 col_drop(name)

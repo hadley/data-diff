@@ -22,7 +22,7 @@ data-diff old.parquet new.parquet --key customer_id,date
 > row_edit(2, changes: 3)
 ```
 
-Otherwise `data-diff` guesses, and takes the single column that identifies the most rows across both files. Where nothing can identify a row, it matches rows by position and says so. `--key '#row'` asks for that key directly. The key line always says which key was used and, for a guess, how much of the data it accounts for. 
+Otherwise `data-diff` guesses, and takes the single column that identifies the most rows across both files. Where nothing can identify a row, it matches rows by position and says so. `--key :row` asks for that key directly. The key line always says which key was used and, for a guess, how much of the data it accounts for. 
 
 A key `data-diff` chose for itself is also judged by the diff it produces. If the first pass's rename inference identifies a better candidate (for example, a renamed column), the key is reconsidered. A guess whose diff changes more than half of the two files' cells is not believed. It is retracted, reported as `key_retracted([column], reason: excessive_change)`, and the comparison reruns on the next candidate or on row position.
 
@@ -32,17 +32,17 @@ A key you declare can turn out not to identify rows: it repeats a value, names a
 data-diff old.parquet new.parquet --key customer_id/id
 > key_invalid([customer_id -> id], reason: non_unique_old)
 > ----
-> table_key([#row], basis: fallback)
+> table_key([:row], basis: fallback)
 > col_rename(customer_id -> id, basis: declared)
 > row_edit(2, changes: 1)
 ```
 
 A paired component asserts two things: that the two columns are one, and that the column identifies rows. The first assertion survives even if the second fails.
 
-When a file is new or was deleted, there is nothing to compare it against. Name the missing side `'#missing'`, and the file that exists is summarized: a table-level headline with the row count, then its columns.
+When a file is new or was deleted, there is nothing to compare it against. Name the missing side `:missing`, and the file that exists is summarized: a table-level headline with the row count, then its columns.
 
 ```console
-data-diff '#missing' new.parquet
+data-diff :missing new.parquet
 > table_add(rows: 3)
 > col_add(id)
 > col_add(price)

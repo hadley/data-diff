@@ -234,7 +234,7 @@ impl std::fmt::Display for DiffError {
                 "{side} column {column:?} is claimed by more than one key component"
             ),
             DiffError::CompoundPositionalKey => f.write_str(
-                "key component \"#row\" matches rows by position and cannot be combined \
+                "key component \":row\" matches rows by position and cannot be combined \
                  with a column",
             ),
             DiffError::MalformedHint { hint } => write!(
@@ -471,7 +471,7 @@ pub enum KeyBasis {
     Guessed,
     /// Row position, reached because nothing else could identify a row.
     ///
-    /// Declaring `#row` reaches the same key under `Declared`, so this basis
+    /// Declaring `:row` reaches the same key under `Declared`, so this basis
     /// says the tool ran out of alternatives rather than that rows are matched
     /// positionally, which the empty column list says on its own.
     Fallback,
@@ -497,7 +497,7 @@ impl KeyOverlap {
 /// The resolved row key.
 ///
 /// `columns` is empty exactly for the positional key, whether that key was
-/// declared as `#row` or fallen back to, since a declared key of no components
+/// declared as `:row` or fallen back to, since a declared key of no components
 /// is refused before it gets here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyDiff {

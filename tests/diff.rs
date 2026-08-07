@@ -1501,7 +1501,7 @@ fn a_rejected_pair_keeps_the_identity_it_asserted() {
         String::from_utf8(render(&diff)).unwrap(),
         "key_invalid([customer_id -> id], reason: non_unique_old)\n\
          ----\n\
-         table_key([#row], basis: fallback)\n\
+         table_key([:row], basis: fallback)\n\
          col_rename(customer_id -> id, basis: declared)\n\
          row_edit(2, changes: 1)"
     );
@@ -1669,7 +1669,7 @@ fn an_implausible_fallback_regenerates_without_a_second_pass() {
     assert_eq!(diff.summary.rows.len() + diff.summary.columns.len(), 2);
     assert_eq!(
         String::from_utf8(render(&diff)).unwrap(),
-        "table_key([#row], basis: fallback)\ntable_regenerate()"
+        "table_key([:row], basis: fallback)\ntable_regenerate()"
     );
 
     let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();

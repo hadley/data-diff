@@ -10,11 +10,11 @@ use data_diff::{
 #[derive(Debug, Parser)]
 #[command(name = "data-diff", version, about = "Compare two tabular data files")]
 struct Cli {
-    /// Original Parquet file; '#missing' when the file does not exist.
+    /// Original Parquet file; :missing when the file does not exist.
     old: PathBuf,
-    /// Modified Parquet file; '#missing' when the file does not exist.
+    /// Modified Parquet file; :missing when the file does not exist.
     new: PathBuf,
-    /// Comma-separated key columns, each a shared name or an old/new pair; '#row' matches rows by position; when omitted, a single-column key is guessed.
+    /// Comma-separated key columns, each a shared name or an old/new pair; :row matches rows by position; when omitted, a single-column key is guessed.
     #[arg(long, value_delimiter = ',')]
     key: Vec<String>,
     /// A hint, written as the output prints it, such as 'col_rename(old -> new)'; repeatable.
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), String> {
     // The sentinel is the exact bare argument: a path with anything more in
-    // it, `./#missing` included, is an ordinary file.
+    // it, `./:missing` included, is an ordinary file.
     let old_missing = cli.old.as_os_str() == MISSING_FILE;
     let new_missing = cli.new.as_os_str() == MISSING_FILE;
     if old_missing || new_missing {

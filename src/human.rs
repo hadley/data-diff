@@ -214,7 +214,7 @@ pub fn write_human_one_sided(mut writer: impl Write, diff: &OneSidedDiff) -> io:
 /// renders as `"old" -> "new"` rather than as two names, which would make
 /// `--key a/b` and `--key a,b` indistinguishable.
 ///
-/// The positional key has no columns and names `#row` in their place, so the
+/// The positional key has no columns and names `:row` in their place, so the
 /// list is never empty and `basis` keeps meaning throughout the format what it
 /// means for every other key: how this one was arrived at.
 fn key_context(diff: &Diff) -> String {
@@ -1029,7 +1029,7 @@ mod tests {
         // Nothing can identify a row, so the chain reaches its last resort.
         assert_eq!(
             render_with(&old, &new, &[]),
-            "table_key([#row], basis: fallback)\nrow_edit(2, changes: 1)"
+            "table_key([:row], basis: fallback)\nrow_edit(2, changes: 1)"
         );
     }
 
@@ -1039,11 +1039,11 @@ mod tests {
         let new = table! { "label" => ["x", "y"] };
 
         let fallen_back = render_with(&old, &new, &[]);
-        let declared = render_with(&old, &new, &["#row"]);
+        let declared = render_with(&old, &new, &[":row"]);
 
         assert_eq!(
             declared,
-            "table_key([#row], basis: declared)\nrow_edit(2, changes: 1)"
+            "table_key([:row], basis: declared)\nrow_edit(2, changes: 1)"
         );
         // The two routes reach one key: only the line saying how differs.
         assert_eq!(
@@ -1123,7 +1123,7 @@ mod tests {
         key_invalid(absent, reason: missing_column)
         key_retracted([a], reason: excessive_change)
         ----
-        table_key([#row], basis: fallback)
+        table_key([:row], basis: fallback)
         col_edit(a, changes: 4)
         ");
     }
@@ -1144,7 +1144,7 @@ mod tests {
         // The type change survives, being a fact about the schemas, but its
         // value count goes with the story it was part of.
         insta::assert_snapshot!(render_with(&old, &new, &[]), @"
-        table_key([#row], basis: fallback)
+        table_key([:row], basis: fallback)
         col_edit(value, type: Int32 -> Int64)
         table_regenerate()
         ");
