@@ -257,6 +257,29 @@ fn main() {
         },
     );
 
+    // No single column identifies a row — regions repeat across quarters and
+    // quarters across regions, and `revenue` loses a shared value to its own
+    // edit — but the (region, quarter) pair is unique on both sides and
+    // shares every row, so the compound search guesses it.
+    write(
+        &output,
+        "compound-key-old.parquet",
+        table! {
+            "region" => ["north", "north", "south", "south"],
+            "quarter" => ["q1", "q2", "q1", "q2"],
+            "revenue" => [1200, 1350, 900, 1100],
+        },
+    );
+    write(
+        &output,
+        "compound-key-new.parquet",
+        table! {
+            "region" => ["north", "north", "south", "south"],
+            "quarter" => ["q1", "q2", "q1", "q2"],
+            "revenue" => [1200, 1350, 950, 1100],
+        },
+    );
+
     // Nothing here can identify a row: both columns repeat a value in `old`,
     // so neither is eligible and rows are matched by position.
     write(

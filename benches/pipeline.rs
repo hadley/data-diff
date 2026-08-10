@@ -37,12 +37,29 @@ const SCENARIOS: [(&str, Scenario); 8] = [
     ("full_rewrite", generate::full_rewrite),
 ];
 
+/// Scenarios with no declared key, measuring the guess itself: the hidden
+/// compound key the search must find, and the low-cardinality adversary whose
+/// lattice the budgets must cut short.
+const GUESSED_SCENARIOS: [(&str, Scenario); 2] = [
+    ("guessed_compound", generate::guessed_compound),
+    ("keyless_duplicates", generate::keyless_duplicates),
+];
+
 fn pipeline(criterion: &mut Criterion) {
-    let options = DiffOptions {
+    let declared = DiffOptions {
         key: vec!["id".into()],
         ..DiffOptions::default()
     };
-    for (name, scenario) in SCENARIOS {
+    let guessed = DiffOptions::default();
+    let runs = SCENARIOS
+        .iter()
+        .map(|scenario| (scenario, &declared))
+        .chain(
+            GUESSED_SCENARIOS
+                .iter()
+                .map(|scenario| (scenario, &guessed)),
+        );
+    for (&(name, scenario), options) in runs {
         let mut group = criterion.benchmark_group(name);
         group.sample_size(10);
         for (rows, columns) in GRID {
@@ -51,7 +68,7 @@ fn pipeline(criterion: &mut Criterion) {
                 BenchmarkId::from_parameter(format!("{rows}x{columns}")),
                 &(old, new),
                 |bencher, (old, new)| {
-                    bencher.iter(|| diff_tables(old, new, &options).unwrap());
+                    bencher.iter(|| diff_tables(old, new, options).unwrap());
                 },
             );
         }

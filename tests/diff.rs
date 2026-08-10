@@ -232,6 +232,93 @@ fn automatic_resolution_without_an_eligible_key_falls_back() {
 }
 
 #[test]
+fn a_compound_key_is_guessed_and_matches_rows_semantically() {
+    let old = table! {
+        "group" => ["a", "a", "b", "b"],
+        "id" => [1, 2, 1, 2],
+        "value" => [10, 20, 30, 40],
+    };
+    let new = table! {
+        "group" => ["a", "a", "b", "b"],
+        "id" => [1, 2, 1, 2],
+        "value" => [10, 25, 30, 45],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    // No single column identifies rows — "group" and "id" repeat, and "value"
+    // shares only two values — so the guess is the (group, id) tuple, which
+    // shares all four and matches every row one to one.
+    assert_eq!(
+        diff.key,
+        KeyDiff {
+            basis: KeyBasis::Guessed,
+            columns: vec![
+                Coordinate::from_zero_based(0, 0),
+                Coordinate::from_zero_based(1, 1),
+            ],
+            overlap: Some(KeyOverlap {
+                shared: 4,
+                possible: 4,
+            }),
+            rejection: None,
+            retraction: None,
+        }
+    );
+    assert_eq!(diff.rows.matched.len(), 4);
+    assert!(diff.rows.added.is_empty());
+    assert!(diff.rows.dropped.is_empty());
+    assert!(diff.rows.fanout.is_empty());
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "table_key([group, id], basis: guessed, overlap: 1.00)\n\
+         col_edit(value, changes: 2)"
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_inferred_rename_makes_a_compound_component_on_the_second_pass() {
+    let old = table! {
+        "g" => ["a", "a", "b", "b"],
+        "old_id" => [1, 2, 1, 2],
+        "p" => [7, 7, 7, 7],
+    };
+    let new = table! {
+        "g" => ["a", "a", "b", "b"],
+        "id" => [1, 2, 1, 2],
+        "p" => [7, 7, 7, 7],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    // Pass one cannot see the renamed column and falls back; its rename
+    // inference identifies old_id -> id, and reconsideration's second guess —
+    // running over the enriched map — finds the (g, id) tuple no single pass
+    // one candidate could be.
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(
+        diff.key.columns,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+        ]
+    );
+    assert_eq!(diff.key.retraction, None);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "table_key([g, old_id -> id], basis: guessed, overlap: 1.00)\n\
+         col_rename(old_id -> id, basis: exact)"
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+}
+
+#[test]
 fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
     let old = table! {
         "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -1675,6 +1762,171 @@ fn an_implausible_fallback_regenerates_without_a_second_pass() {
     let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
     assert_eq!(diff, repeated);
     assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_implausible_compound_guess_is_retracted_as_a_set() {
+    // No single column is unique, and every pair with "b" in it keys both
+    // sides on all four tuples. (a, b) is enumerated first and wins — but the
+    // new file scrambles its tuples, so matching by it disagrees in twelve of
+    // the remaining cells and the guess is retracted. Exclusion removes that
+    // exact column-set: "b" itself stays available, and the chain lands on
+    // (b, v), whose diff says only that "a" changed.
+    let old = table! {
+        "a" => [1, 1, 2, 2],
+        "b" => [1, 2, 1, 2],
+        "v" => [10, 10, 20, 20],
+        "w" => [30, 30, 40, 40],
+        "u" => [50, 50, 60, 60],
+    };
+    let new = table! {
+        "a" => [2, 2, 1, 1],
+        "b" => [1, 2, 1, 2],
+        "v" => [10, 10, 20, 20],
+        "w" => [30, 30, 40, 40],
+        "u" => [50, 50, 60, 60],
+    };
+
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+
+    assert_eq!(
+        diff.key.retraction,
+        Some(KeyRetraction {
+            columns: vec![shared("a"), shared("b")],
+            mass: ChangeMass {
+                changed: 24,
+                total: 40,
+            },
+        })
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(
+        diff.key.columns,
+        vec![
+            Coordinate::from_zero_based(1, 1),
+            Coordinate::from_zero_based(2, 2),
+        ]
+    );
+    assert_eq!(diff.regeneration, None);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "key_retracted([a, b], reason: excessive_change)\n\
+         ----\n\
+         table_key([b, v], basis: guessed, overlap: 1.00)\n\
+         col_edit(a, changes: 4)"
+    );
+
+    let repeated = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_exhausted_key_search_reports_itself_before_the_other_stages() {
+    let old = table! {
+        "id" => [1, 2],
+        "a" => [5, 6],
+    };
+    let new = table! {
+        "id" => [1, 2],
+        "b" => [5, 6],
+    };
+
+    // A candidate budget of zero exhausts the key search before it examines
+    // anything, so the fallback stands in and carries the exhaustion; the
+    // zeroed rename budget then strands the renamed column as a drop and an
+    // addition. The report leads with the key, following the pipeline's own
+    // order.
+    let bounded = DiffOptions {
+        budgets: Budgets {
+            key_candidates: 0,
+            rename_rows: RowBudget::Rows(0),
+            ..Budgets::default()
+        },
+        ..DiffOptions::default()
+    };
+    let diff = diff_tables(&old, &new, &bounded).unwrap();
+
+    assert_eq!(
+        diff.incomplete,
+        vec![IncompleteStage::KeyGuess, IncompleteStage::Renames]
+    );
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "incomplete_key_guess()\n\
+         incomplete_renames()\n\
+         ----\n\
+         table_key([:row], basis: fallback)\n\
+         col_drop(a)\n\
+         col_add(b)"
+    );
+
+    let repeated = diff_tables(&old, &new, &bounded).unwrap();
+    assert_eq!(diff, repeated);
+    assert_eq!(render(&diff), render(&repeated));
+}
+
+#[test]
+fn an_exhausted_search_still_keeps_the_best_candidate_it_examined() {
+    let old = table! {
+        "id" => [1, 2, 3],
+        "note" => ["x", "y", "z"],
+    };
+    let new = table! {
+        "id" => [1, 2, 3],
+        "note" => ["x", "y", "q"],
+    };
+
+    // One admitted candidate: "id" is examined, wins, and stands — the useful
+    // partial result — while the diff still says the search was cut short.
+    let bounded = DiffOptions {
+        budgets: Budgets {
+            key_candidates: 1,
+            ..Budgets::default()
+        },
+        ..DiffOptions::default()
+    };
+    let diff = diff_tables(&old, &new, &bounded).unwrap();
+
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(diff.key.columns, vec![Coordinate::from_zero_based(0, 0)]);
+    assert_eq!(diff.incomplete, vec![IncompleteStage::KeyGuess]);
+    assert_eq!(
+        String::from_utf8(render(&diff)).unwrap(),
+        "incomplete_key_guess()\n\
+         ----\n\
+         table_key([id], basis: guessed, overlap: 1.00)\n\
+         row_edit(3, changes: 1)"
+    );
+}
+
+#[test]
+fn the_bench_scenarios_behave_as_their_documentation_claims() {
+    // The tuning rule in benches/README.md leans on two behaviors, pinned
+    // here at test scale so a regression fails fast rather than in a bench
+    // run: the hidden compound scenario completes under the default budgets
+    // and finds its (g1, g2) pair past every near-perfect payload column, and
+    // the low-cardinality adversary exhausts into the positional fallback —
+    // which, over identical files, is also the correct answer.
+    let (old, new) = test_support::generate::guessed_compound(1_000, 10);
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff.key.basis, KeyBasis::Guessed);
+    assert_eq!(
+        diff.key.columns,
+        vec![
+            Coordinate::from_zero_based(0, 0),
+            Coordinate::from_zero_based(1, 1),
+        ]
+    );
+    assert!(diff.incomplete.is_empty());
+
+    let (old, new) = test_support::generate::keyless_duplicates(1_000, 10);
+    let diff = diff_tables(&old, &new, &DiffOptions::default()).unwrap();
+    assert_eq!(diff.key.basis, KeyBasis::Fallback);
+    assert_eq!(diff.incomplete, vec![IncompleteStage::KeyGuess]);
+    assert!(diff.cells.is_empty());
+    assert_eq!(diff.regeneration, None);
 }
 
 #[test]

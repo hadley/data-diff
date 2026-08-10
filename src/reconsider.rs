@@ -15,7 +15,7 @@ use crate::cells::CellChanges;
 use crate::key::{self, ResolvedKey};
 use crate::rows::RowMatches;
 use crate::schema::ColumnMap;
-use crate::{ChangeMass, IdentityBasis, KeyBasis, KeyComponent, KeyRetraction};
+use crate::{Budgets, ChangeMass, IdentityBasis, KeyBasis, KeyComponent, KeyRetraction, Pass};
 
 /// The share of a comparison's cell mass a diff may account as changed and
 /// still be read as a story of edits.
@@ -100,21 +100,22 @@ pub(crate) struct Reconsideration {
 /// the next candidate or the fallback. And rerunning the guess with pass one's
 /// final map may find a winner the first resolution could not see, because an
 /// inferred identity is now a candidate; evaluating that trigger *is* running
-/// the pass-two guess, so a candidate that does not qualify or does not outrank
-/// the incumbent changes nothing. An implausible fallback with nothing new to
-/// offer goes directly to regeneration reporting instead: there is nothing
-/// below the fallback to retract it to.
+/// the pass-two guess — skipped only where it is provably the first guess
+/// repeated, which `cross_name_pairs` decides — so a candidate that does not
+/// qualify or does not outrank the incumbent changes nothing. An implausible
+/// fallback with nothing new to offer goes directly to regeneration reporting
+/// instead: there is nothing below the fallback to retract it to.
 ///
 /// The caller runs at most one second pass and never calls this on its result,
 /// which is the once-only rule, held structurally rather than by a counter.
 pub(crate) fn reconsider(
     old: &RecordBatch,
     new: &RecordBatch,
-    key: &ResolvedKey,
-    map: &ColumnMap,
-    rows: &RowMatches,
-    cells: &CellChanges,
+    first: &Pass,
+    hinted: &ColumnMap,
+    budgets: &Budgets,
 ) -> Reconsideration {
+    let (key, map) = (&first.key, &first.map);
     if key.basis == KeyBasis::Declared {
         return Reconsideration {
             key: None,
@@ -125,13 +126,11 @@ pub(crate) fn reconsider(
     let mut excluded = Vec::new();
     let mut retraction = None;
     if key.basis == KeyBasis::Guessed {
-        let mass = change_mass(old, new, key.basis, rows, cells);
+        let mass = change_mass(old, new, key.basis, &first.rows, &first.cells);
         if implausible(mass) {
-            excluded = key
-                .columns
-                .iter()
-                .map(|column| (column.old, column.new))
-                .collect();
+            // The exact column-set is what was tried and withdrawn; its
+            // individual columns stay available to other combinations.
+            excluded.push(endpoints(key));
             retraction = Some(KeyRetraction {
                 columns: key
                     .columns
@@ -146,15 +145,43 @@ pub(crate) fn reconsider(
         }
     }
 
-    let candidate = key::guess_key(old, new, map, &excluded);
+    // A guess is a pure function of the tables, the identities the map can
+    // show it, and the exclusions. Same-named pairs are visible to guessing
+    // whether or not a map holds them, so the map's contribution is exactly
+    // its cross-name pairs: when pass one added none — no rename inferred, no
+    // swap — and nothing was retracted, the second guess must return pass
+    // one's own answer, and evaluating the trigger is free rather than a
+    // second search.
+    if retraction.is_none() && cross_name_pairs(hinted, old, new) == cross_name_pairs(map, old, new)
+    {
+        return Reconsideration {
+            key: None,
+            retraction: None,
+        };
+    }
+
+    // The second guess runs under fresh counters, per the budget design, and
+    // its exhaustion belongs to the pass that keeps its key.
+    let guess = key::guess_key(old, new, map, &excluded, budgets);
+    let exhausted = guess.exhausted;
     let second = if retraction.is_some() {
         // A retracted guess always yields the chain: the next candidate, or
         // the fallback when nothing else can identify a row.
-        Some(candidate.unwrap_or_else(|| key::positional_key(old, new, KeyBasis::Fallback)))
+        let mut second = guess
+            .key
+            .unwrap_or_else(|| key::positional_key(old, new, KeyBasis::Fallback));
+        second.exhausted = exhausted;
+        Some(second)
     } else {
         // Without a retraction, only a different winner is worth a second
         // pass; from a fallback, any winner at all differs.
-        candidate.filter(|candidate| endpoints(candidate) != endpoints(key))
+        guess
+            .key
+            .map(|mut candidate| {
+                candidate.exhausted = exhausted;
+                candidate
+            })
+            .filter(|candidate| endpoints(candidate) != endpoints(key))
     };
     let Some(mut second) = second else {
         return Reconsideration {
@@ -176,6 +203,27 @@ fn endpoints(key: &ResolvedKey) -> Vec<(usize, usize)> {
         .iter()
         .map(|column| (column.old, column.new))
         .collect()
+}
+
+/// The identity coordinates a guess can only learn from this map.
+///
+/// A pair whose two columns share a name is excluded: guessing reaches those
+/// by name whether or not a map holds them, so a map that differs from
+/// another only in same-named pairs shows a guess the same field of
+/// candidates. Sorted, so equal sets compare equal as sequences.
+fn cross_name_pairs(map: &ColumnMap, old: &RecordBatch, new: &RecordBatch) -> Vec<(usize, usize)> {
+    let old_schema = old.schema();
+    let new_schema = new.schema();
+    let mut pairs: Vec<(usize, usize)> = map
+        .pairs()
+        .iter()
+        .map(|pair| (pair.old, pair.new))
+        .filter(|&(old_index, new_index)| {
+            old_schema.field(old_index).name() != new_schema.field(new_index).name()
+        })
+        .collect();
+    pairs.sort_unstable();
+    pairs
 }
 
 /// The identities pass two starts with beyond what hints claimed.
