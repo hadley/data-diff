@@ -236,38 +236,20 @@ fn value_order(values: &[ValueDto]) -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn cells_page(
-    session: &Session,
-    column: Option<u32>,
-    row: Option<u32>,
-    sort: &str,
-    page: usize,
-    page_size: usize,
-) -> PageDto<CellRowDto> {
+/// The flat evidence table, one page: exactly `Diff::cells`, ordered by the
+/// rows' key values so a row's cells stay together under its identity.
+pub fn cells_page(session: &Session, page: usize, page_size: usize) -> PageDto<CellRowDto> {
     let diff = &session.diff;
-    let mut entries: Vec<((usize, usize), (usize, usize))> = cell_map(diff)
-        .into_iter()
-        .filter(|((new_row, new_col), _)| {
-            column.is_none_or(|column| *new_col == column as usize - 1)
-                && row.is_none_or(|row| *new_row == row as usize - 1)
-        })
-        .collect();
+    let mut entries: Vec<((usize, usize), (usize, usize))> = cell_map(diff).into_iter().collect();
 
-    match sort {
-        "column" => entries.sort_by_key(|((row, col), _)| (*col, *row)),
-        // By the row's key values, then the column, so a row's cells stay
-        // together under its identity.
-        _ => {
-            let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
-            for &((new_row, _), _) in &entries {
-                keys.entry(new_row)
-                    .or_insert_with(|| value_order(&key_values(session, Side::New, new_row)));
-            }
-            entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
-                keys[row_a].cmp(&keys[row_b]).then(col_a.cmp(col_b))
-            });
-        }
+    let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
+    for &((new_row, _), _) in &entries {
+        keys.entry(new_row)
+            .or_insert_with(|| value_order(&key_values(session, Side::New, new_row)));
     }
+    entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
+        keys[row_a].cmp(&keys[row_b]).then(col_a.cmp(col_b))
+    });
 
     let total = entries.len();
     let items = entries
@@ -279,8 +261,6 @@ pub fn cells_page(
             column: diff.schemas.new[new_col].name.clone(),
             old: value_at(session, Side::Old, old_row, old_col),
             new: value_at(session, Side::New, new_row, new_col),
-            row: new_row as u32 + 1,
-            column_pos: new_col as u32 + 1,
         })
         .collect();
     dto::page(items, total, page, page_size)
@@ -484,7 +464,6 @@ pub fn row_view_section(
                 .take(page_size)
                 .collect();
             RowViewDto {
-                kind: kind.to_owned(),
                 columns: columns.into_iter().map(|(_, name)| name).collect(),
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
@@ -519,7 +498,6 @@ pub fn row_view_section(
                 })
                 .collect();
             RowViewDto {
-                kind: kind.to_owned(),
                 columns: shown
                     .iter()
                     .map(|&column| schemas[column].name.clone())
@@ -551,7 +529,6 @@ pub fn row_view_section(
                 })
                 .collect();
             RowViewDto {
-                kind: kind.to_owned(),
                 columns: vec!["old position".to_owned(), "new position".to_owned()],
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
@@ -616,7 +593,6 @@ pub fn row_view_section(
                 })
                 .collect();
             RowViewDto {
-                kind: kind.to_owned(),
                 columns,
                 rows: None,
                 groups: Some(dto::page(groups, total, page, page_size)),

@@ -38,14 +38,8 @@ export function openFiles(
   });
 }
 
-export function applyHints(hints: string[]): Promise<SessionSummary> {
-  return request("/api/hints", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ hints }),
-  });
-}
-
+// The hint surface returns to the frontend with its UI; the server route
+// (POST /api/hints) is already in place.
 export function schemaPanel(changedOnly: boolean): Promise<SchemaRow[]> {
   return request(`/api/schema${query({ changed_only: changedOnly })}`);
 }

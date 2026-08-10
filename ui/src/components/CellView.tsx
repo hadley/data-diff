@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { cellsPage } from "../api";
 import type { CellRow, Page } from "../types";
-import { PagedTable } from "./PagedTable";
+import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
 import { Pager } from "./Pager";
 import { ValueText } from "./ValueText";
 
@@ -26,11 +26,11 @@ export function CellView({ total, keyColumns }: { total: number; keyColumns: str
       {error && <p class="error">{error}</p>}
       {data && (
         <>
-          <PagedTable frozen={keyColumns.length}>
+          <PagedTable>
             <thead>
               <tr>
                 {keyColumns.map((name, i) => (
-                  <th class="frozen" style={{ left: `${i * 10}ch` }}>{name}</th>
+                  <FrozenTh index={i}>{name}</FrozenTh>
                 ))}
                 <th class="col-name">column</th>
                 <th>old</th>
@@ -41,9 +41,9 @@ export function CellView({ total, keyColumns }: { total: number; keyColumns: str
               {data.items.map((item, index) => (
                 <tr key={index}>
                   {item.key.map((value, i) => (
-                    <td class="frozen" style={{ left: `${i * 10}ch` }}>
+                    <FrozenTd index={i}>
                       <ValueText value={value} />
-                    </td>
+                    </FrozenTd>
                   ))}
                   <td class="col-name">{item.column}</td>
                   <td><ValueText value={item.old} /></td>

@@ -44,8 +44,6 @@ export interface CellRow {
   column: string;
   old: ValueDto;
   new: ValueDto;
-  row: number;
-  column_pos: number;
 }
 
 export interface ColumnHeader {
@@ -84,7 +82,6 @@ export interface FanoutGroup {
 }
 
 export interface RowViewData {
-  kind: string;
   columns: string[];
   rows: Page<RowLine> | null;
   groups: Page<FanoutGroup> | null;

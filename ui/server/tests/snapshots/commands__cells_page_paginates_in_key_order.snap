@@ -1,5 +1,5 @@
 ---
-source: ui/src-tauri/tests/commands.rs
+source: ui/server/tests/commands.rs
 expression: first
 ---
 {
@@ -19,9 +19,7 @@ expression: first
       "new": {
         "kind": "int64",
         "text": "16"
-      },
-      "row": 2,
-      "column_pos": 2
+      }
     },
     {
       "key": [
@@ -38,9 +36,7 @@ expression: first
       "new": {
         "kind": "int64",
         "text": "21"
-      },
-      "row": 3,
-      "column_pos": 2
+      }
     }
   ],
   "total": 3,

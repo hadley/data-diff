@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { columnView } from "../api";
 import type { ColumnViewData } from "../types";
-import { PagedTable } from "./PagedTable";
+import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
 import { Pager } from "./Pager";
 import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
@@ -32,8 +32,6 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
     setPage(0);
   };
 
-  const keyWidth = keyColumns.length;
-
   return (
     <div class="column-view">
       <header>
@@ -45,11 +43,11 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
       {error && <p class="error">{error}</p>}
       {data && (
         <>
-          <PagedTable frozen={keyWidth}>
+          <PagedTable>
             <thead>
               <tr>
                 {keyColumns.map((name, i) => (
-                  <th class="frozen" rowspan={2} style={{ left: `${i * 10}ch` }}>{name}</th>
+                  <FrozenTh index={i} rowspan={2}>{name}</FrozenTh>
                 ))}
                 {data.columns.map((column) =>
                   column.span === "pair" ? (
@@ -71,9 +69,9 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
               {data.rows.items.map((row, index) => (
                 <tr key={index}>
                   {row.key.map((value, i) => (
-                    <td class="frozen" style={{ left: `${i * 10}ch` }}>
+                    <FrozenTd index={i}>
                       <ValueText value={value} />
-                    </td>
+                    </FrozenTd>
                   ))}
                   {row.cells.flatMap((cell, i) => {
                     const column = data.columns[i];

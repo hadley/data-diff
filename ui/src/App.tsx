@@ -11,7 +11,6 @@ import type { SessionSummary, ViewKind } from "./types";
 export function App() {
   const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [view, setView] = useState<ViewKind>("cell");
-  const [error, setError] = useState<string | null>(null);
 
   // A session launched with paths is already open; pick it up once.
   useEffect(() => {
@@ -38,7 +37,6 @@ export function App() {
         </div>
         <ThemeToggle />
       </header>
-      {error && <p class="error">{error}</p>}
       <SchemaPanel summary={summary} />
       <section class="value-views">
         <nav class="tabs" role="tablist">

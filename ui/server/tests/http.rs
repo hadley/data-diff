@@ -138,20 +138,13 @@ fn every_route_serves_an_open_session() {
     assert_eq!(status, 200);
     assert!(all.as_array().unwrap().len() > changed.as_array().unwrap().len());
 
-    // The cell view: default page, both sorts, both filters, second page.
+    // The cell view: the first page and the second.
     let (status, cells) = get(address, "/api/cells?page=0&page_size=2");
     assert_eq!(status, 200);
     assert_eq!(cells["total"], 3);
     assert_eq!(cells["items"].as_array().unwrap().len(), 2);
-    for target in [
-        "/api/cells?sort=column",
-        "/api/cells?column=2",
-        "/api/cells?row=2",
-        "/api/cells?page=1&page_size=2",
-    ] {
-        let (status, _) = get(address, target);
-        assert_eq!(status, 200, "{target}");
-    }
+    let (status, _) = get(address, "/api/cells?page=1&page_size=2");
+    assert_eq!(status, 200);
 
     // The column view, every toggle combination.
     for target in [
@@ -177,38 +170,6 @@ fn every_route_serves_an_open_session() {
         );
         assert_eq!(status, 200, "{kind} all_columns");
     }
-}
-
-#[test]
-fn hints_round_trip_and_bad_hints_are_errors() {
-    let address = start(Some(session()), PathBuf::from("/nonexistent"));
-
-    // Split the name -> label rename into drop + add.
-    let (status, summary) = post(
-        address,
-        "/api/hints",
-        r#"{"hints": ["col_drop(name)", "col_add(label)"]}"#,
-    );
-    assert_eq!(status, 200);
-    let schema = summary["schema"].as_array().unwrap();
-    assert!(schema.iter().all(|row| row["basis"].is_null()));
-    assert!(schema.iter().any(|row| row["status"] == "dropped"));
-
-    // Join them back into a rename.
-    let (status, summary) = post(
-        address,
-        "/api/hints",
-        r#"{"hints": ["col_rename(name -> label)"]}"#,
-    );
-    assert_eq!(status, 200);
-    let schema = summary["schema"].as_array().unwrap();
-    assert!(schema.iter().any(|row| row["basis"] == "hinted"));
-
-    // A malformed hint is a 400 with a readable error, not a dropped
-    // connection.
-    let (status, error) = post(address, "/api/hints", r#"{"hints": ["bogus"]}"#);
-    assert_eq!(status, 400);
-    assert!(error["error"].as_str().unwrap().contains("bogus"));
 }
 
 #[test]
@@ -282,7 +243,7 @@ fn static_routes_and_unknown_apis_behave() {
 fn malformed_requests_get_errors_not_crashes() {
     let address = start(Some(session()), PathBuf::from("/nonexistent"));
 
-    let (status, _) = post(address, "/api/hints", "not json");
+    let (status, _) = post(address, "/api/open", "not json");
     assert_eq!(status, 400);
     let (status, _) = post(address, "/api/open", r#"{"old": 1}"#);
     assert_eq!(status, 400);

@@ -9,16 +9,13 @@
   --ink-faint: light-dark(#7d8794, #6f7883);
   --paper: light-dark(#f1eee8, #14181c);
   --card: light-dark(#ffffff, #1e242a);
-  --inset: light-dark(#f8f6f4, #191e23);
   --rule: light-dark(#d6d0c4, #333b44);
   --row-line: light-dark(#e4e0d7, #2a3138);
 
-  /* Solarized's eight accents; everything coloured is one of them or a
-     measured mix towards a surface. */
-  --yellow: #b58900;
+  /* The Solarized accents the app uses; everything coloured is one of them
+     or a measured mix towards a surface. */
   --orange: #cb4b16;
   --red: #dc322f;
-  --magenta: #d33682;
   --violet: #6c71c4;
   --blue: #268bd2;
   --cyan: #2aa198;
@@ -53,9 +50,6 @@
   --dropped-soft: light-dark(
     color-mix(in oklab, var(--red) 20%, white),
     color-mix(in oklab, var(--red) 20%, var(--paper)));
-  --warn: light-dark(
-    color-mix(in oklab, var(--yellow) 80%, black),
-    color-mix(in oklab, var(--yellow) 80%, white));
 
   --hover-row: light-dark(
     color-mix(in oklab, var(--accent1-hue) 10%, white),

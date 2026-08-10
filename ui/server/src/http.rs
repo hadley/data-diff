@@ -89,16 +89,6 @@ impl Server {
                 *self.session.lock().map_err(|error| error.to_string())? = Some(session);
                 Ok(Some(summary))
             }),
-            ("POST", "/api/hints") => self.json(|| {
-                let body: HintsRequest =
-                    serde_json::from_slice(&request.body).map_err(|error| error.to_string())?;
-                let mut guard = self.session.lock().map_err(|error| error.to_string())?;
-                let session = guard.as_mut().ok_or("no session is open")?;
-                session
-                    .apply_hints(body.hints)
-                    .map_err(|error| error.to_string())?;
-                Ok(commands::session_summary(session))
-            }),
             ("GET", "/api/schema") => self.json(|| {
                 self.with(|session| {
                     commands::schema_panel(session, query.flag("changed_only", true))
@@ -108,9 +98,6 @@ impl Server {
                 self.with(|session| {
                     commands::cells_page(
                         session,
-                        query.number("column"),
-                        query.number("row"),
-                        query.text("sort", "key"),
                         query.number("page").unwrap_or(0) as usize,
                         query.number("page_size").unwrap_or(50) as usize,
                     )
@@ -217,11 +204,6 @@ struct OpenRequest {
     #[serde(default)]
     key: Vec<String>,
     #[serde(default)]
-    hints: Vec<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct HintsRequest {
     hints: Vec<String>,
 }
 

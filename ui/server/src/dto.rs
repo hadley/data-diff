@@ -185,9 +185,6 @@ pub struct CellRowDto {
     pub column: String,
     pub old: ValueDto,
     pub new: ValueDto,
-    /// One-based new-side positions, for filter feedback.
-    pub row: u32,
-    pub column_pos: u32,
 }
 
 /// A column header in the column view.
@@ -241,7 +238,6 @@ pub struct FanoutGroupDto {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RowViewDto {
-    pub kind: String,
     pub columns: Vec<String>,
     /// Paged lines for `edited`, `added`, `dropped`, and `moved`.
     pub rows: Option<PageDto<RowLineDto>>,

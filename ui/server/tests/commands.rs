@@ -62,25 +62,18 @@ fn schema_panel_marks_keys_renames_types_and_events() {
 }
 
 #[test]
-fn cells_page_filters_sorts_and_paginates() {
+fn cells_page_paginates_in_key_order() {
     let session = fixture();
 
-    let first = commands::cells_page(&session, None, None, "key", 0, 2);
+    let first = commands::cells_page(&session, 0, 2);
     insta::assert_json_snapshot!(first);
     assert_eq!(first.items.len(), 2);
     assert!(first.total > 2);
 
-    let rest = commands::cells_page(&session, None, None, "key", 1, 2);
+    let rest = commands::cells_page(&session, 1, 2);
     assert_eq!(first.page, 0);
     assert_eq!(rest.page, 1);
     assert_ne!(first.items, rest.items);
-
-    // The column filter keeps one column's cells; the row filter one row's.
-    let price = first.items[0].column_pos;
-    let filtered = commands::cells_page(&session, Some(price), None, "key", 0, 50);
-    assert!(filtered.items.iter().all(|item| item.column_pos == price));
-    let by_row = commands::cells_page(&session, None, Some(2), "column", 0, 50);
-    assert!(by_row.items.iter().all(|item| item.row == 2));
 }
 
 #[test]
@@ -155,31 +148,11 @@ fn fanout_groups_expand_to_aligned_lines() {
 }
 
 #[test]
-fn apply_hints_replaces_the_diff() {
-    let mut session = fixture();
-    let renamed = commands::schema_panel(&session, true);
-    assert!(renamed.iter().any(|row| row.basis.is_some()));
-
-    // Splitting the rename into drop + add removes the identity.
-    session
-        .apply_hints(vec![
-            "col_drop(name)".to_owned(),
-            "col_add(label)".to_owned(),
-        ])
-        .unwrap();
-    let split = commands::schema_panel(&session, true);
-    assert!(split.iter().all(|row| row.basis.is_none()));
-    assert!(split.iter().any(|row| row.status == "dropped"));
-    assert!(split.iter().any(|row| row.status == "added"));
-}
-
-#[test]
 fn repeated_commands_are_byte_identical() {
     let session = fixture();
     let run = || {
         serde_json::to_string(&commands::session_summary(&session)).unwrap()
-            + &serde_json::to_string(&commands::cells_page(&session, None, None, "key", 0, 10))
-                .unwrap()
+            + &serde_json::to_string(&commands::cells_page(&session, 0, 10)).unwrap()
             + &serde_json::to_string(&commands::column_view(&session, true, true, true, 0, 10))
                 .unwrap()
             + &serde_json::to_string(&commands::row_view_section(&session, "edited", true, 0, 10))

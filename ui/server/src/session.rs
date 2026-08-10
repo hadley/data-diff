@@ -45,22 +45,6 @@ impl Session {
         })
     }
 
-    /// Re-run the diff with a new hint set, replacing the session's result.
-    pub fn apply_hints(&mut self, hints: Vec<String>) -> Result<(), DiffError> {
-        let diff = diff_tables(
-            &self.old,
-            &self.new,
-            &DiffOptions {
-                key: self.key.clone(),
-                hints: hints.clone(),
-                ..DiffOptions::default()
-            },
-        )?;
-        self.hints = hints;
-        self.diff = diff;
-        Ok(())
-    }
-
     pub fn lookup(&self) -> Lookup<'_> {
         Lookup::new(&self.old, &self.new)
     }

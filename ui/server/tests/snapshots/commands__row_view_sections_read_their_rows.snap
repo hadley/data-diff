@@ -1,9 +1,8 @@
 ---
-source: ui/src-tauri/tests/commands.rs
+source: ui/server/tests/commands.rs
 expression: edited
 ---
 {
-  "kind": "edited",
   "columns": [
     "price"
   ],

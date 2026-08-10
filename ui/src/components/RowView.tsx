@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { rowViewSection } from "../api";
 import type { RowViewData, SessionSummary } from "../types";
 import { Expando } from "./Expando";
-import { PagedTable } from "./PagedTable";
+import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
 import { Pager } from "./Pager";
 import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
@@ -116,12 +116,12 @@ function LinesTable({
   keyColumns: string[];
 }) {
   return (
-    <PagedTable frozen={keyColumns.length}>
+    <PagedTable>
       <thead>
         <tr>
           <th />
           {keyColumns.map((name, i) => (
-            <th class="frozen" style={{ left: `${i * 10}ch` }}>{name}</th>
+            <FrozenTh index={i}>{name}</FrozenTh>
           ))}
           {data.columns.map((column) => (
             <th>{column}</th>
@@ -133,9 +133,9 @@ function LinesTable({
           <tr key={index} class={line.label.startsWith("new") ? "new-line" : "old-line"}>
             <td class="line-label">{line.label}</td>
             {line.key.map((value, i) => (
-              <td class="frozen" style={{ left: `${i * 10}ch` }}>
+              <FrozenTd index={i}>
                 <ValueText value={value} />
-              </td>
+              </FrozenTd>
             ))}
             {line.values.map((value, i) => (
               <td class={line.changed[i] ? "changed" : ""}>
