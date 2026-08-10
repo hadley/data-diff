@@ -1,0 +1,39 @@
+---
+source: ui/src-tauri/tests/commands.rs
+expression: changed
+---
+[
+  {
+    "status": "identity",
+    "key": false,
+    "old_pos": 3,
+    "old_name": "name",
+    "new_pos": 3,
+    "new_name": "label",
+    "moved": false,
+    "basis": "exact",
+    "type_change": null
+  },
+  {
+    "status": "added",
+    "key": false,
+    "old_pos": null,
+    "old_name": null,
+    "new_pos": 4,
+    "new_name": "sku",
+    "moved": false,
+    "basis": null,
+    "type_change": null
+  },
+  {
+    "status": "dropped",
+    "key": false,
+    "old_pos": 4,
+    "old_name": "qty",
+    "new_pos": null,
+    "new_name": null,
+    "moved": false,
+    "basis": null,
+    "type_change": null
+  }
+]

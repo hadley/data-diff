@@ -1,0 +1,470 @@
+/* The page's one palette. Each colour is defined once: `light-dark()` picks
+   by the scheme in use, and the data-theme rules force a scheme when the
+   reader asks for one, so there is no second palette to keep in step. */
+:root {
+  color-scheme: light dark;
+
+  --ink: light-dark(#1c2430, #e3e6ea);
+  --ink-soft: light-dark(#5b6675, #a3acb7);
+  --ink-faint: light-dark(#7d8794, #6f7883);
+  --paper: light-dark(#f1eee8, #14181c);
+  --card: light-dark(#ffffff, #1e242a);
+  --inset: light-dark(#f8f6f4, #191e23);
+  --rule: light-dark(#d6d0c4, #333b44);
+  --row-line: light-dark(#e4e0d7, #2a3138);
+
+  /* Solarized's eight accents; everything coloured is one of them or a
+     measured mix towards a surface. */
+  --yellow: #b58900;
+  --orange: #cb4b16;
+  --red: #dc322f;
+  --magenta: #d33682;
+  --violet: #6c71c4;
+  --blue: #268bd2;
+  --cyan: #2aa198;
+  --green: #859900;
+
+  /* The app's vocabulary: blue is identity (keys, links, focus), orange is
+     change (changed cells), green is added, red is dropped, yellow a caveat. */
+  --accent1-hue: var(--blue);
+  --accent2-hue: var(--orange);
+
+  --accent1: light-dark(
+    color-mix(in oklab, var(--accent1-hue) 80%, black),
+    color-mix(in oklab, var(--accent1-hue) 80%, white));
+  --accent1-soft: light-dark(
+    color-mix(in oklab, var(--accent1-hue) 20%, white),
+    color-mix(in oklab, var(--accent1-hue) 20%, var(--paper)));
+  --accent2: light-dark(
+    color-mix(in oklab, var(--accent2-hue) 80%, black),
+    color-mix(in oklab, var(--accent2-hue) 80%, white));
+  --accent2-soft: light-dark(
+    color-mix(in oklab, var(--accent2-hue) 20%, white),
+    color-mix(in oklab, var(--accent2-hue) 20%, var(--paper)));
+  --added: light-dark(
+    color-mix(in oklab, var(--green) 80%, black),
+    color-mix(in oklab, var(--green) 80%, white));
+  --added-soft: light-dark(
+    color-mix(in oklab, var(--green) 20%, white),
+    color-mix(in oklab, var(--green) 20%, var(--paper)));
+  --dropped: light-dark(
+    color-mix(in oklab, var(--red) 80%, black),
+    color-mix(in oklab, var(--red) 80%, white));
+  --dropped-soft: light-dark(
+    color-mix(in oklab, var(--red) 20%, white),
+    color-mix(in oklab, var(--red) 20%, var(--paper)));
+  --warn: light-dark(
+    color-mix(in oklab, var(--yellow) 80%, black),
+    color-mix(in oklab, var(--yellow) 80%, white));
+
+  --hover-row: light-dark(
+    color-mix(in oklab, var(--accent1-hue) 10%, white),
+    color-mix(in oklab, var(--accent1-hue) 10%, var(--paper)));
+  --focus-ring: color-mix(in oklab, var(--accent1-hue) 20%, transparent);
+  --shadow-near: light-dark(rgba(28, 36, 48, 0.06), rgba(0, 0, 0, 0.35));
+  --shadow-far: light-dark(rgba(28, 36, 48, 0.25), rgba(0, 0, 0, 0.5));
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] { color-scheme: only light; }
+:root[data-theme="dark"] { color-scheme: only dark; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 32px 40px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+h1, h2 { margin: 0; }
+
+/* ---- page head ---------------------------------------------------------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.head-title {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+}
+
+.app-header h1 {
+  color: var(--accent1);
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.paths {
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one icon button: the theme toggle. */
+.icon-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-btn:hover { border-color: var(--accent1); color: var(--accent1); }
+.icon-btn svg { display: block; width: 19px; height: 19px; }
+.theme-toggle svg { transition: transform 0.2s ease; }
+.theme-toggle.is-dark svg { transform: rotate(180deg); }
+
+.error { color: var(--dropped); }
+
+/* ---- cards and micro-labels ---------------------------------------------- */
+
+.schema-panel {
+  padding: 14px 16px;
+}
+
+/* The tabset owns the card: the tabs sit on its top edge and the active
+   view is the card's body, so column/row/cell visibly contain the page. */
+.value-views .view-body, .schema-panel {
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px var(--shadow-near);
+}
+
+.schema-panel header,
+.cell-view header,
+.column-view header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+/* Section headings and expando titles share the micro-label voice. */
+.schema-panel h2,
+.cell-view h2,
+.column-view h2,
+.row-view h2,
+.expando-header {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.count { color: var(--ink-faint); font-size: 12px; }
+
+/* ---- controls ------------------------------------------------------------- */
+
+button, select, input {
+  font: inherit;
+  color: var(--ink);
+}
+
+button {
+  padding: 5px 10px;
+  font-size: 12px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent1); color: var(--accent1); }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: none;
+  border-color: var(--accent1);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+select, input {
+  padding: 5px 9px;
+  font-size: 12.5px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+input::placeholder { color: var(--ink-faint); }
+
+/* The changed/all control: two paired buttons reading as one switch. */
+.paired-toggle {
+  display: inline-flex;
+}
+.paired-toggle button {
+  border-radius: 0;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.paired-toggle button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.paired-toggle button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+.paired-toggle button.on {
+  color: var(--accent1);
+  background: var(--accent1-soft);
+  position: relative;
+}
+
+/* ---- tabs ------------------------------------------------------------------ */
+
+/* Real tabs on the card's top edge: the active one is continuous with the
+   body below it, the inactive ones sit on the rule. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 16px;
+}
+
+.tab {
+  position: relative;
+  top: 1px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: none;
+  padding: 7px 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.tab:hover { color: var(--ink); border-color: transparent; }
+.tab.active {
+  color: var(--accent1);
+  background: var(--card);
+  border-color: var(--rule);
+  /* overwrite the card's bottom rule where the tab meets the body */
+  box-shadow: 0 1px 0 var(--card);
+}
+
+/* ---- schema panel ----------------------------------------------------------- */
+
+.schema-panel table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.schema-panel th {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+.schema-panel td,
+.schema-panel th {
+  padding: 4px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.schema-panel tbody tr + tr { border-top: 1px solid var(--row-line); }
+.schema-panel tbody tr:hover { background: var(--hover-row); }
+.schema-panel tr.added td { background: var(--added-soft); }
+.schema-panel tr.dropped td { background: var(--dropped-soft); }
+
+/* The key mark: the shared palette's PK chip, worn by every key column. */
+.key-badge {
+  font-family: ui-sans-serif, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent1);
+  background: var(--accent1-soft);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.badge {
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.badge.rename { color: var(--accent2); background: var(--accent2-soft); }
+.badge.added { color: var(--added); background: var(--added-soft); }
+.badge.dropped { color: var(--dropped); background: var(--dropped-soft); }
+
+.type-change { color: var(--ink-soft); font-size: 11px; }
+
+.actions button { margin-right: 4px; padding: 2px 7px; font-size: 11px; }
+.join select { padding: 2px 5px; font-size: 11px; margin-right: 4px; }
+
+/* ---- value tables ------------------------------------------------------------- */
+
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.paged-table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.paged-table th,
+.paged-table td {
+  padding: 4px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.paged-table thead th {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+  background: var(--card);
+}
+
+.paged-table th.group { text-align: center; }
+.paged-table th.sub { font-weight: 400; color: var(--ink-faint); }
+
+.paged-table tbody tr + tr { border-top: 1px solid var(--row-line); }
+.paged-table tbody tr:hover { background: var(--hover-row); }
+
+/* The row view's old/new pairs: no rule between the two lines of a pair —
+   they are one row of the story — and a breath of padding between pairs. */
+.paged-table tbody tr.new-line { border-top: none; }
+.paged-table tbody tr.old-line:not(:first-child) td,
+.paged-table tbody tr.old-line:not(:first-child) th {
+  padding-top: 12px;
+}
+
+.paged-table .frozen {
+  position: sticky;
+  background: var(--card);
+  font-weight: 650;
+}
+.paged-table tbody tr:hover .frozen { background: var(--hover-row); }
+
+/* A changed cell is the orange accent at notice-strength. */
+.paged-table td.changed { background: var(--accent2-soft); }
+
+/* The cell view's column column is the table's second axis; the rule sets
+   it off from the old/new values it introduces. */
+.cell-view .paged-table .col-name { border-right: 1px solid var(--rule); }
+.paged-table td.single { color: var(--ink-soft); }
+
+.line-label {
+  color: var(--ink-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ---- values ------------------------------------------------------------------ */
+
+.value.null,
+.value.nan {
+  font-style: italic;
+  color: var(--ink-faint);
+}
+.value.empty { color: var(--ink-faint); }
+.value.boolean { color: var(--violet); }
+.value.int64,
+.value.double,
+.value.decimal { font-variant-numeric: tabular-nums; }
+.value.timestamp,
+.value.date { color: var(--cyan); }
+
+/* ---- expandos and pagers ------------------------------------------------------- */
+
+.expando { margin: 4px 0; }
+
+.expando-header {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 4px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.expando-header:hover { color: var(--ink); border-color: transparent; }
+
+.expando-body { margin-left: 16px; }
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+/* ---- the open form -------------------------------------------------------------- */
+
+.open-form {
+  max-width: 34rem;
+  margin: 8vh auto;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px var(--shadow-near);
+  padding: 24px 28px;
+  gap: 14px;
+}
+
+.open-form h1 { color: var(--accent1); font-size: 22px; }
+.open-form p { color: var(--ink-soft); margin: 0; }
+.open-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.open-form input { font-family: var(--mono); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

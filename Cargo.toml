@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace]
-members = ["test-support"]
+members = ["test-support", "ui/server"]
 
 [dependencies]
 arrow-array = "54"

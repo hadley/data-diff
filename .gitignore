@@ -1,3 +1,7 @@
 /target
+/.posit
 *.snap.new
 *.pending-snap
+ui/node_modules
+ui/dist
+ui/demo-*.parquet

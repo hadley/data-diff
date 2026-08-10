@@ -1,0 +1,82 @@
+---
+source: ui/src-tauri/tests/commands.rs
+expression: group
+---
+{
+  "old_row": 4,
+  "new_rows": [
+    4,
+    5
+  ],
+  "lines": [
+    {
+      "label": "old",
+      "key": [
+        {
+          "kind": "int64",
+          "text": "4"
+        }
+      ],
+      "values": [
+        {
+          "kind": "int64",
+          "text": "4"
+        },
+        {
+          "kind": "int64",
+          "text": "10"
+        }
+      ],
+      "changed": [
+        false,
+        false
+      ]
+    },
+    {
+      "label": "new 1",
+      "key": [
+        {
+          "kind": "int64",
+          "text": "4"
+        }
+      ],
+      "values": [
+        {
+          "kind": "int64",
+          "text": "4"
+        },
+        {
+          "kind": "int64",
+          "text": "10"
+        }
+      ],
+      "changed": [
+        false,
+        false
+      ]
+    },
+    {
+      "label": "new 2",
+      "key": [
+        {
+          "kind": "int64",
+          "text": "4"
+        }
+      ],
+      "values": [
+        {
+          "kind": "int64",
+          "text": "4"
+        },
+        {
+          "kind": "int64",
+          "text": "4"
+        }
+      ],
+      "changed": [
+        false,
+        true
+      ]
+    }
+  ]
+}

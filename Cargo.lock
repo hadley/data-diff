@@ -529,6 +529,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-diff-ui"
+version = "0.0.1"
+dependencies = [
+ "arrow-array",
+ "clap",
+ "data-diff",
+ "insta",
+ "parquet",
+ "serde",
+ "serde_json",
+ "test-support",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -702,6 +716,7 @@ checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
 dependencies = [
  "console",
  "once_cell",
+ "serde",
  "similar",
  "tempfile",
 ]

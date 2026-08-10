@@ -1,0 +1,49 @@
+---
+source: ui/src-tauri/tests/commands.rs
+expression: first
+---
+{
+  "items": [
+    {
+      "key": [
+        {
+          "kind": "int64",
+          "text": "2"
+        }
+      ],
+      "column": "price",
+      "old": {
+        "kind": "int64",
+        "text": "14"
+      },
+      "new": {
+        "kind": "int64",
+        "text": "16"
+      },
+      "row": 2,
+      "column_pos": 2
+    },
+    {
+      "key": [
+        {
+          "kind": "int64",
+          "text": "3"
+        }
+      ],
+      "column": "price",
+      "old": {
+        "kind": "int64",
+        "text": "20"
+      },
+      "new": {
+        "kind": "int64",
+        "text": "21"
+      },
+      "row": 3,
+      "column_pos": 2
+    }
+  ],
+  "total": 3,
+  "page": 0,
+  "page_size": 2
+}
