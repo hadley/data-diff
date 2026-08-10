@@ -7,6 +7,7 @@ mod hint;
 mod human;
 mod input;
 mod key;
+mod lookup;
 mod maps;
 mod model;
 mod order;
@@ -16,12 +17,14 @@ mod rows;
 mod schema;
 mod summary;
 mod swap;
+mod value;
 
 use arrow_array::RecordBatch;
 
 pub use human::{write_human, write_human_one_sided};
 pub use input::{MISSING_FILE, read_parquet, validate_tables};
 pub use key::POSITIONAL_COMPONENT;
+pub use lookup::Lookup;
 pub use model::{
     Budgets, CellCoordinate, ChangeMass, ColumnEdit, ColumnIdentity, ColumnSchema, ColumnsDiff,
     Coordinate, Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent,
@@ -29,6 +32,7 @@ pub use model::{
     KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
     OneSidedDiff, OrderDiff, RejectionReason, RowBudget, RowEdit, RowsDiff, Schemas, Side,
 };
+pub use value::Value;
 
 use crate::agreement::RowSample;
 use crate::cells::CellChanges;

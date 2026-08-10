@@ -164,6 +164,20 @@ pub enum DiffError {
         source_type: String,
         row: usize,
     },
+    /// A one-based row position outside the side a [`crate::Lookup`] was
+    /// asked to read.
+    RowOutOfRange {
+        side: Side,
+        row: u32,
+        rows: usize,
+    },
+    /// A one-based column position outside the side a [`crate::Lookup`] was
+    /// asked to read.
+    ColumnOutOfRange {
+        side: Side,
+        column: u32,
+        columns: usize,
+    },
     EmptyKeyComponent,
     MalformedKeyComponent {
         component: String,
@@ -224,6 +238,19 @@ impl std::fmt::Display for DiffError {
                 f,
                 "{side} column {column:?} ({source_type}) exceeds int64 at row {row}"
             ),
+            DiffError::RowOutOfRange { side, row, rows } => {
+                write!(f, "{side} has {rows} rows; row {row} is outside it")
+            }
+            DiffError::ColumnOutOfRange {
+                side,
+                column,
+                columns,
+            } => {
+                write!(
+                    f,
+                    "{side} has {columns} columns; column {column} is outside it"
+                )
+            }
             DiffError::EmptyKeyComponent => f.write_str("the key contains an empty component"),
             DiffError::MalformedKeyComponent { component } => write!(
                 f,
@@ -295,7 +322,8 @@ impl Coordinate {
         }
     }
 
-    pub(crate) fn positions(&self) -> (usize, usize) {
+    /// The one-based `(old, new)` positions.
+    pub fn positions(&self) -> (usize, usize) {
         match self.0 {
             CoordinateRepr::Same(position) => (position, position),
             CoordinateRepr::Moved([old, new]) => (old, new),
@@ -341,6 +369,14 @@ impl CellCoordinate {
             Self(CellCoordinateRepr::Same(old))
         } else {
             Self(CellCoordinateRepr::Moved([old, new]))
+        }
+    }
+
+    /// The one-based `(old, new)` positions, each a `[row, column]` pair.
+    pub fn positions(&self) -> ([u32; 2], [u32; 2]) {
+        match self.0 {
+            CellCoordinateRepr::Same(position) => (position, position),
+            CellCoordinateRepr::Moved([old, new]) => (old, new),
         }
     }
 }
