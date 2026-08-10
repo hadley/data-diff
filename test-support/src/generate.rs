@@ -6,8 +6,10 @@
 //! benchmark measures the code and not the fixture, and two runs generate
 //! byte-identical tables.
 //!
-//! Every pair carries an `id` column holding the row index, so a benchmark can
-//! declare the key and measure reconciliation rather than key guessing.
+//! Most pairs carry an `id` column holding the row index, so a benchmark can
+//! declare the key and measure reconciliation rather than key guessing. The
+//! `guessed_*` and `keyless_*` pairs omit it — they exist to measure the key
+//! search itself, and an obvious unique column would end it at width one.
 
 use std::sync::Arc;
 
@@ -134,6 +136,73 @@ pub fn renamed_strings(rows: usize, columns: usize) -> (RecordBatch, RecordBatch
     (values("old"), values("new"))
 }
 
+/// A hidden compound key: the honest keyless case the search exists for.
+///
+/// Neither group column is unique alone and the (g1, g2) tuple identifies
+/// every row on both sides. Each payload column is unique too, but one row of
+/// it was edited, so it shares one tuple fewer than the compound and the
+/// ranking must prefer the evidence over the parsimony tie-break. Every
+/// eligible candidate is terminal, so the lattice's one live path is the
+/// hidden pair, and downstream sees an ordinary small edit.
+pub fn guessed_compound(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let block = integer_sqrt(rows);
+    let side = |edited: i64| {
+        let mut named = vec![
+            (
+                "g1".to_owned(),
+                int_column(rows, move |row| (row / block) as i64),
+            ),
+            (
+                "g2".to_owned(),
+                int_column(rows, move |row| (row % block) as i64),
+            ),
+        ];
+        named.extend((0..columns).map(|column| {
+            (
+                format!("c{column}"),
+                int_column(rows, move |row| {
+                    let value = distinct(column, row);
+                    if row == 0 { value + edited } else { value }
+                }),
+            )
+        }));
+        keyless_table(named)
+    };
+    (side(0), side(1))
+}
+
+/// Low-cardinality columns with no key at any width: the key-search adversary.
+///
+/// Every column holds a handful of values, every combination up to the width
+/// cap stays duplicated, and the two sides are identical, so the whole cost is
+/// the lattice the budgets exist to bound. The search must exhaust into the
+/// positional fallback — which is also the correct answer, the files being
+/// identical.
+pub fn keyless_duplicates(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let build = || {
+        keyless_table(
+            (0..columns)
+                .map(|column| {
+                    (
+                        format!("c{column}"),
+                        int_column(rows, move |row| ((row >> (column % 16)) & 1) as i64),
+                    )
+                })
+                .collect(),
+        )
+    };
+    (build(), build())
+}
+
+/// The largest `block` with `block * block <= rows`, without floating point.
+fn integer_sqrt(rows: usize) -> usize {
+    let mut block = 1;
+    while (block + 1) * (block + 1) <= rows {
+        block += 1;
+    }
+    block
+}
+
 /// A value distinct across both coordinates, so unrelated columns never agree
 /// and a column's values never repeat: informative everywhere, colliding
 /// nowhere. Deterministic by construction.
@@ -168,6 +237,16 @@ fn table(names: Vec<String>, columns: impl Iterator<Item = ArrayRef>) -> RecordB
         .unwrap_or(0);
     let mut arrays = vec![int_column(rows, |row| row as i64)];
     arrays.extend(rows_then_columns);
+    assemble(names, arrays)
+}
+
+/// Assemble named columns as given, with no key column injected.
+fn keyless_table(named: Vec<(String, ArrayRef)>) -> RecordBatch {
+    let (names, arrays): (Vec<String>, Vec<ArrayRef>) = named.into_iter().unzip();
+    assemble(names, arrays)
+}
+
+fn assemble(names: Vec<String>, arrays: Vec<ArrayRef>) -> RecordBatch {
     let fields = names
         .iter()
         .zip(&arrays)

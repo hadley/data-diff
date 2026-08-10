@@ -32,6 +32,14 @@ table_key([id], basis: guessed, overlap: 1.00)
 row_edit(2, changes: 2)
 ```
 
+A guessed key does not have to be one column. Here no single column identifies every row — regions repeat across quarters and quarters across regions, and the edited `revenue` column matches only three rows to the pair's four — so the search combines columns and the evidence picks the pair:
+
+```console
+$ data-diff demo/compound-key-old.parquet demo/compound-key-new.parquet
+table_key([region, quarter], basis: guessed, overlap: 1.00)
+row_edit(3, changes: 1)
+```
+
 You can also match keys that were renamed. Name both sides as a pair:
 
 ```console

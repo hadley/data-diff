@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 
+use std::cmp::Reverse;
+
 use crate::compare::{CanonicalValue, ComparisonPlan, sequence_hash, stable_hash};
 use crate::maps::DigestMap;
 use crate::schema::ColumnMap;
 use crate::{
-    DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject,
-    RejectionReason, Side,
+    Budgets, DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection,
+    KeySubject, RejectionReason, RowBudget, Side,
 };
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -18,6 +20,14 @@ pub(crate) struct ResolvedKey {
     pub new: KeyValues,
     pub overlap: Option<KeyOverlap>,
     pub rejection: Option<KeyRejection>,
+    /// Whether the guess behind this key ran out of budget before it examined
+    /// every candidate.
+    ///
+    /// Carried on the key rather than reported at the search, because the
+    /// exhaustion outlives the guess: a cut-short search that found nothing
+    /// still leaves a fallback whose story includes the candidates that went
+    /// unexamined, and the pass that keeps the key is the one that reports it.
+    pub exhausted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -119,18 +129,16 @@ impl KeyValues {
 /// `RejectionReason::ExcessiveFanout` carries the counts it was measured from.
 pub(crate) const MAX_FANOUT_PERCENT: usize = 10;
 
-/// Rows grouped by key digest, with equality confirmed on lookup.
+/// Rows grouped by digest into one map entry and three flat vectors.
 ///
-/// A bucket can hold rows with different keys, so a collision must never decide
-/// membership; confirming equality inside the bucket is what key validation and
-/// row matching both need, and sharing it keeps that reasoning in one place.
-///
-/// The digests come precomputed from [`KeyValues`], so building the index and
-/// looking rows up never hashes a tuple. Buckets share two flat vectors rather
-/// than owning a `Vec` each: a unique key — most keys — costs no dedicated
-/// heap allocation.
-pub(crate) struct KeyIndex<'a> {
-    keys: &'a KeyValues,
+/// A digest only chooses the bucket; every consumer confirms equality on the
+/// bucket's members, so a collision can never decide membership. The layout is
+/// what keeps bulk construction cheap: a heap `Vec` per bucket would cost a
+/// mostly-unique column an allocation per row, where this costs a handful
+/// however the digests fall. Bucket ids are assigned in first-occurrence
+/// order, so iterating buckets in id order is deterministic without reading
+/// the map's own order.
+struct DigestIndex {
     /// Digest to bucket id, ids assigned in first-occurrence order.
     buckets: DigestMap<usize>,
     /// Bucket id to its range in `rows`; one final entry closes the last.
@@ -139,17 +147,18 @@ pub(crate) struct KeyIndex<'a> {
     rows: Vec<usize>,
 }
 
-impl<'a> KeyIndex<'a> {
-    pub(crate) fn new(keys: &'a KeyValues) -> Self {
-        // Pre-sized to the worst case of all-distinct keys, and each row's
+impl DigestIndex {
+    fn new(digests: impl ExactSizeIterator<Item = u128>) -> Self {
+        // Pre-sized to the worst case of all-distinct digests, and each row's
         // bucket id is remembered from this pass, so no digest is ever looked
-        // up twice and the map never rehashes as it grows.
-        let mut buckets = DigestMap::with_capacity_and_hasher(keys.len(), Default::default());
+        // up twice and the map never rehashes as it grows. Taking the digests
+        // as an iterator spares every caller a materialized digest vector.
+        let mut buckets = DigestMap::with_capacity_and_hasher(digests.len(), Default::default());
         let mut counts: Vec<usize> = Vec::new();
-        let mut ids = Vec::with_capacity(keys.len());
-        for row in 0..keys.len() {
+        let mut ids = Vec::with_capacity(digests.len());
+        for digest in digests {
             let next = counts.len();
-            let id = *buckets.entry(keys.digest(row)).or_insert(next);
+            let id = *buckets.entry(digest).or_insert(next);
             if id == next {
                 counts.push(0);
             }
@@ -166,16 +175,51 @@ impl<'a> KeyIndex<'a> {
         // Per-bucket write cursors; visiting rows in ascending order keeps
         // every bucket ascending.
         let mut cursors: Vec<usize> = offsets[..counts.len()].to_vec();
-        let mut rows = vec![0; keys.len()];
+        let mut rows = vec![0; ids.len()];
         for (row, &id) in ids.iter().enumerate() {
             rows[cursors[id]] = row;
             cursors[id] += 1;
         }
         Self {
-            keys,
             buckets,
             offsets,
             rows,
+        }
+    }
+
+    /// The rows in `digest`'s bucket, in ascending row order; a digest match,
+    /// not yet an equality.
+    fn rows(&self, digest: u128) -> &[usize] {
+        self.buckets.get(&digest).map_or(&[], |&id| {
+            &self.rows[self.offsets[id]..self.offsets[id + 1]]
+        })
+    }
+
+    /// Every bucket, in first-occurrence order.
+    fn buckets(&self) -> impl Iterator<Item = &[usize]> {
+        self.offsets
+            .windows(2)
+            .map(|window| &self.rows[window[0]..window[1]])
+    }
+}
+
+/// Rows grouped by key digest, with equality confirmed on lookup.
+///
+/// A bucket can hold rows with different keys, so a collision must never decide
+/// membership; confirming equality inside the bucket is what key validation and
+/// row matching both need, and sharing it keeps that reasoning in one place.
+/// The digests come precomputed from [`KeyValues`], so building the index and
+/// looking rows up never hashes a tuple.
+pub(crate) struct KeyIndex<'a> {
+    keys: &'a KeyValues,
+    index: DigestIndex,
+}
+
+impl<'a> KeyIndex<'a> {
+    pub(crate) fn new(keys: &'a KeyValues) -> Self {
+        Self {
+            keys,
+            index: DigestIndex::new(keys.digests.iter().copied()),
         }
     }
 
@@ -189,10 +233,9 @@ impl<'a> KeyIndex<'a> {
         key: &'b [CanonicalValue],
         digest: u128,
     ) -> impl Iterator<Item = usize> + 'b {
-        self.buckets
-            .get(&digest)
-            .into_iter()
-            .flat_map(move |&id| self.rows[self.offsets[id]..self.offsets[id + 1]].iter())
+        self.index
+            .rows(digest)
+            .iter()
             .copied()
             .filter(move |&row| self.keys.row(row) == key)
     }
@@ -209,6 +252,7 @@ pub(crate) fn resolve_key(
     new: &RecordBatch,
     declared: &Declared,
     hinted: &ColumnMap,
+    budgets: &Budgets,
 ) -> ResolvedKey {
     let rejection = match declared {
         Declared::Positional => return positional_key(old, new, KeyBasis::Declared),
@@ -219,8 +263,12 @@ pub(crate) fn resolve_key(
         Declared::Guess => None,
     };
 
-    let mut key = guess_key(old, new, hinted, &[])
+    let guess = guess_key(old, new, hinted, &[], budgets);
+    let exhausted = guess.exhausted;
+    let mut key = guess
+        .key
         .unwrap_or_else(|| positional_key(old, new, KeyBasis::Fallback));
+    key.exhausted = exhausted;
     key.rejection = rejection;
     key
 }
@@ -248,6 +296,7 @@ pub(crate) fn positional_key(old: &RecordBatch, new: &RecordBatch, basis: KeyBas
         new: positions(new.num_rows()),
         overlap: None,
         rejection: None,
+        exhausted: false,
     }
 }
 
@@ -318,6 +367,7 @@ fn declared_key(
         new: new_keys,
         overlap: None,
         rejection: None,
+        exhausted: false,
     })
 }
 
@@ -381,7 +431,13 @@ pub(crate) mod testing {
     ) -> Result<ResolvedKey, DiffError> {
         let declared = declared_components(&options.key)?;
         let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
-        Ok(super::resolve_key(old, new, &declared, &map))
+        Ok(super::resolve_key(
+            old,
+            new,
+            &declared,
+            &map,
+            &options.budgets,
+        ))
     }
 
     pub(crate) fn rejection(
@@ -453,43 +509,204 @@ fn position(table: &RecordBatch, name: &str) -> Option<usize> {
         .position(|field| field.name() == name)
 }
 
-/// Select the eligible identified single column that shares the most key values.
+/// The least a proportional `key_rows` budget resolves to.
 ///
-/// Ranking follows the evidence: the candidate identifying the most rows across
-/// the two files wins, and freedom from fanout only settles a tie. A true key
-/// that duplicated one row is a better guess than a column that happens to be
-/// unique but identifies far fewer rows.
+/// Enough to fund the whole lattice of a small table however many columns it
+/// has — the per-candidate costs there are a handful of rows each, so the
+/// floor covers thousands of candidates — while adding nothing at sizes where
+/// the proportional allowance already dwarfs it.
+pub(crate) const KEY_ROWS_FLOOR: usize = 65_536;
+
+/// A guess and whether the search behind it was exhaustive.
 ///
-/// `excluded` holds pairs a caller has already tried and withdrawn — a retracted
-/// guess must not be guessed again — and is empty on a first resolution. The
-/// map, not this function, is how reconsideration widens the field: an identity
-/// inference established makes its pair a candidate here exactly as a hinted
-/// identity always has.
+/// The two travel together because exhaustion outlives the guess: a search cut
+/// short that found nothing still leaves a fallback whose story includes the
+/// candidates that went unexamined, so the caller copies `exhausted` onto
+/// whichever key it ends up keeping.
+pub(crate) struct Guess {
+    pub key: Option<ResolvedKey>,
+    pub exhausted: bool,
+}
+
+/// Select the eligible candidate — one identified column or a combination of
+/// them — that shares the most key tuples.
+///
+/// Ranking follows the evidence, then parsimony: most shared tuples, then
+/// fewer columns, then freedom from fanout, then old-side column order. A
+/// single column keeps its bounded new-side fanout allowance; a wider
+/// candidate must be unique in both sides, so the fanout tie-break can only
+/// ever separate single columns, and a guessed compound key is incapable of
+/// fanout by construction.
+///
+/// The search is a breadth-first walk of the column-combination lattice in the
+/// HyUCC family, bounded three ways: `key_width` defines the space, and
+/// `key_rows` and `key_candidates` meter the work of covering it. On
+/// exhaustion the best candidate already examined wins, which is the useful
+/// partial result, and `Guess::exhausted` says the search was cut short.
+///
+/// `excluded` holds candidates a caller has already tried and withdrawn, each
+/// an exact column-set: a retracted guess must not be guessed again, while its
+/// individual columns stay available to other combinations. The map, not this
+/// function, is how reconsideration widens the field: an identity inference
+/// established makes its pair a candidate here exactly as a hinted identity
+/// always has.
 pub(crate) fn guess_key(
     old: &RecordBatch,
     new: &RecordBatch,
     hinted: &ColumnMap,
-    excluded: &[(usize, usize)],
-) -> Option<ResolvedKey> {
-    if old.num_rows() == 0 || new.num_rows() == 0 {
-        return None;
+    excluded: &[Vec<(usize, usize)>],
+    budgets: &Budgets,
+) -> Guess {
+    let none = Guess {
+        key: None,
+        exhausted: false,
+    };
+    if old.num_rows() == 0 || new.num_rows() == 0 || budgets.key_width == 0 {
+        return none;
+    }
+    let mut pool = eligible_columns(old, new, hinted);
+    if pool.is_empty() {
+        return none;
     }
 
-    struct Candidate {
-        old_index: usize,
-        new_index: usize,
-        old_values: Vec<CanonicalValue>,
-        new_values: Vec<CanonicalValue>,
-        overlap: Overlap,
+    // Key guessing runs before any rows are matched, so the proportional
+    // budget resolves against the cells the unavoidable input pass reads —
+    // and it keeps a floor, because the lattice's cost scales with column
+    // combinations where the yardstick scales with cells, and a small wide
+    // table would otherwise be refused a search that costs almost nothing in
+    // absolute terms. The absolute form stays exact, so tests can meter to
+    // the row.
+    let cells = old
+        .num_rows()
+        .saturating_mul(old.num_columns())
+        .saturating_add(new.num_rows().saturating_mul(new.num_columns()));
+    let rows = match budgets.key_rows {
+        RowBudget::PerCell(_) => budgets.key_rows.resolve(cells).max(KEY_ROWS_FLOOR),
+        RowBudget::Rows(rows) => rows,
+    };
+    let mut meter = Meter {
+        rows,
+        candidates: budgets.key_candidates,
+        exhausted: false,
+    };
+
+    let best = search(&pool, excluded, budgets.key_width, &mut meter);
+    let Some(best) = best else {
+        return Guess {
+            key: None,
+            exhausted: meter.exhausted,
+        };
+    };
+
+    // Only the winner materializes key tuples; its component columns move out
+    // of the pool rather than being cloned.
+    let columns = best
+        .columns
+        .iter()
+        .map(|&column| KeyColumn {
+            old: pool[column].old_index,
+            new: pool[column].new_index,
+        })
+        .collect();
+    let old_components = best
+        .columns
+        .iter()
+        .map(|&column| std::mem::take(&mut pool[column].old.values))
+        .collect();
+    let new_components = best
+        .columns
+        .iter()
+        .map(|&column| std::mem::take(&mut pool[column].new.values))
+        .collect();
+    Guess {
+        key: Some(ResolvedKey {
+            basis: KeyBasis::Guessed,
+            columns,
+            old: KeyValues::from_columns(old_components, old.num_rows()),
+            new: KeyValues::from_columns(new_components, new.num_rows()),
+            rejection: None,
+            overlap: Some(best.overlap),
+            exhausted: false,
+        }),
+        exhausted: meter.exhausted,
+    }
+}
+
+/// One identified, comparable column pair whose values could ever key a row.
+struct PoolColumn {
+    old_index: usize,
+    new_index: usize,
+    old: SideColumn,
+    new: SideColumn,
+}
+
+impl PoolColumn {
+    fn side(&self, side: Side) -> &SideColumn {
+        match side {
+            Side::Old => &self.old,
+            Side::New => &self.new,
+        }
+    }
+}
+
+/// One side of a pool column: its canonical values, their digests, and the
+/// rows it duplicates.
+struct SideColumn {
+    values: Vec<CanonicalValue>,
+    digests: Vec<u128>,
+    /// The rows sharing each duplicated value; empty exactly when the column
+    /// is unique on this side.
+    clusters: Vec<Vec<usize>>,
+}
+
+impl SideColumn {
+    fn new(values: Vec<CanonicalValue>) -> Self {
+        Self::with_hash(values, stable_hash)
     }
 
-    /// Larger is better: shared keys first, then freedom from fanout.
-    fn rank(overlap: &Overlap) -> (usize, bool) {
-        (overlap.shared, overlap.affected == 0)
+    /// The hash is injectable so a test can force every digest to collide,
+    /// which is the only way to prove the equality confirmations behind the
+    /// digests keep colliding values apart.
+    fn with_hash(values: Vec<CanonicalValue>, hash: fn(&CanonicalValue) -> u128) -> Self {
+        let digests: Vec<u128> = values.iter().map(hash).collect();
+        let all: Vec<usize> = (0..values.len()).collect();
+        let clusters = duplicate_clusters(&all, &values, &digests);
+        Self {
+            values,
+            digests,
+            clusters,
+        }
     }
 
+    fn unique(&self) -> bool {
+        self.clusters.is_empty()
+    }
+
+    /// Distinct values on this side: every row, minus each cluster's rows
+    /// beyond its first.
+    fn distinct(&self) -> usize {
+        self.values.len()
+            - self
+                .clusters
+                .iter()
+                .map(|cluster| cluster.len() - 1)
+                .sum::<usize>()
+    }
+}
+
+/// The identified, comparable column pairs whose values could ever key a row,
+/// in old-side column order.
+///
+/// A column with a null or `NaN` anywhere on either side leaves here, before
+/// the lattice exists: no candidate of any width may contain a missing value,
+/// so such a column can take part in nothing the search enumerates.
+///
+/// Like the projections behind rename inference, the pool holds one canonical
+/// copy of each eligible column per side — the search reads values throughout,
+/// so the bill is paid once, linear in cells.
+fn eligible_columns(old: &RecordBatch, new: &RecordBatch, hinted: &ColumnMap) -> Vec<PoolColumn> {
     let new_schema = new.schema();
-    let mut best: Option<Candidate> = None;
+    let mut pool = Vec::new();
     for (old_index, old_field) in old.schema().fields().iter().enumerate() {
         // An identified column, which a hint may have identified across a
         // rename; a name whose counterpart a hint claimed for another column is
@@ -506,9 +723,6 @@ pub(crate) fn guess_key(
         let Some(new_index) = hinted.new_for_old(old_index).or(by_name) else {
             continue;
         };
-        if excluded.contains(&(old_index, new_index)) {
-            continue;
-        }
         let old_column = old.column(old_index);
         let new_column = new.column(new_index);
         let Some(plan) = ComparisonPlan::new(old_column.data_type(), new_column.data_type()) else {
@@ -516,93 +730,432 @@ pub(crate) fn guess_key(
         };
         let old_values = plan.canonicalize_old(old_column.as_ref());
         let new_values = plan.canonicalize_new(new_column.as_ref());
-        let Some(overlap) = candidate_overlap(&old_values, &new_values, stable_hash) else {
-            continue;
-        };
-        if overlap.shared == 0 || !within_fanout_limit(overlap.affected, overlap.shared) {
+        if old_values
+            .iter()
+            .chain(new_values.iter())
+            .any(CanonicalValue::invalid_key)
+        {
             continue;
         }
-        // Strictly greater, so an earlier column keeps a complete tie.
-        if best
-            .as_ref()
-            .is_none_or(|best| rank(&overlap) > rank(&best.overlap))
-        {
-            best = Some(Candidate {
-                old_index,
-                new_index,
-                old_values,
-                new_values,
-                overlap,
-            });
+        pool.push(PoolColumn {
+            old_index,
+            new_index,
+            old: SideColumn::new(old_values),
+            new: SideColumn::new(new_values),
+        });
+    }
+    pool
+}
+
+/// Group the rows among `rows` that share a value, in deterministic order.
+///
+/// Digests choose buckets and equality decides membership, as everywhere else,
+/// so a collision cannot merge two values into one cluster. Buckets arrive in
+/// first-occurrence order from the flat index, so the result is a pure
+/// function of the input, and only a genuinely duplicated value — never a
+/// singleton — costs a cluster allocation.
+fn duplicate_clusters(
+    rows: &[usize],
+    values: &[CanonicalValue],
+    digests: &[u128],
+) -> Vec<Vec<usize>> {
+    let index = DigestIndex::new(rows.iter().map(|&row| digests[row]));
+    let mut result = Vec::new();
+    for bucket in index.buckets() {
+        if bucket.len() < 2 {
+            continue;
+        }
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for &position in bucket {
+            let row = rows[position];
+            match groups
+                .iter_mut()
+                .find(|group| values[group[0]] == values[row])
+            {
+                Some(group) => group.push(row),
+                None => groups.push(vec![row]),
+            }
+        }
+        result.extend(groups.into_iter().filter(|group| group.len() > 1));
+    }
+    result
+}
+
+/// The search's two counted allowances, spent in enumeration order.
+///
+/// Exhaustion is sticky: the first charge the remainder cannot fund kills the
+/// meter, so the unexamined candidates are one deterministic tail of the
+/// enumeration. A zero-cost charge always succeeds, so empty inputs can never
+/// exhaust anything.
+struct Meter {
+    rows: usize,
+    candidates: usize,
+    exhausted: bool,
+}
+
+impl Meter {
+    /// Admit one candidate to the lattice, or exhaust.
+    fn admit(&mut self) -> bool {
+        if self.exhausted || self.candidates == 0 {
+            self.exhausted = true;
+            return false;
+        }
+        self.candidates -= 1;
+        true
+    }
+
+    /// Fund an examination that reads this many rows, or exhaust.
+    fn charge(&mut self, rows: usize) -> bool {
+        if self.exhausted || rows > self.rows {
+            self.exhausted = true;
+            return false;
+        }
+        self.rows -= rows;
+        true
+    }
+}
+
+/// The winning candidate: its pool columns and the overlap it reports.
+struct BestCandidate {
+    columns: Vec<usize>,
+    rank: (usize, Reverse<usize>, bool),
+    overlap: KeyOverlap,
+}
+
+/// One lattice node still worth extending: no subset of it can be a key, and
+/// each side's duplicate clusters carry the evidence forward for refinement.
+struct Extendable {
+    /// Pool indexes, ascending; extension appends columns past the last, so
+    /// every combination is enumerated exactly once, in prefix order.
+    columns: Vec<usize>,
+    /// Empty exactly when the tuple is unique on that side.
+    old_clusters: Vec<Vec<usize>>,
+    new_clusters: Vec<Vec<usize>>,
+}
+
+/// Walk the lattice breadth-first and return the best eligible candidate.
+///
+/// Width 1 is today's single-column scan restated: unique in `old`, bounded
+/// fanout in `new`, at least one shared value. Wider candidates extend only
+/// combinations that failed uniqueness on at least one side, because two
+/// prunes close every other door. A superset of an *eligible* candidate can
+/// never win — it shares at most as many tuples, since every shared wider
+/// tuple projects to a shared narrower one, and it loses the fewer-columns
+/// tie-break — and a superset of a unique-both-sides candidate sharing nothing
+/// shares nothing itself. Both are `terminal`.
+///
+/// The agree sets are the search's HyUCC-style row evidence: a failed
+/// uniqueness validation records every pool column its first duplicate pair
+/// agrees on, and any later candidate inside that set is known non-unique on
+/// that side without reading a row. At the final width, where no child needs
+/// clusters, that answer is the whole cost of the candidate.
+fn search(
+    pool: &[PoolColumn],
+    excluded: &[Vec<(usize, usize)>],
+    key_width: usize,
+    meter: &mut Meter,
+) -> Option<BestCandidate> {
+    let rows_old = pool[0].old.values.len();
+    let rows_new = pool[0].new.values.len();
+    let mut best: Option<BestCandidate> = None;
+    // Candidates whose supersets are never generated: the eligible and the
+    // dead. Excluded eligible candidates count too — a superset of a retracted
+    // key inherits its condemned matching minus rows, which can only read as
+    // more of a rewrite, not less.
+    let mut terminal: Vec<Vec<usize>> = Vec::new();
+    let mut old_agree: Vec<Vec<usize>> = Vec::new();
+    let mut new_agree: Vec<Vec<usize>> = Vec::new();
+    let mut frontier: Vec<Extendable> = Vec::new();
+
+    // Larger is better, and enumeration order — width ascending, columns
+    // lexicographic — settles complete ties in favor of the earliest.
+    let rank =
+        |shared: usize, width: usize, affected: usize| (shared, Reverse(width), affected == 0);
+    let is_excluded = |columns: &[usize]| {
+        let pairs: Vec<(usize, usize)> = columns
+            .iter()
+            .map(|&column| (pool[column].old_index, pool[column].new_index))
+            .collect();
+        excluded.contains(&pairs)
+    };
+
+    // Width 1: uniqueness fell out of the pool's construction, so the only
+    // charged work is the overlap measurement.
+    for (index, column) in pool.iter().enumerate() {
+        if !meter.admit() {
+            break;
+        }
+        if !column.old.unique() {
+            // Never eligible at this width — old-side duplication has no
+            // allowance — but one more column can cure it.
+            record_agree(pool, Side::Old, &column.old.clusters, &mut old_agree, meter);
+            if !column.new.unique() {
+                record_agree(pool, Side::New, &column.new.clusters, &mut new_agree, meter);
+            }
+            if meter.exhausted {
+                break;
+            }
+            if key_width > 1 {
+                frontier.push(Extendable {
+                    columns: vec![index],
+                    old_clusters: column.old.clusters.clone(),
+                    new_clusters: column.new.clusters.clone(),
+                });
+            }
+            continue;
+        }
+        if !meter.charge(rows_old + rows_new) {
+            break;
+        }
+        let (shared, affected) = overlap_of(pool, &[index]);
+        if shared > 0 && within_fanout_limit(affected, shared) {
+            terminal.push(vec![index]);
+            if !is_excluded(&[index]) {
+                let candidate = BestCandidate {
+                    columns: vec![index],
+                    rank: rank(shared, 1, affected),
+                    overlap: KeyOverlap {
+                        shared,
+                        // Distinct keys on each side. `old` is unique, so its
+                        // distinct count is its row count; `new`'s is smaller
+                        // than its row count exactly when it duplicates one.
+                        possible: rows_old.min(column.new.distinct()),
+                    },
+                };
+                if best.as_ref().is_none_or(|best| candidate.rank > best.rank) {
+                    best = Some(candidate);
+                }
+            }
+        } else if shared == 0 {
+            // `old` is unique here, so a wider tuple shares at most what this
+            // one shares: nothing. Terminal rather than extendable.
+            terminal.push(vec![index]);
+        } else {
+            // Fanout beyond the allowance: new-side duplication one more
+            // column can cure.
+            record_agree(pool, Side::New, &column.new.clusters, &mut new_agree, meter);
+            if meter.exhausted {
+                break;
+            }
+            if key_width > 1 {
+                frontier.push(Extendable {
+                    columns: vec![index],
+                    old_clusters: Vec::new(),
+                    new_clusters: column.new.clusters.clone(),
+                });
+            }
         }
     }
 
-    let candidate = best?;
-    Some(ResolvedKey {
-        basis: KeyBasis::Guessed,
-        columns: vec![KeyColumn {
-            old: candidate.old_index,
-            new: candidate.new_index,
-        }],
-        old: single_component_rows(candidate.old_values),
-        new: single_component_rows(candidate.new_values),
-        rejection: None,
-        overlap: Some(KeyOverlap {
-            shared: candidate.overlap.shared,
-            // Distinct keys on each side. `old` is unique, so its distinct
-            // count is its row count; `new`'s is smaller than its row count
-            // exactly when it duplicates a value.
-            possible: old.num_rows().min(candidate.overlap.distinct_new),
-        }),
+    let mut width = 1;
+    while width < key_width && !frontier.is_empty() && !meter.exhausted {
+        width += 1;
+        let last = width == key_width;
+        let mut next = Vec::new();
+        'level: for parent in &frontier {
+            let extension = parent.columns.last().copied().expect("no empty candidate") + 1;
+            for column in extension..pool.len() {
+                let mut columns = parent.columns.clone();
+                columns.push(column);
+                if terminal.iter().any(|set| subset(set, &columns)) {
+                    continue;
+                }
+                if !meter.admit() {
+                    break 'level;
+                }
+                let Some(old_clusters) = validate_side(
+                    pool,
+                    Side::Old,
+                    &columns,
+                    &parent.old_clusters,
+                    &mut old_agree,
+                    last,
+                    meter,
+                ) else {
+                    break 'level;
+                };
+                // At the final width nothing extends, so a candidate already
+                // ineligible on the old side is done without touching `new`.
+                if last && !old_clusters.unique {
+                    continue;
+                }
+                let Some(new_clusters) = validate_side(
+                    pool,
+                    Side::New,
+                    &columns,
+                    &parent.new_clusters,
+                    &mut new_agree,
+                    last,
+                    meter,
+                ) else {
+                    break 'level;
+                };
+                if old_clusters.unique && new_clusters.unique {
+                    // Unique in both sides: eligible exactly when it shares a
+                    // tuple, dead either way for every superset.
+                    if !meter.charge(rows_old + rows_new) {
+                        break 'level;
+                    }
+                    let (shared, _) = overlap_of(pool, &columns);
+                    terminal.push(columns.clone());
+                    if shared > 0 && !is_excluded(&columns) {
+                        let candidate = BestCandidate {
+                            rank: rank(shared, width, 0),
+                            overlap: KeyOverlap {
+                                shared,
+                                possible: rows_old.min(rows_new),
+                            },
+                            columns,
+                        };
+                        if best.as_ref().is_none_or(|best| candidate.rank > best.rank) {
+                            best = Some(candidate);
+                        }
+                    }
+                } else if !last {
+                    next.push(Extendable {
+                        columns,
+                        old_clusters: old_clusters.clusters,
+                        new_clusters: new_clusters.clusters,
+                    });
+                }
+            }
+        }
+        frontier = next;
+    }
+    best
+}
+
+/// One side's answer for one candidate: whether the tuple is unique there,
+/// with the surviving duplicate clusters when the caller still needs them.
+struct SideValidation {
+    unique: bool,
+    clusters: Vec<Vec<usize>>,
+}
+
+/// Validate one side of a candidate, or return `None` on exhaustion.
+///
+/// A parent unique on this side stays unique under any extension, free. A
+/// candidate inside a recorded agree set is known duplicated without reading a
+/// row, which at the final width — no child needs the clusters — is the whole
+/// cost. Everything else pays for its refinement: only the parent's duplicate
+/// cluster rows are re-examined, so the cost concentrates exactly where
+/// duplication does.
+fn validate_side(
+    pool: &[PoolColumn],
+    side: Side,
+    columns: &[usize],
+    parent_clusters: &[Vec<usize>],
+    agree: &mut Vec<Vec<usize>>,
+    last: bool,
+    meter: &mut Meter,
+) -> Option<SideValidation> {
+    if parent_clusters.is_empty() {
+        return Some(SideValidation {
+            unique: true,
+            clusters: Vec::new(),
+        });
+    }
+    let known_duplicated = agree.iter().any(|set| subset(columns, set));
+    if known_duplicated && last {
+        return Some(SideValidation {
+            unique: false,
+            clusters: Vec::new(),
+        });
+    }
+    let rows: usize = parent_clusters.iter().map(Vec::len).sum();
+    if !meter.charge(rows) {
+        return None;
+    }
+    let added = pool[*columns.last().expect("no empty candidate")].side(side);
+    let mut clusters = Vec::new();
+    for cluster in parent_clusters {
+        clusters.extend(duplicate_clusters(cluster, &added.values, &added.digests));
+    }
+    if !clusters.is_empty() && !known_duplicated {
+        record_agree(pool, side, &clusters, agree, meter);
+        if meter.exhausted {
+            return None;
+        }
+    }
+    Some(SideValidation {
+        unique: clusters.is_empty(),
+        clusters,
     })
 }
 
-fn single_component_rows(values: Vec<CanonicalValue>) -> KeyValues {
-    KeyValues::new(1, values)
+/// Record the agree set a failed uniqueness validation leaves behind.
+///
+/// The first duplicate pair agrees on the candidate's own columns and possibly
+/// more; every pool column it agrees on joins the set, and any later candidate
+/// inside the set is non-unique on this side without being validated at all.
+/// Reading the pair across the pool is charged as the two rows it is.
+fn record_agree(
+    pool: &[PoolColumn],
+    side: Side,
+    clusters: &[Vec<usize>],
+    agree: &mut Vec<Vec<usize>>,
+    meter: &mut Meter,
+) {
+    if !meter.charge(2) {
+        return;
+    }
+    let pair = &clusters[0];
+    let (a, b) = (pair[0], pair[1]);
+    agree.push(
+        pool.iter()
+            .enumerate()
+            .filter(|(_, column)| {
+                let column = column.side(side);
+                column.values[a] == column.values[b]
+            })
+            .map(|(index, _)| index)
+            .collect(),
+    );
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Overlap {
-    /// Distinct old keys that also occur in `new`.
-    shared: usize,
-    /// Those that occur more than once in `new`.
-    affected: usize,
-    distinct_new: usize,
+/// Whether `candidate` is contained in `set`, both ascending.
+fn subset(candidate: &[usize], set: &[usize]) -> bool {
+    let mut set = set.iter();
+    'candidate: for &column in candidate {
+        for &member in set.by_ref() {
+            if member == column {
+                continue 'candidate;
+            }
+            if member > column {
+                return false;
+            }
+        }
+        return false;
+    }
+    true
 }
 
-/// Measure what a candidate column shares across sides.
+/// Measure what a candidate tuple shares across sides, reading both in full.
 ///
-/// Returns `None` when the column cannot identify rows at all: a null or `NaN`
-/// on either side, or a duplicated value in `old`. New-side duplication is
-/// measured rather than disqualifying, and the caller applies the fanout bound.
+/// `shared` counts distinct old tuples that occur in `new`, and `affected`
+/// counts those that occur there more than once. Counting distinct keys rather
+/// than matching rows keeps a fanning candidate from earning a point per
+/// duplicate. The caller has already established uniqueness in `old`, so each
+/// old row contributes one distinct tuple.
 ///
-/// `shared` counts distinct keys rather than matching new rows. The two agree
-/// unless a candidate fans out, where counting rows would award a point per
-/// duplicate and so rank a duplicated column above a cleaner one that genuinely
-/// identifies more rows.
-///
-/// Hashes are bucket indexes only; equality is confirmed inside each bucket, so
-/// a collision can neither manufacture a duplicate nor inflate a count.
-fn candidate_overlap(
-    old: &[CanonicalValue],
-    new: &[CanonicalValue],
-    hash: impl Fn(&CanonicalValue) -> u128,
-) -> Option<Overlap> {
-    if old.iter().chain(new).any(CanonicalValue::invalid_key) {
-        return None;
-    }
-    let old_buckets = buckets(old, &hash);
-    if first_occurrences(old, &old_buckets, &hash).count() != old.len() {
-        return None;
-    }
-
-    let new_buckets = buckets(new, &hash);
+/// The per-row digests combine into a tuple digest that only chooses buckets;
+/// equality of the component values decides membership, so a collision can
+/// neither manufacture a match nor inflate a count.
+fn overlap_of(pool: &[PoolColumn], columns: &[usize]) -> (usize, usize) {
+    let rows_new = pool[0].new.values.len();
+    let index =
+        DigestIndex::new((0..rows_new).map(|row| tuple_digest(pool, columns, Side::New, row)));
+    let rows_old = pool[0].old.values.len();
     let mut shared = 0;
     let mut affected = 0;
-    for value in old {
-        match new_buckets.get(&hash(value)).map_or(0, |rows| {
-            rows.iter().filter(|&&row| new[row] == *value).count()
-        }) {
+    for row in 0..rows_old {
+        let digest = tuple_digest(pool, columns, Side::Old, row);
+        match index
+            .rows(digest)
+            .iter()
+            .filter(|&&new_row| tuples_equal(pool, columns, row, new_row))
+            .count()
+        {
             0 => {}
             1 => shared += 1,
             _ => {
@@ -611,43 +1164,27 @@ fn candidate_overlap(
             }
         }
     }
-
-    Some(Overlap {
-        shared,
-        affected,
-        distinct_new: first_occurrences(new, &new_buckets, &hash).count(),
-    })
+    (shared, affected)
 }
 
-fn buckets(
-    values: &[CanonicalValue],
-    hash: impl Fn(&CanonicalValue) -> u128,
-) -> DigestMap<Vec<usize>> {
-    let mut buckets = DigestMap::<Vec<usize>>::default();
-    for (row, value) in values.iter().enumerate() {
-        buckets.entry(hash(value)).or_default().push(row);
-    }
-    buckets
-}
-
-/// The rows holding the first occurrence of each distinct value.
+/// Combine a row's per-column digests into one tuple digest.
 ///
-/// Counting these counts distinct values, and comparing that count with the
-/// row count tests uniqueness, both without trusting the hash: a bucket is
-/// filled in row order, so a row is the first occurrence of its value when no
-/// earlier row in its bucket holds an equal value.
-fn first_occurrences<'a>(
-    values: &'a [CanonicalValue],
-    buckets: &'a DigestMap<Vec<usize>>,
-    hash: &'a impl Fn(&CanonicalValue) -> u128,
-) -> impl Iterator<Item = usize> + 'a {
-    values.iter().enumerate().filter_map(move |(row, value)| {
-        buckets[&hash(value)]
-            .iter()
-            .take_while(|&&earlier| earlier < row)
-            .all(|&earlier| values[earlier] != *value)
-            .then_some(row)
+/// The combination need only be deterministic and order-sensitive, because a
+/// tuple digest is a bucket index and never an equality: `tuples_equal`
+/// decides membership on the values themselves.
+fn tuple_digest(pool: &[PoolColumn], columns: &[usize], side: Side, row: usize) -> u128 {
+    columns.iter().fold(0u128, |digest, &column| {
+        digest
+            .rotate_left(11)
+            .wrapping_add(pool[column].side(side).digests[row])
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)
     })
+}
+
+fn tuples_equal(pool: &[PoolColumn], columns: &[usize], old_row: usize, new_row: usize) -> bool {
+    columns
+        .iter()
+        .all(|&column| pool[column].old.values[old_row] == pool[column].new.values[new_row])
 }
 
 /// One declared key component, parsed but not yet resolved to columns.
@@ -849,17 +1386,44 @@ mod tests {
 
     use super::testing::{rejection, resolve_key};
     use super::{
-        KeyIndex, KeyValues, Overlap, candidate_overlap, declared_components, guess_key,
-        validate_fanout, validate_unique_old,
+        KeyIndex, KeyValues, PoolColumn, ResolvedKey, SideColumn, declared_components, guess_key,
+        overlap_of, validate_fanout, validate_unique_old,
     };
     #[cfg(test)]
     use crate::DiffOptions;
     use crate::compare::{CanonicalValue, stable_hash};
     use crate::schema::ColumnMap;
     use crate::{
-        DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection, KeySubject,
-        RejectionReason, Side,
+        Budgets, DiffError, IdentityBasis, KeyBasis, KeyComponent, KeyOverlap, KeyRejection,
+        KeySubject, RejectionReason, Side,
     };
+
+    /// Guess under default budgets, which ordinary fixtures never bind.
+    fn guess(
+        old: &RecordBatch,
+        new: &RecordBatch,
+        map: &ColumnMap,
+        excluded: &[Vec<(usize, usize)>],
+    ) -> Option<ResolvedKey> {
+        let guess = guess_key(old, new, map, excluded, &Budgets::default());
+        assert!(!guess.exhausted, "default budgets must not bind a fixture");
+        guess.key
+    }
+
+    /// A pool column over two literal canonical columns, for exercising the
+    /// search's measurements directly.
+    fn pool_column(
+        old: Vec<CanonicalValue>,
+        new: Vec<CanonicalValue>,
+        hash: fn(&CanonicalValue) -> u128,
+    ) -> PoolColumn {
+        PoolColumn {
+            old_index: 0,
+            new_index: 0,
+            old: SideColumn::with_hash(old, hash),
+            new: SideColumn::with_hash(new, hash),
+        }
+    }
 
     /// One component naming the same column on both sides.
     fn shared(name: &str) -> KeyComponent {
@@ -1494,11 +2058,15 @@ mod tests {
         let new = table! {
             "null" => [1, 2],
             "nan" => [1.0, 2.0],
-            "dup_old" => [1, 2],
+            "dup_old" => [5, 6],
             "dup_new" => [1, 1],
             "disjoint" => [3, 4],
         };
 
+        // No single column qualifies, and no combination of the survivors
+        // shares a tuple — `dup_old` and `dup_new` are unique together on both
+        // sides, but their old tuples pair values the new file never pairs —
+        // so the compound search finds nothing either.
         assert_eq!(
             resolve_key(&old, &new, &options(&[])).unwrap().basis,
             KeyBasis::Fallback
@@ -1546,12 +2114,15 @@ mod tests {
         let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
 
         // Exclusion narrows the field without changing the ranking: the best
-        // remaining candidate wins, and excluding them all leaves nothing.
-        let first = guess_key(&old, &new, &map, &[]).unwrap();
+        // remaining candidate wins. Excluding every single column leaves
+        // nothing, because an excluded eligible candidate also blocks its
+        // supersets — a compound built on a retracted key inherits its
+        // condemned matching — so no pair can replace the retracted singles.
+        let first = guess(&old, &new, &map, &[]).unwrap();
         assert_eq!(key_name(&old, &first, 0), "id");
-        let second = guess_key(&old, &new, &map, &[(0, 0)]).unwrap();
+        let second = guess(&old, &new, &map, &[vec![(0, 0)]]).unwrap();
         assert_eq!(key_name(&old, &second, 0), "code");
-        assert!(guess_key(&old, &new, &map, &[(0, 0), (1, 1)]).is_none());
+        assert!(guess(&old, &new, &map, &[vec![(0, 0)], vec![(1, 1)]]).is_none());
     }
 
     #[test]
@@ -1563,11 +2134,11 @@ mod tests {
         // until the map identifies the renamed pair, which is the mechanism
         // reconsideration widens the field through.
         let bare = ColumnMap::new(old.schema_ref(), new.schema_ref());
-        assert!(guess_key(&old, &new, &bare, &[]).is_none());
+        assert!(guess(&old, &new, &bare, &[]).is_none());
 
         let mut identified = ColumnMap::new(old.schema_ref(), new.schema_ref());
         identified.claim(0, 0, IdentityBasis::Exact);
-        let key = guess_key(&old, &new, &identified, &[]).unwrap();
+        let key = guess(&old, &new, &identified, &[]).unwrap();
         assert_eq!((key.columns[0].old, key.columns[0].new), (0, 0));
         assert_eq!(key.basis, KeyBasis::Guessed);
     }
@@ -1586,6 +2157,265 @@ mod tests {
                 possible: 2,
             })
         );
+    }
+
+    #[test]
+    fn guesses_a_compound_key_when_no_single_column_qualifies() {
+        let old = table! {
+            "group" => ["a", "a", "b", "b"],
+            "id" => [1, 2, 1, 2],
+            "value" => [10, 10, 10, 10],
+        };
+        let new = table! {
+            "group" => ["a", "a", "b", "b"],
+            "id" => [1, 2, 1, 2],
+            "value" => [10, 10, 20, 10],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Every column repeats on its own, and only (group, id) is unique on
+        // both sides, so the tuple is the guess and its overlap is complete.
+        assert_eq!(key.basis, KeyBasis::Guessed);
+        assert_eq!(key_name(&old, &key, 0), "group");
+        assert_eq!(key_name(&old, &key, 1), "id");
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 4,
+                possible: 4,
+            })
+        );
+        assert_eq!(key.old, key.new);
+        assert!(!key.exhausted);
+    }
+
+    #[test]
+    fn a_compound_sharing_more_tuples_outranks_a_single_column() {
+        let old = table! {
+            "s" => [1, 2, 3, 4, 5, 6],
+            "g" => ["a", "a", "a", "b", "b", "b"],
+            "i" => [1, 2, 3, 1, 2, 3],
+        };
+        let new = table! {
+            "s" => [1, 2, 999, 998, 997, 996],
+            "g" => ["a", "a", "a", "b", "b", "b"],
+            "i" => [1, 2, 3, 1, 2, 3],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "s" is eligible on two shared values; (g, i) shares all six tuples.
+        // The evidence outranks the parsimony tie-break, which never fires.
+        assert_eq!(key.columns.len(), 2);
+        assert_eq!(key_name(&old, &key, 0), "g");
+        assert_eq!(key_name(&old, &key, 1), "i");
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 6,
+                possible: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn a_single_column_wins_a_shared_tuple_tie_by_fewer_columns() {
+        // "s" shares all ten keys and fans one out, within the allowance;
+        // (g, i) shares the same ten cleanly. Fewer columns settles the tie
+        // before freedom from fanout gets a say, which is the declared
+        // ranking: shared tuples, then fewer columns, then column order.
+        let old = table! {
+            "s" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "g" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+            "i" => [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+        };
+        let new = table! {
+            "s" => [1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10],
+            "g" => ["a", "a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+            "i" => [1, 2, 3, 4, 9, 5, 1, 2, 3, 4, 5],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        assert_eq!(key.columns.len(), 1);
+        assert_eq!(key_name(&old, &key, 0), "s");
+    }
+
+    #[test]
+    fn a_compound_guess_requires_uniqueness_on_both_sides() {
+        let old = table! {
+            "g" => ["a", "a", "b"],
+            "i" => [1, 2, 1],
+        };
+        let new = table! {
+            "g" => ["a", "a", "a", "b"],
+            "i" => [1, 2, 2, 1],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // (g, i) is unique in `old` but duplicates ("a", 2) in `new`. A single
+        // column would be allowed that as bounded fanout; a compound guess is
+        // refused it, so no guessed compound key can ever fan out.
+        assert_eq!(key.basis, KeyBasis::Fallback);
+        assert!(key.columns.is_empty());
+    }
+
+    #[test]
+    fn a_missing_value_excludes_a_column_from_every_width() {
+        let old = table! {
+            "g" => ["a", "a", "b", "b"],
+            "i" => [Some(1), Some(2), Some(1), None],
+        };
+        let new = table! {
+            "g" => ["a", "a", "b", "b"],
+            "i" => [1, 2, 1, 2],
+        };
+
+        // (g, i) would identify every row, but a key may not contain a missing
+        // value, so `i` leaves before the lattice exists and nothing remains.
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+        assert_eq!(key.basis, KeyBasis::Fallback);
+    }
+
+    #[test]
+    fn a_compound_component_can_cure_excessive_fanout() {
+        let old = table! {
+            "id" => [1, 2],
+            "sub" => [1, 1],
+        };
+        let new = table! {
+            "id" => [1, 1, 2],
+            "sub" => [1, 2, 1],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // "id" alone fans out at 50%, far past the allowance, and "sub"
+        // repeats in `old`; together they are unique on both sides. The
+        // extendable candidates are exactly the ones a column can still cure.
+        assert_eq!(key.basis, KeyBasis::Guessed);
+        assert_eq!(key.columns.len(), 2);
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 2,
+                possible: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_compound_overlap_is_normalized_by_the_smaller_side() {
+        let old = table! {
+            "g" => ["a", "a", "b", "b"],
+            "i" => [1, 2, 1, 2],
+        };
+        let new = table! {
+            "g" => ["a", "a", "b"],
+            "i" => [1, 2, 1],
+        };
+
+        let key = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        // Unique on both sides means the distinct counts are the row counts.
+        assert_eq!(key.columns.len(), 2);
+        assert_eq!(
+            key.overlap,
+            Some(KeyOverlap {
+                shared: 3,
+                possible: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn an_exhausted_search_keeps_the_best_candidate_it_examined() {
+        let old = table! {
+            "code" => [1, 2, 3],
+            "g" => ["a", "a", "b"],
+            "i" => [1, 2, 1],
+        };
+        let new = table! {
+            "code" => [1, 2, 3],
+            "g" => ["a", "a", "b"],
+            "i" => [1, 2, 1],
+        };
+        let map = ColumnMap::new(old.schema_ref(), new.schema_ref());
+
+        // One admitted candidate: "code" is examined and wins before the
+        // meter dies, which is the useful partial result.
+        let bounded = Budgets {
+            key_candidates: 1,
+            ..Budgets::default()
+        };
+        let cut_short = guess_key(&old, &new, &map, &[], &bounded);
+        assert!(cut_short.exhausted);
+        let key = cut_short.key.unwrap();
+        assert_eq!(key_name(&old, &key, 0), "code");
+
+        // No admitted candidates: nothing examined, nothing found, and the
+        // exhaustion still reported so the fallback carries the story.
+        let starved = Budgets {
+            key_candidates: 0,
+            ..Budgets::default()
+        };
+        let nothing = guess_key(&old, &new, &map, &[], &starved);
+        assert!(nothing.exhausted);
+        assert!(nothing.key.is_none());
+
+        // A row budget of zero refuses the first measurement the same way.
+        let rowless = Budgets {
+            key_rows: crate::RowBudget::Rows(0),
+            ..Budgets::default()
+        };
+        let unfunded = guess_key(&old, &new, &map, &[], &rowless);
+        assert!(unfunded.exhausted);
+        assert!(unfunded.key.is_none());
+    }
+
+    #[test]
+    fn an_exhausted_fallback_reports_the_search_it_cut_short() {
+        let old = table! { "id" => [1, 2] };
+        let new = table! { "id" => [1, 2] };
+
+        let bounded = DiffOptions {
+            budgets: Budgets {
+                key_candidates: 0,
+                ..Budgets::default()
+            },
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &bounded).unwrap();
+
+        // Nothing was examined, so the fallback stands in — carrying the
+        // exhaustion, because the key that went unexamined is part of its
+        // story.
+        assert_eq!(key.basis, KeyBasis::Fallback);
+        assert!(key.exhausted);
+    }
+
+    #[test]
+    fn repeated_compound_guessing_is_deterministic() {
+        let old = table! {
+            "g" => ["a", "a", "b", "b"],
+            "i" => [1, 2, 1, 2],
+            "j" => [1, 2, 2, 1],
+        };
+        let new = table! {
+            "g" => ["a", "b", "a", "b"],
+            "i" => [1, 1, 2, 2],
+            "j" => [1, 2, 2, 1],
+        };
+
+        let first = resolve_key(&old, &new, &options(&[])).unwrap();
+        let second = resolve_key(&old, &new, &options(&[])).unwrap();
+
+        assert_eq!(first.columns.len(), second.columns.len());
+        assert_eq!(first.overlap, second.overlap);
+        assert_eq!(first.old, second.old);
+        assert_eq!(first.new, second.new);
     }
 
     #[test]
@@ -1697,25 +2527,27 @@ mod tests {
 
     #[test]
     fn forced_hash_collisions_cannot_fake_duplicates_or_overlap() {
-        let constant = |_: &CanonicalValue| 0_u128;
+        fn constant(_: &CanonicalValue) -> u128 {
+            0
+        }
         let old = vec![CanonicalValue::Int(1), CanonicalValue::Int(2)];
         let new = vec![CanonicalValue::Int(2), CanonicalValue::Int(3)];
 
-        let expected = Overlap {
-            shared: 1,
-            affected: 0,
-            distinct_new: 2,
-        };
-        assert_eq!(candidate_overlap(&old, &new, constant), Some(expected));
-        assert_eq!(candidate_overlap(&old, &new, stable_hash), Some(expected));
-        assert_eq!(
-            candidate_overlap(
-                &[CanonicalValue::Int(1), CanonicalValue::Int(1)],
-                &new,
-                constant
-            ),
-            None
+        // Every digest collides, so only the equality confirmations can keep
+        // the values apart: no false duplicate cluster, no inflated overlap.
+        for hash in [constant as fn(&CanonicalValue) -> u128, stable_hash] {
+            let column = pool_column(old.clone(), new.clone(), hash);
+            assert!(column.old.unique());
+            assert!(column.new.unique());
+            assert_eq!(column.new.distinct(), 2);
+            assert_eq!(overlap_of(&[column], &[0]), (1, 0));
+        }
+        let duplicated = pool_column(
+            vec![CanonicalValue::Int(1), CanonicalValue::Int(1)],
+            new,
+            constant,
         );
+        assert_eq!(duplicated.old.clusters, vec![vec![0, 1]]);
     }
 
     #[test]
@@ -1733,14 +2565,9 @@ mod tests {
         // Key 1 matches three new rows and key 9 is a new-only duplicate, so a
         // row count would report five shared and one affected key would be
         // invisible.
-        assert_eq!(
-            candidate_overlap(&old, &new, stable_hash),
-            Some(Overlap {
-                shared: 2,
-                affected: 1,
-                distinct_new: 3,
-            })
-        );
+        let column = pool_column(old, new, stable_hash);
+        assert_eq!(column.new.distinct(), 3);
+        assert_eq!(overlap_of(&[column], &[0]), (2, 1));
     }
 
     #[test]
