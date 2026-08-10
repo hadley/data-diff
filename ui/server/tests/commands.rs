@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use data_diff::{diff_tables, DiffOptions};
 use data_diff_ui::commands;
@@ -17,15 +17,15 @@ fn session(old: arrow_array::RecordBatch, new: arrow_array::RecordBatch, key: &s
         },
     )
     .unwrap();
-    Session {
-        old_path: PathBuf::from("old.parquet"),
-        new_path: PathBuf::from("new.parquet"),
-        key: vec![key.to_owned()],
-        hints: Vec::new(),
+    Session::new(
+        Path::new("old.parquet"),
+        Path::new("new.parquet"),
+        vec![key.to_owned()],
+        Vec::new(),
         old,
         new,
         diff,
-    }
+    )
 }
 
 /// One fixture exercising every panel at once: edits in two columns, a

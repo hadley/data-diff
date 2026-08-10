@@ -43,15 +43,15 @@ fn session() -> Session {
         },
     )
     .unwrap();
-    Session {
-        old_path: PathBuf::from("old.parquet"),
-        new_path: PathBuf::from("new.parquet"),
-        key: vec!["id".to_owned()],
-        hints: Vec::new(),
+    Session::new(
+        Path::new("old.parquet"),
+        Path::new("new.parquet"),
+        vec!["id".to_owned()],
+        Vec::new(),
         old,
         new,
         diff,
-    }
+    )
 }
 
 fn start(initial: Option<Session>, dist: PathBuf) -> SocketAddr {

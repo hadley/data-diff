@@ -36,33 +36,6 @@ fn identities(diff: &Diff) -> Vec<Pair> {
         .collect()
 }
 
-/// The changed cells as `(new_row, new_col) -> (old_row, old_col)`, all
-/// zero-based.
-fn cell_map(diff: &Diff) -> BTreeMap<(usize, usize), (usize, usize)> {
-    diff.cells
-        .iter()
-        .map(|cell| {
-            let (old, new) = cell.positions();
-            (
-                (new[0] as usize - 1, new[1] as usize - 1),
-                (old[0] as usize - 1, old[1] as usize - 1),
-            )
-        })
-        .collect()
-}
-
-/// Matched rows as `new_row -> old_row`, zero-based.
-fn matched_by_new(diff: &Diff) -> BTreeMap<usize, usize> {
-    diff.rows
-        .matched
-        .iter()
-        .map(|row| {
-            let (old, new) = row.positions();
-            (new - 1, old - 1)
-        })
-        .collect()
-}
-
 fn key_positions(diff: &Diff, side: Side) -> Vec<usize> {
     diff.key
         .columns
@@ -240,7 +213,11 @@ fn value_order(values: &[ValueDto]) -> Vec<(String, String)> {
 /// rows' key values so a row's cells stay together under its identity.
 pub fn cells_page(session: &Session, page: usize, page_size: usize) -> PageDto<CellRowDto> {
     let diff = &session.diff;
-    let mut entries: Vec<((usize, usize), (usize, usize))> = cell_map(diff).into_iter().collect();
+    let mut entries: Vec<((usize, usize), (usize, usize))> = session
+        .cells
+        .iter()
+        .map(|(&cell, &at)| (cell, at))
+        .collect();
 
     let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
     for &((new_row, _), _) in &entries {
@@ -275,8 +252,8 @@ pub fn column_view(
     page_size: usize,
 ) -> ColumnViewDto {
     let diff = &session.diff;
-    let cells = cell_map(diff);
-    let matched = matched_by_new(diff);
+    let cells = &session.cells;
+    let matched = &session.matched;
 
     let edited: BTreeSet<usize> = diff
         .columns
@@ -383,14 +360,16 @@ pub fn column_view(
 
 /// The columns a row-view section shows: changed identity columns, or every
 /// identity, as new-side positions and names.
-fn section_columns(diff: &Diff, all_columns: bool) -> Vec<(usize, String)> {
+fn section_columns(session: &Session, all_columns: bool) -> Vec<(usize, String)> {
+    let diff = &session.diff;
     if all_columns {
         identities(diff)
             .into_iter()
             .map(|pair| (pair.new, diff.schemas.new[pair.new].name.clone()))
             .collect()
     } else {
-        cell_map(diff)
+        session
+            .cells
             .keys()
             .map(|&(_, col)| col)
             .collect::<BTreeSet<_>>()
@@ -408,12 +387,12 @@ pub fn row_view_section(
     page_size: usize,
 ) -> RowViewDto {
     let diff = &session.diff;
-    let cells = cell_map(diff);
-    let matched = matched_by_new(diff);
+    let cells = &session.cells;
+    let matched = &session.matched;
 
     match kind {
         "edited" => {
-            let columns = section_columns(diff, all_columns);
+            let columns = section_columns(session, all_columns);
             // New-side column position to its identity pair, for the old line.
             let by_new: BTreeMap<usize, Pair> = identities(diff)
                 .into_iter()
