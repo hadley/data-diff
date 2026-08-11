@@ -30,11 +30,12 @@ pub use model::{
     Coordinate, Diff, DiffError, DiffOptions, DuplicateColumnName, EditSummary, FanoutEvent,
     HintClaim, HintKind, HintNames, IdentityBasis, IncompleteStage, Issue, IssueKind, KeyBasis,
     KeyComponent, KeyDiff, KeyOverlap, KeyRejection, KeyRetraction, KeySubject, NormalizedType,
-    OneSidedDiff, OrderDiff, RejectionReason, RowBudget, RowEdit, RowsDiff, Schemas, Side,
+    OneSidedDiff, OrderDiff, PairBudget, RejectionReason, RowBudget, RowEdit, RowsDiff, Schemas,
+    Side,
 };
 pub use value::Value;
 
-use crate::agreement::RowSample;
+use crate::agreement::{Meter, RowSample};
 use crate::cells::CellChanges;
 use crate::hint::{EditHint, PendingIssue};
 use crate::key::ResolvedKey;
@@ -312,21 +313,18 @@ fn run_pass(
         incomplete.push(IncompleteStage::KeyGuess);
     }
 
-    // The proportional budgets resolve against the table the linear pass
-    // reads — matched rows times the wider side's columns — afresh each pass,
-    // so a bounded first pass cannot starve reconsideration's second.
-    let cells = rows
-        .matched
-        .len()
-        .saturating_mul(old.num_columns().max(new.num_columns()));
-    let rename_rows = budgets.rename_rows.resolve(cells);
-    let swap_rows = budgets.swap_rows.resolve(cells);
+    // The budgets resolve against the wider side's column count. 
+    // Rename and swap each get their own budget, but anything left over from
+    // rename is given to swap.
+    let columns = old.num_columns().max(new.num_columns());
+    let mut meter = Meter::new(budgets.rename_pairs.resolve(columns));
 
     // Both resolve column identity, before ordering and cells go on to read it
-    if !rename::infer(old, new, &mut map, &rows, &sample, rename_rows) {
+    if !rename::infer(old, new, &mut map, &rows, &sample, &mut meter) {
         incomplete.push(IncompleteStage::Renames);
     }
-    if !swap::infer(old, new, &mut map, &rows, edits, &sample, swap_rows) {
+    meter.add(budgets.swap_pairs.resolve(columns));
+    if !swap::infer(old, new, &mut map, &rows, edits, &sample, &mut meter) {
         incomplete.push(IncompleteStage::Swaps);
     }
 

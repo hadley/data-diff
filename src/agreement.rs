@@ -119,31 +119,15 @@ impl Agreement {
     }
 }
 
-/// A counted budget of rows examined by first-time pair examinations.
-///
-/// Budgets are counts of deterministic work: an examination charges the rows
-/// it actually reads — full matched rows for an exact verification or an
-/// informativeness measurement, the sample for a sampled measurement — and a
-/// memoized answer charges nothing, so each distinct question is paid for
-/// exactly once.
-///
-/// Exhaustion is sticky: the first charge the remainder cannot fund kills the
-/// meter for good. With variable costs a large examination could fail while a
-/// later small one still fit, scattering the stranded candidates through the
-/// examination order; dying at the first shortfall keeps the stranded set one
-/// tail of that order, which is what the design's partial-result arguments
-/// lean on. A zero-cost charge always succeeds: zero rows examined is zero
-/// work, so empty inputs can never exhaust anything.
+/// A counted budget of column-pair comparisons.
 pub(crate) struct Meter {
     remaining: usize,
-    exhausted: bool,
 }
 
 impl Meter {
-    pub(crate) fn new(rows: usize) -> Self {
+    pub(crate) fn new(examinations: usize) -> Self {
         Self {
-            remaining: rows,
-            exhausted: false,
+            remaining: examinations,
         }
     }
 
@@ -153,15 +137,18 @@ impl Meter {
         Self::new(usize::MAX)
     }
 
-    fn charge(&mut self, rows: usize) -> bool {
-        if rows == 0 {
-            return true;
-        }
-        if self.exhausted || rows > self.remaining {
-            self.exhausted = true;
+    /// Add examinations to what remains: the next stage's own allowance joins
+    /// whatever the stage before it left unspent, so the searches' total is
+    /// bounded but shared.
+    pub(crate) fn add(&mut self, examinations: usize) {
+        self.remaining = self.remaining.saturating_add(examinations);
+    }
+
+    fn charge(&mut self) -> bool {
+        if self.remaining == 0 {
             return false;
         }
-        self.remaining -= rows;
+        self.remaining -= 1;
         true
     }
 }
@@ -347,9 +334,7 @@ impl<'a> Aligned<'a> {
         if let Some(&equal) = self.verified.get(&(old, new, plan)) {
             return Some(equal);
         }
-        // A verification reads every matched row of both columns; the pair of
-        // columns is one examination, so the cost is charged once.
-        if !meter.charge(self.rows.matched.len()) {
+        if !meter.charge() {
             return None;
         }
         self.ensure_digest(plan, Side::Old, old);
@@ -452,18 +437,7 @@ impl<'a> Aligned<'a> {
         if let Some(&agreement) = self.measured.get(&(over, old, new, plan)) {
             return Some(agreement);
         }
-        // A measurement costs the rows it reads: every matched row for a
-        // full-row question, the sample for a sampled one.
-        let cost = match over {
-            Over::Full => self.rows.matched.len(),
-            Over::Sampled => self
-                .sample
-                .0
-                .as_deref()
-                .expect("a full sample measures as Over::Full")
-                .len(),
-        };
-        if !meter.charge(cost) {
+        if !meter.charge() {
             return None;
         }
         let agreement = match over {
@@ -929,13 +903,13 @@ mod tests {
         let plan =
             ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
         let mut values = Aligned::new(&old, &new, &rows, &sample);
-        let mut meter = Meter::new(2);
+        let mut meter = Meter::new(1);
 
         let first = values.measure_full(&mut meter, plan, 1, 1);
         let again = values.measure_full(&mut meter, plan, 1, 1);
 
-        // Two rows funded the first measurement of the two matched rows; the
-        // repeat is the memo, so it answers even though the meter is spent.
+        // One examination funded the first measurement; the repeat is the
+        // memo, so it answers even though the meter is spent.
         assert!(first.is_some());
         assert_eq!(again, first);
         // A distinct pair is a distinct examination, which nothing funds now.
@@ -957,7 +931,7 @@ mod tests {
         let plan =
             ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
         let mut values = Aligned::new(&old, &new, &rows, &sample);
-        let mut meter = Meter::new(2);
+        let mut meter = Meter::new(1);
 
         let full = values.measure_full(&mut meter, plan, 1, 1);
         let sampled = values.measure_sampled(&mut meter, plan, 1, 1);
@@ -983,7 +957,7 @@ mod tests {
         let plan =
             ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
         let mut values = Aligned::new(&old, &new, &rows, &sample);
-        let mut meter = Meter::new(2);
+        let mut meter = Meter::new(1);
 
         assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
         assert_eq!(values.verify(&mut meter, plan, 1, 1), Some(true));
@@ -1030,30 +1004,15 @@ mod tests {
     }
 
     #[test]
-    fn a_meter_funds_what_it_can_afford_and_dies_at_the_first_shortfall() {
-        let mut meter = Meter::new(10);
+    fn a_meter_funds_exactly_its_examinations() {
+        let mut meter = Meter::new(2);
 
-        assert!(meter.charge(4));
-        assert!(meter.charge(6));
-        // The remainder is zero; the next funded charge cannot fit.
-        assert!(!meter.charge(1));
-
-        let mut meter = Meter::new(10);
-        assert!(meter.charge(4));
-        // Seven exceeds the six remaining, so the meter dies — and stays
-        // dead: a later charge the six could have funded is refused too, so
-        // the stranded candidates stay one tail of the examination order.
-        assert!(!meter.charge(7));
-        assert!(!meter.charge(1));
-    }
-
-    #[test]
-    fn a_zero_cost_charge_always_succeeds() {
-        let mut meter = Meter::new(0);
-        assert!(meter.charge(0));
-        // Even a dead meter grants zero-cost charges: zero rows is zero work.
-        assert!(!meter.charge(1));
-        assert!(meter.charge(0));
+        assert!(meter.charge());
+        assert!(meter.charge());
+        // Spent, and it stays spent: every later examination is refused, so
+        // the stranded candidates are one tail of the examination order.
+        assert!(!meter.charge());
+        assert!(!meter.charge());
     }
 
     #[test]
