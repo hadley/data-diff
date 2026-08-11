@@ -1,0 +1,23 @@
+{
+  "name": "data-diff-ui",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "serve": "cargo run -p data-diff-ui --"
+  },
+  "dependencies": {
+    "preact": "^10.24"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9",
+    "@testing-library/preact": "^3.2",
+    "jsdom": "^25",
+    "typescript": "^5.6",
+    "vite": "^6",
+    "vitest": "^2"
+  }
+}

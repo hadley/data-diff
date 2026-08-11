@@ -1,0 +1,53 @@
+---
+source: ui/server/tests/commands.rs
+expression: first
+---
+{
+  "items": [
+    {
+      "key": [
+        {
+          "kind": "int64",
+          "text": "2"
+        }
+      ],
+      "column": "price",
+      "old": {
+        "kind": "int64",
+        "text": "14"
+      },
+      "new": {
+        "kind": "int64",
+        "text": "16"
+      },
+      "delta": {
+        "kind": "double",
+        "text": "2.00"
+      }
+    },
+    {
+      "key": [
+        {
+          "kind": "int64",
+          "text": "3"
+        }
+      ],
+      "column": "price",
+      "old": {
+        "kind": "int64",
+        "text": "20"
+      },
+      "new": {
+        "kind": "int64",
+        "text": "21"
+      },
+      "delta": {
+        "kind": "double",
+        "text": "1.00"
+      }
+    }
+  ],
+  "total": 3,
+  "page": 0,
+  "page_size": 2
+}

@@ -1,0 +1,125 @@
+---
+source: ui/server/tests/commands.rs
+expression: edited
+---
+{
+  "columns": [
+    "price"
+  ],
+  "rows": {
+    "items": [
+      {
+        "label": "old",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "2"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "14"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      },
+      {
+        "label": "new",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "2"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "16"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      },
+      {
+        "label": "old",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "3"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "20"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      },
+      {
+        "label": "new",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "3"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "21"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      },
+      {
+        "label": "old",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "4"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "7"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      },
+      {
+        "label": "new",
+        "key": [
+          {
+            "kind": "int64",
+            "text": "4"
+          }
+        ],
+        "values": [
+          {
+            "kind": "int64",
+            "text": "8"
+          }
+        ],
+        "changed": [
+          true
+        ]
+      }
+    ],
+    "total": 6,
+    "page": 0,
+    "page_size": 50
+  },
+  "groups": null
+}

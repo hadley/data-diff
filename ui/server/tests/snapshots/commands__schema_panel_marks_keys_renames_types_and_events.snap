@@ -1,0 +1,54 @@
+---
+source: ui/server/tests/commands.rs
+expression: changed
+---
+[
+  {
+    "status": "identity",
+    "key": true,
+    "old_pos": 1,
+    "old_name": "id",
+    "new_pos": 1,
+    "new_name": "id",
+    "moved": false,
+    "basis": null,
+    "type_change": null,
+    "source_type": "Int64"
+  },
+  {
+    "status": "identity",
+    "key": false,
+    "old_pos": 3,
+    "old_name": "name",
+    "new_pos": 3,
+    "new_name": "label",
+    "moved": false,
+    "basis": "exact",
+    "type_change": null,
+    "source_type": "Utf8"
+  },
+  {
+    "status": "added",
+    "key": false,
+    "old_pos": null,
+    "old_name": null,
+    "new_pos": 4,
+    "new_name": "sku",
+    "moved": false,
+    "basis": null,
+    "type_change": null,
+    "source_type": "Utf8"
+  },
+  {
+    "status": "dropped",
+    "key": false,
+    "old_pos": 4,
+    "old_name": "qty",
+    "new_pos": null,
+    "new_name": null,
+    "moved": false,
+    "basis": null,
+    "type_change": null,
+    "source_type": "Int64"
+  }
+]

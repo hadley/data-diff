@@ -1,0 +1,84 @@
+---
+source: ui/server/tests/commands.rs
+expression: view
+---
+{
+  "columns": [
+    {
+      "name": "price",
+      "span": "pair",
+      "side": null,
+      "origin": "edited"
+    }
+  ],
+  "rows": {
+    "items": [
+      {
+        "key": [
+          {
+            "kind": "int64",
+            "text": "2"
+          }
+        ],
+        "cells": [
+          {
+            "old": {
+              "kind": "int64",
+              "text": "14"
+            },
+            "new": {
+              "kind": "int64",
+              "text": "16"
+            },
+            "changed": true
+          }
+        ]
+      },
+      {
+        "key": [
+          {
+            "kind": "int64",
+            "text": "3"
+          }
+        ],
+        "cells": [
+          {
+            "old": {
+              "kind": "int64",
+              "text": "20"
+            },
+            "new": {
+              "kind": "int64",
+              "text": "21"
+            },
+            "changed": true
+          }
+        ]
+      },
+      {
+        "key": [
+          {
+            "kind": "int64",
+            "text": "4"
+          }
+        ],
+        "cells": [
+          {
+            "old": {
+              "kind": "int64",
+              "text": "7"
+            },
+            "new": {
+              "kind": "int64",
+              "text": "8"
+            },
+            "changed": true
+          }
+        ]
+      }
+    ],
+    "total": 3,
+    "page": 0,
+    "page_size": 50
+  }
+}
