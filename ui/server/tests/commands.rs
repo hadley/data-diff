@@ -65,15 +65,26 @@ fn schema_panel_marks_keys_renames_types_and_events() {
 fn cells_page_paginates_in_key_order() {
     let session = fixture();
 
-    let first = commands::cells_page(&session, 0, 2);
+    let first = commands::cells_page(&session, "key", 0, 2);
     insta::assert_json_snapshot!(first);
     assert_eq!(first.items.len(), 2);
     assert!(first.total > 2);
 
-    let rest = commands::cells_page(&session, 1, 2);
+    let rest = commands::cells_page(&session, "key", 1, 2);
     assert_eq!(first.page, 0);
     assert_eq!(rest.page, 1);
     assert_ne!(first.items, rest.items);
+
+    // Column order groups by column, then row.
+    let by_column = commands::cells_page(&session, "column", 0, 50);
+    let columns: Vec<&str> = by_column
+        .items
+        .iter()
+        .map(|item| item.column.as_str())
+        .collect();
+    let mut sorted = columns.clone();
+    sorted.sort_unstable();
+    assert_eq!(columns, sorted);
 }
 
 #[test]
@@ -152,7 +163,7 @@ fn repeated_commands_are_byte_identical() {
     let session = fixture();
     let run = || {
         serde_json::to_string(&commands::session_summary(&session)).unwrap()
-            + &serde_json::to_string(&commands::cells_page(&session, 0, 10)).unwrap()
+            + &serde_json::to_string(&commands::cells_page(&session, "key", 0, 10)).unwrap()
             + &serde_json::to_string(&commands::column_view(&session, true, true, true, 0, 10))
                 .unwrap()
             + &serde_json::to_string(&commands::row_view_section(&session, "edited", true, 0, 10))

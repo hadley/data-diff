@@ -19,6 +19,10 @@ expression: first
       "new": {
         "kind": "int64",
         "text": "16"
+      },
+      "delta": {
+        "kind": "double",
+        "text": "2.00"
       }
     },
     {
@@ -36,6 +40,10 @@ expression: first
       "new": {
         "kind": "int64",
         "text": "21"
+      },
+      "delta": {
+        "kind": "double",
+        "text": "1.00"
       }
     }
   ],

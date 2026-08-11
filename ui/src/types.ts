@@ -13,6 +13,7 @@ export interface SchemaRow {
   moved: boolean;
   basis: string | null;
   type_change: [string, string] | null;
+  source_type: string | null;
 }
 
 export interface SessionSummary {
@@ -44,12 +45,14 @@ export interface CellRow {
   column: string;
   old: ValueDto;
   new: ValueDto;
+  delta: ValueDto | null;
 }
 
 export interface ColumnHeader {
   name: string;
   span: "pair" | "single";
   side: "old" | "new" | null;
+  origin: "edited" | "context" | "added" | "dropped";
 }
 
 export interface ColumnCell {

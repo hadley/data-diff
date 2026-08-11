@@ -11,13 +11,12 @@ interface SchemaPanelProps {
 export function SchemaPanel({ summary }: SchemaPanelProps) {
   const [all, setAll] = useState(false);
   const [rows, setRows] = useState<SchemaRow[]>(summary.schema);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (all) {
       // The summary carries the changed-only rows; the full alignment needs
       // a fetch with the toggle off.
-      schemaPanel(false).then(setRows, (e) => setError(String(e)));
+      schemaPanel(false).then(setRows, () => {});
     } else {
       setRows(summary.schema);
     }
@@ -29,7 +28,6 @@ export function SchemaPanel({ summary }: SchemaPanelProps) {
         <h2>Schema</h2>
         <Toggle off="changed only" on="all columns" checked={all} onChange={setAll} />
       </header>
-      {error && <p class="error">{error}</p>}
       <table>
         <thead>
           <tr>
@@ -49,14 +47,18 @@ export function SchemaPanel({ summary }: SchemaPanelProps) {
               <td>{row.key && <span class="key-badge">PK</span>}</td>
               <td>{row.old_pos ?? ""}</td>
               <td>{row.old_name ?? ""}</td>
-              <td>{row.status === "identity" ? "⇄" : row.status === "dropped" ? "✕" : ""}</td>
+              <td>
+                {row.status === "identity" ? "⇄" : row.status === "dropped" ? "✕" : "+"}
+              </td>
               <td>{row.status === "identity" ? (row.moved ? row.new_pos : "") : (row.new_pos ?? "")}</td>
               <td>{row.new_name ?? ""}</td>
-              <td>
-                {row.type_change && (
+              <td class="type">
+                {row.type_change ? (
                   <span class="type-change">
                     {row.type_change[0]} → {row.type_change[1]}
                   </span>
+                ) : (
+                  (row.source_type ?? "")
                 )}
               </td>
               <td>

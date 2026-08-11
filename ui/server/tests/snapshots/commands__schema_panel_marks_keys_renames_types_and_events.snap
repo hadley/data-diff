@@ -1,8 +1,20 @@
 ---
-source: ui/src-tauri/tests/commands.rs
+source: ui/server/tests/commands.rs
 expression: changed
 ---
 [
+  {
+    "status": "identity",
+    "key": true,
+    "old_pos": 1,
+    "old_name": "id",
+    "new_pos": 1,
+    "new_name": "id",
+    "moved": false,
+    "basis": null,
+    "type_change": null,
+    "source_type": "Int64"
+  },
   {
     "status": "identity",
     "key": false,
@@ -12,7 +24,8 @@ expression: changed
     "new_name": "label",
     "moved": false,
     "basis": "exact",
-    "type_change": null
+    "type_change": null,
+    "source_type": "Utf8"
   },
   {
     "status": "added",
@@ -23,7 +36,8 @@ expression: changed
     "new_name": "sku",
     "moved": false,
     "basis": null,
-    "type_change": null
+    "type_change": null,
+    "source_type": "Utf8"
   },
   {
     "status": "dropped",
@@ -34,6 +48,7 @@ expression: changed
     "new_name": null,
     "moved": false,
     "basis": null,
-    "type_change": null
+    "type_change": null,
+    "source_type": "Int64"
   }
 ]

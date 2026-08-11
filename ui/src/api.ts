@@ -7,11 +7,26 @@ import type {
   SessionSummary,
 } from "./types";
 
+// Request failures surface as toasts; the App registers the reporter.
+let report: (message: string) => void = () => {};
+export function onRequestError(fn: (message: string) => void) {
+  report = fn;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error ?? response.statusText);
-  return body as T;
+  try {
+    const response = await fetch(path, init);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error ?? response.statusText);
+    return body as T;
+  } catch (error) {
+    const message =
+      error instanceof TypeError
+        ? "Cannot reach the data-diff server — is it still running?"
+        : String(error);
+    report(message);
+    throw error;
+  }
 }
 
 function query(params: Record<string, string | number | boolean | null>): string {
@@ -45,15 +60,11 @@ export function schemaPanel(changedOnly: boolean): Promise<SchemaRow[]> {
 }
 
 export function cellsPage(
-  column: number | null,
-  row: number | null,
   sort: string,
   page: number,
   pageSize: number,
 ): Promise<Page<CellRow>> {
-  return request(
-    `/api/cells${query({ column, row, sort, page, page_size: pageSize })}`,
-  );
+  return request(`/api/cells${query({ sort, page, page_size: pageSize })}`);
 }
 
 export function columnView(

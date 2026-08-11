@@ -12,19 +12,20 @@
   --rule: light-dark(#d6d0c4, #333b44);
   --row-line: light-dark(#e4e0d7, #2a3138);
 
-  /* The Solarized accents the app uses; everything coloured is one of them
-     or a measured mix towards a surface. */
-  --orange: #cb4b16;
-  --red: #dc322f;
+  /* The Solarized accents for identity and value kinds, and an Okabe-Ito
+     trio for the change vocabulary: every hue in it stays distinguishable
+     from the others under the common colour-vision deficiencies. */
   --violet: #6c71c4;
   --blue: #268bd2;
   --cyan: #2aa198;
-  --green: #859900;
+  --edit-hue: #e69f00;   /* orange: edits */
+  --add-hue: #009e73;    /* bluish green: additions */
+  --del-hue: #d55e00;    /* vermillion: deletions */
 
-  /* The app's vocabulary: blue is identity (keys, links, focus), orange is
-     change (changed cells), green is added, red is dropped, yellow a caveat. */
+  /* The app's vocabulary: blue is identity (keys, links, focus), and the
+     trio marks edit, add, and delete wherever they appear. */
   --accent1-hue: var(--blue);
-  --accent2-hue: var(--orange);
+  --accent2-hue: var(--edit-hue);
 
   --accent1: light-dark(
     color-mix(in oklab, var(--accent1-hue) 80%, black),
@@ -39,17 +40,17 @@
     color-mix(in oklab, var(--accent2-hue) 20%, white),
     color-mix(in oklab, var(--accent2-hue) 20%, var(--paper)));
   --added: light-dark(
-    color-mix(in oklab, var(--green) 80%, black),
-    color-mix(in oklab, var(--green) 80%, white));
+    color-mix(in oklab, var(--add-hue) 80%, black),
+    color-mix(in oklab, var(--add-hue) 80%, white));
   --added-soft: light-dark(
-    color-mix(in oklab, var(--green) 20%, white),
-    color-mix(in oklab, var(--green) 20%, var(--paper)));
+    color-mix(in oklab, var(--add-hue) 20%, white),
+    color-mix(in oklab, var(--add-hue) 20%, var(--paper)));
   --dropped: light-dark(
-    color-mix(in oklab, var(--red) 80%, black),
-    color-mix(in oklab, var(--red) 80%, white));
+    color-mix(in oklab, var(--del-hue) 80%, black),
+    color-mix(in oklab, var(--del-hue) 80%, white));
   --dropped-soft: light-dark(
-    color-mix(in oklab, var(--red) 20%, white),
-    color-mix(in oklab, var(--red) 20%, var(--paper)));
+    color-mix(in oklab, var(--del-hue) 20%, white),
+    color-mix(in oklab, var(--del-hue) 20%, var(--paper)));
 
   --hover-row: light-dark(
     color-mix(in oklab, var(--accent1-hue) 10%, white),
@@ -137,6 +138,40 @@ h1, h2 { margin: 0; }
 .theme-toggle.is-dark svg { transform: rotate(180deg); }
 
 .error { color: var(--dropped); }
+
+/* ---- toasts ------------------------------------------------------------------ */
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  max-width: 40ch;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--del-hue);
+  border-left-width: 4px;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px -12px var(--shadow-far);
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.toast button {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  color: var(--ink-faint);
+}
+.toast button:hover { color: var(--ink); }
 
 /* ---- cards and micro-labels ---------------------------------------------- */
 
@@ -378,8 +413,13 @@ input::placeholder { color: var(--ink-faint); }
 }
 .paged-table tbody tr:hover .frozen { background: var(--hover-row); }
 
-/* A changed cell is the orange accent at notice-strength. */
+/* A changed cell is the edit hue at notice-strength; added and dropped
+   columns and rows wear their own gentle fills. */
 .paged-table td.changed { background: var(--accent2-soft); }
+.paged-table .single.added { background: var(--added-soft); }
+.paged-table .single.dropped { background: var(--dropped-soft); }
+.paged-table tr.added td { background: var(--added-soft); }
+.paged-table tr.dropped td { background: var(--dropped-soft); }
 
 /* The cell view's column column is the table's second axis; the rule sets
    it off from the old/new values it introduces. */
@@ -407,6 +447,15 @@ input::placeholder { color: var(--ink-faint); }
 .value.decimal { font-variant-numeric: tabular-nums; }
 .value.timestamp,
 .value.date { color: var(--cyan); }
+
+/* Numeric cells right-align, so magnitudes line up down a column. */
+.paged-table td:has(.value.int64),
+.paged-table td:has(.value.double),
+.paged-table td:has(.value.decimal),
+.paged-table th.delta,
+.paged-table td.delta {
+  text-align: right;
+}
 
 /* ---- expandos and pagers ------------------------------------------------------- */
 

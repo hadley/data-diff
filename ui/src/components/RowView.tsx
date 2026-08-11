@@ -7,7 +7,7 @@ import { Pager } from "./Pager";
 import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 /** The transpose of the column view: the two-level structure on the rows. */
 export function RowView({ summary }: { summary: SessionSummary }) {
@@ -48,15 +48,11 @@ function SectionBody({ kind, toggles, keyColumns }: { kind: string; toggles: boo
   const [allColumns, setAllColumns] = useState(false);
   const [page, setPage] = useState(0);
   const [data, setData] = useState<RowViewData | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    rowViewSection(kind, allColumns, page, PAGE_SIZE).then(setData, (e) =>
-      setError(String(e)),
-    );
+    rowViewSection(kind, allColumns, page, PAGE_SIZE).then(setData, () => {});
   }, [kind, allColumns, page]);
 
-  if (error) return <p class="error">{error}</p>;
   if (!data) return null;
 
   return (
@@ -74,7 +70,12 @@ function SectionBody({ kind, toggles, keyColumns }: { kind: string; toggles: boo
       )}
       {data.rows && (
         <>
-          <LinesTable data={data} lines={data.rows.items} keyColumns={keyColumns} />
+          <LinesTable
+            data={data}
+            lines={data.rows.items}
+            keyColumns={keyColumns}
+            showLabel={kind !== "added" && kind !== "dropped"}
+          />
           <Pager
             page={data.rows.page}
             pageSize={data.rows.page_size}
@@ -110,16 +111,18 @@ function LinesTable({
   data,
   lines,
   keyColumns,
+  showLabel = true,
 }: {
   data: RowViewData;
   lines: import("../types").RowLine[];
   keyColumns: string[];
+  showLabel?: boolean;
 }) {
   return (
     <PagedTable>
       <thead>
         <tr>
-          <th />
+          {showLabel && <th />}
           {keyColumns.map((name, i) => (
             <FrozenTh index={i}>{name}</FrozenTh>
           ))}
@@ -130,8 +133,17 @@ function LinesTable({
       </thead>
       <tbody>
         {lines.map((line, index) => (
-          <tr key={index} class={line.label.startsWith("new") ? "new-line" : "old-line"}>
-            <td class="line-label">{line.label}</td>
+          <tr
+            key={index}
+            class={
+              line.label === "added" || line.label === "dropped"
+                ? line.label
+                : line.label.startsWith("new")
+                  ? "new-line"
+                  : "old-line"
+            }
+          >
+            {showLabel && <td class="line-label">{line.label}</td>}
             {line.key.map((value, i) => (
               <FrozenTd index={i}>
                 <ValueText value={value} />

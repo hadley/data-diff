@@ -1,16 +1,26 @@
-import { useEffect, useState } from "preact/hooks";
-import { currentSession, openFiles } from "./api";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { currentSession, onRequestError, openFiles } from "./api";
 import { CellView } from "./components/CellView";
 import { ColumnView } from "./components/ColumnView";
 import { RowView } from "./components/RowView";
 import { SchemaPanel } from "./components/SchemaPanel";
 import { ThemeToggle } from "./components/ThemeToggle";
+import { Toast, Toasts } from "./components/Toasts";
 import { openingView } from "./opening";
 import type { SessionSummary, ViewKind } from "./types";
 
 export function App() {
   const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [view, setView] = useState<ViewKind>("cell");
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const nextToast = useRef(1);
+
+  // Every failed request surfaces as a toast, wherever it came from.
+  useEffect(() => {
+    onRequestError((message) =>
+      setToasts((current) => [...current, { id: nextToast.current++, message }]),
+    );
+  }, []);
 
   // A session launched with paths is already open; pick it up once.
   useEffect(() => {
@@ -57,6 +67,10 @@ export function App() {
           {view === "cell" && <CellView total={summary.cells} keyColumns={summary.key_columns} />}
         </div>
       </section>
+      <Toasts
+        toasts={toasts}
+        onDismiss={(id) => setToasts((current) => current.filter((t) => t.id !== id))}
+      />
     </main>
   );
 }

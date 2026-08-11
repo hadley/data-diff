@@ -54,10 +54,10 @@ pub fn value(value: &Value) -> ValueDto {
     }
 }
 
-/// Render a double lightly rounded: six significant digits trim the binary
-/// tail a full rendering would show (`40.50194903904803`), while integers and
-/// exact short values stay as they are. Extremes of magnitude go scientific
-/// rather than spilling digits either way.
+/// Render a double at a fixed two decimal places, so numeric columns align
+/// and the binary tail a full rendering would show (`40.50194903904803`)
+/// stays out of view. Magnitudes where two decimals say nothing — vanishing
+/// or vast — go scientific rather than rendering as `0.00` or spilling.
 fn format_double(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
@@ -65,25 +65,29 @@ fn format_double(value: f64) -> String {
     if value.is_infinite() {
         return if value > 0.0 { "inf" } else { "-inf" }.to_owned();
     }
-    if value == 0.0 {
-        return "0".to_owned();
-    }
     let magnitude = value.abs();
-    if !(1e-4..1e15).contains(&magnitude) {
-        return format!("{value:.5e}");
+    if magnitude != 0.0 && !(1e-2..1e15).contains(&magnitude) {
+        return format!("{value:.2e}");
     }
-    // Six significant digits: the decimals that keeps shrink as the whole
-    // part grows.
-    let whole_digits = magnitude.log10().floor() as i32 + 1;
-    let decimals = (6 - whole_digits).max(0) as usize;
-    let rounded = format!("{value:.decimals$}");
-    if decimals == 0 {
-        return rounded;
+    format!("{value:.2}")
+}
+
+/// The difference of two numeric values, for the cell view's delta column;
+/// `None` for non-numeric pairs and for results no number names.
+pub fn delta(old: &Value, new: &Value) -> Option<ValueDto> {
+    let (old, new) = match (old, new) {
+        (Value::Int64(old), Value::Int64(new)) => (*old as f64, *new as f64),
+        (Value::Double(old), Value::Double(new)) => (*old, *new),
+        (Value::Int64(old), Value::Double(new)) => (*old as f64, *new),
+        (Value::Double(old), Value::Int64(new)) => (*old, *new as f64),
+        _ => return None,
+    };
+    let delta = new - old;
+    if delta.is_finite() {
+        Some(value(&Value::Double(delta)))
+    } else {
+        None
     }
-    rounded
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_owned()
 }
 
 /// Render a decimal mantissa at its scale, `150` at scale `2` being `1.50`.
@@ -125,6 +129,10 @@ pub struct SchemaRowDto {
     pub basis: Option<String>,
     /// `old -> new` source types, when they differ.
     pub type_change: Option<(String, String)>,
+    /// The column's own source type — the new side's for identities and
+    /// adds, the old side's for drops — so the panel can show every
+    /// column's type, not only changed ones.
+    pub source_type: Option<String>,
 }
 
 /// What opening a session returns: enough to pick the opening view and
@@ -185,6 +193,8 @@ pub struct CellRowDto {
     pub column: String,
     pub old: ValueDto,
     pub new: ValueDto,
+    /// `new - old` for numeric pairs, rendered like any other double.
+    pub delta: Option<ValueDto>,
 }
 
 /// A column header in the column view.
@@ -196,6 +206,9 @@ pub struct ColumnHeaderDto {
     pub span: String,
     /// For singles: which side the values come from.
     pub side: Option<String>,
+    /// What the column is doing here: `edited` (a pair), `context` (an
+    /// unchanged identity), `added`, or `dropped`.
+    pub origin: String,
 }
 
 /// One cell of a column-view row.
@@ -250,15 +263,41 @@ mod tests {
     use super::format_double;
 
     #[test]
-    fn doubles_render_lightly_rounded() {
-        assert_eq!(format_double(40.50194903904803), "40.5019");
+    fn doubles_render_at_a_fixed_two_decimals() {
+        assert_eq!(format_double(40.50194903904803), "40.50");
         assert_eq!(format_double(9.99), "9.99");
-        assert_eq!(format_double(16.0), "16");
-        assert_eq!(format_double(0.0), "0");
+        assert_eq!(format_double(16.0), "16.00");
+        assert_eq!(format_double(0.0), "0.00");
         assert_eq!(format_double(-1234.5678), "-1234.57");
         assert_eq!(format_double(f64::NAN), "NaN");
         assert_eq!(format_double(f64::INFINITY), "inf");
-        assert_eq!(format_double(1.5e-7), "1.50000e-7");
-        assert_eq!(format_double(1.5e18), "1.50000e18");
+        // Two decimals would say nothing at these magnitudes.
+        assert_eq!(format_double(1.5e-7), "1.50e-7");
+        assert_eq!(format_double(1.5e18), "1.50e18");
+    }
+
+    #[test]
+    fn deltas_cover_numeric_pairs_and_skip_the_rest() {
+        use super::{delta, Value};
+        use crate::dto::value;
+
+        assert_eq!(
+            delta(&Value::Int64(14), &Value::Double(16.5)),
+            Some(value(&Value::Double(2.5)))
+        );
+        assert_eq!(
+            delta(&Value::Double(20.0), &Value::Double(21.03)),
+            Some(value(&Value::Double(1.03)))
+        );
+        assert_eq!(delta(&Value::Null, &Value::Int64(1)), None);
+        assert_eq!(
+            delta(
+                &Value::String("a".to_owned()),
+                &Value::String("b".to_owned())
+            ),
+            None
+        );
+        // NaN - NaN names nothing.
+        assert_eq!(delta(&Value::Double(f64::NAN), &Value::Double(1.0)), None);
     }
 }

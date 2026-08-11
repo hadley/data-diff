@@ -6,7 +6,7 @@ import { Pager } from "./Pager";
 import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 
 /**
  * Every edited column side by side, keyed rows aligned: a row that changed
@@ -18,13 +18,9 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
   const [addedDropped, setAddedDropped] = useState(false);
   const [page, setPage] = useState(0);
   const [data, setData] = useState<ColumnViewData | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    columnView(allColumns, allRows, addedDropped, page, PAGE_SIZE).then(
-      setData,
-      (e) => setError(String(e)),
-    );
+    columnView(allColumns, allRows, addedDropped, page, PAGE_SIZE).then(setData, () => {});
   }, [allColumns, allRows, addedDropped, page]);
 
   const reset = (set: (value: boolean) => void) => (value: boolean) => {
@@ -40,7 +36,6 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
         <Toggle off="changed rows" on="all rows" checked={allRows} onChange={reset(setAllRows)} />
         <Toggle off="without added/dropped" on="+ added/dropped" checked={addedDropped} onChange={reset(setAddedDropped)} />
       </header>
-      {error && <p class="error">{error}</p>}
       {data && (
         <>
           <PagedTable>
@@ -53,7 +48,7 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
                   column.span === "pair" ? (
                     <th colspan={2} class="group">{column.name}</th>
                   ) : (
-                    <th rowspan={2} class={`single ${column.side}`}>{column.name}</th>
+                    <th rowspan={2} class={`single ${column.origin}`}>{column.name}</th>
                   ),
                 )}
               </tr>
@@ -78,7 +73,9 @@ export function ColumnView({ keyColumns }: { keyColumns: string[] }) {
                     if (column.span === "single") {
                       const value = column.side === "old" ? cell.old : cell.new;
                       return [
-                        <td class="single">{value && <ValueText value={value} />}</td>,
+                        <td class={`single ${column.origin}`}>
+                          {value && <ValueText value={value} />}
+                        </td>,
                       ];
                     }
                     return [

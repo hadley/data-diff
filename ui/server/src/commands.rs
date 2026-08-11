@@ -101,14 +101,17 @@ pub fn schema_panel(session: &Session, changed_only: bool) -> Vec<SchemaRowDto> 
         let renamed = old_schema.name != new_schema.name;
         let type_changed = old_schema.source_type != new_schema.source_type;
         let moved = old_pos != new_pos;
-        if changed_only && !renamed && !type_changed && !moved {
+        let is_key = key_pairs.contains(&(old_pos, new_pos));
+        // The key shows even in the changed-only view: it is the reader's
+        // orientation for every other panel.
+        if changed_only && !renamed && !type_changed && !moved && !is_key {
             continue;
         }
         rows.push((
             new_pos as f64,
             SchemaRowDto {
                 status: "identity".to_owned(),
-                key: key_pairs.contains(&(old_pos, new_pos)),
+                key: is_key,
                 old_pos: Some(old_pos as u32),
                 old_name: Some(old_schema.name.clone()),
                 new_pos: Some(new_pos as u32),
@@ -121,6 +124,7 @@ pub fn schema_panel(session: &Session, changed_only: bool) -> Vec<SchemaRowDto> 
                         new_schema.source_type.clone(),
                     )
                 }),
+                source_type: Some(new_schema.source_type.clone()),
             },
         ));
     }
@@ -137,6 +141,7 @@ pub fn schema_panel(session: &Session, changed_only: bool) -> Vec<SchemaRowDto> 
                 moved: false,
                 basis: None,
                 type_change: None,
+                source_type: Some(diff.schemas.new[added - 1].source_type.clone()),
             },
         ));
     }
@@ -153,6 +158,7 @@ pub fn schema_panel(session: &Session, changed_only: bool) -> Vec<SchemaRowDto> 
                 moved: false,
                 basis: None,
                 type_change: None,
+                source_type: Some(diff.schemas.old[dropped - 1].source_type.clone()),
             },
         ));
     }
@@ -211,7 +217,12 @@ fn value_order(values: &[ValueDto]) -> Vec<(String, String)> {
 
 /// The flat evidence table, one page: exactly `Diff::cells`, ordered by the
 /// rows' key values so a row's cells stay together under its identity.
-pub fn cells_page(session: &Session, page: usize, page_size: usize) -> PageDto<CellRowDto> {
+pub fn cells_page(
+    session: &Session,
+    sort: &str,
+    page: usize,
+    page_size: usize,
+) -> PageDto<CellRowDto> {
     let diff = &session.diff;
     let mut entries: Vec<((usize, usize), (usize, usize))> = session
         .cells
@@ -219,25 +230,44 @@ pub fn cells_page(session: &Session, page: usize, page_size: usize) -> PageDto<C
         .map(|(&cell, &at)| (cell, at))
         .collect();
 
-    let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
-    for &((new_row, _), _) in &entries {
-        keys.entry(new_row)
-            .or_insert_with(|| value_order(&key_values(session, Side::New, new_row)));
+    match sort {
+        "column" => entries.sort_by_key(|((row, col), _)| (*col, *row)),
+        // By the row's key values, then the column, so a row's cells stay
+        // together under its identity.
+        _ => {
+            let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
+            for &((new_row, _), _) in &entries {
+                keys.entry(new_row)
+                    .or_insert_with(|| value_order(&key_values(session, Side::New, new_row)));
+            }
+            entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
+                keys[row_a].cmp(&keys[row_b]).then(col_a.cmp(col_b))
+            });
+        }
     }
-    entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
-        keys[row_a].cmp(&keys[row_b]).then(col_a.cmp(col_b))
-    });
 
     let total = entries.len();
     let items = entries
         .into_iter()
         .skip(page * page_size)
         .take(page_size)
-        .map(|((new_row, new_col), (old_row, old_col))| CellRowDto {
-            key: key_values(session, Side::New, new_row),
-            column: diff.schemas.new[new_col].name.clone(),
-            old: value_at(session, Side::Old, old_row, old_col),
-            new: value_at(session, Side::New, new_row, new_col),
+        .map(|((new_row, new_col), (old_row, old_col))| {
+            // Values, not DTOs, until the delta has had its look at them.
+            let old = session
+                .lookup()
+                .value(Side::Old, old_row as u32 + 1, old_col as u32 + 1)
+                .expect("model positions are in range");
+            let new = session
+                .lookup()
+                .value(Side::New, new_row as u32 + 1, new_col as u32 + 1)
+                .expect("model positions are in range");
+            CellRowDto {
+                key: key_values(session, Side::New, new_row),
+                column: diff.schemas.new[new_col].name.clone(),
+                delta: dto::delta(&old, &new),
+                old: dto::value(&old),
+                new: dto::value(&new),
+            }
         })
         .collect();
     dto::page(items, total, page, page_size)
@@ -288,22 +318,37 @@ pub fn column_view(
             sources.push(Source::Single(Side::Old, dropped - 1));
         }
     }
+    let added: BTreeSet<usize> = diff.columns.added.iter().map(|&c| c - 1).collect();
+    let dropped: BTreeSet<usize> = diff.columns.dropped.iter().map(|&c| c - 1).collect();
     for source in &sources {
         headers.push(match *source {
             Source::Pair(_, new) => ColumnHeaderDto {
                 name: diff.schemas.new[new].name.clone(),
                 span: "pair".to_owned(),
                 side: None,
+                origin: "edited".to_owned(),
             },
             Source::Single(Side::New, new) => ColumnHeaderDto {
                 name: diff.schemas.new[new].name.clone(),
                 span: "single".to_owned(),
                 side: Some("new".to_owned()),
+                origin: if added.contains(&new) {
+                    "added"
+                } else {
+                    "context"
+                }
+                .to_owned(),
             },
             Source::Single(Side::Old, old) => ColumnHeaderDto {
                 name: diff.schemas.old[old].name.clone(),
                 span: "single".to_owned(),
                 side: Some("old".to_owned()),
+                origin: if dropped.contains(&old) {
+                    "dropped"
+                } else {
+                    "context"
+                }
+                .to_owned(),
             },
         });
     }
