@@ -191,11 +191,15 @@ fn opening_files_over_http_replaces_the_session() {
     assert_eq!(error["error"], "no session is open");
 
     // The open form's button.
-    let body = format!(
-        r#"{{"old": "{}", "new": "{}", "key": ["id"], "hints": []}}"#,
-        old_path.display(),
-        new_path.display()
-    );
+    // serde_json, not format!: Windows paths contain backslashes, which
+    // are not valid JSON escapes.
+    let body = serde_json::json!({
+        "old": old_path,
+        "new": new_path,
+        "key": ["id"],
+        "hints": [],
+    })
+    .to_string();
     let (status, summary) = post(address, "/api/open", &body);
     assert_eq!(status, 200);
     assert_eq!(summary["cells"], 3);
