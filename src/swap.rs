@@ -17,8 +17,11 @@ use crate::schema::{ColumnMap, ColumnPair};
 /// produces a drop or an addition, which is what keeps it independent of
 /// rename inference.
 ///
-/// `budget` is the rows the crossing measurements may examine, each costing
-/// its sample, and the return value says whether the enumeration finished.
+/// `meter` funds the crossing measurements the enumeration may make, one unit
+/// per first-time sampled measurement of a crossed column pair. It arrives
+/// already topped up with whatever rename inference left unspent, so the two
+/// searches' total is bounded but shared. The return value says whether the
+/// enumeration finished.
 /// When it did not, the stage accepts nothing at all: competing-swap
 /// cancellation is a judgement over the whole candidate set, so a survivor
 /// whose canceling competitor was never examined would be an inference
@@ -31,7 +34,7 @@ pub(crate) fn infer(
     rows: &RowMatches,
     edits: &[EditHint],
     sample: &RowSample,
-    budget: usize,
+    meter: &mut Meter,
 ) -> bool {
     if rows.matched.is_empty() {
         return true;
@@ -53,7 +56,6 @@ pub(crate) fn infer(
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
-    let mut meter = Meter::new(budget);
     let mut candidates = Vec::new();
     for (at, &first) in rewritten.iter().enumerate() {
         for &second in &rewritten[at + 1..] {
@@ -61,7 +63,7 @@ pub(crate) fn infer(
                 old,
                 new,
                 &mut values,
-                &mut meter,
+                meter,
                 &eligible[first],
                 &eligible[second],
             ) {
@@ -224,7 +226,7 @@ mod tests {
     use test_support::table;
 
     use super::infer;
-    use crate::agreement::RowSample;
+    use crate::agreement::{Meter, RowSample};
     use crate::key::testing::resolve_key;
     use crate::rename;
     use crate::rows::match_rows;
@@ -247,7 +249,15 @@ mod tests {
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key);
         let sample = RowSample::full();
-        let complete = infer(old, new, &mut schema, &rows, &[], &sample, budget);
+        let complete = infer(
+            old,
+            new,
+            &mut schema,
+            &rows,
+            &[],
+            &sample,
+            &mut Meter::new(budget),
+        );
         (schema, complete)
     }
 
@@ -440,9 +450,24 @@ mod tests {
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(&old, &new, &key);
         let sample = RowSample::full();
-        rename::infer(&old, &new, &mut schema, &rows, &sample, usize::MAX);
+        rename::infer(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &sample,
+            &mut Meter::unlimited(),
+        );
         let inferred = schema.clone();
-        infer(&old, &new, &mut schema, &rows, &[], &sample, usize::MAX);
+        infer(
+            &old,
+            &new,
+            &mut schema,
+            &rows,
+            &[],
+            &sample,
+            &mut Meter::unlimited(),
+        );
 
         // "kept" was rewritten and "gone" became "fresh", and the two stages
         // do not interact: the inferred identity carries different names at
@@ -490,7 +515,7 @@ mod tests {
             &rows,
             &hints.edits,
             &RowSample::full(),
-            usize::MAX,
+            &mut Meter::unlimited(),
         );
 
         // The values would read as an exchange, and a hint says otherwise. Every
@@ -535,7 +560,7 @@ mod tests {
             &rows,
             &hints.edits,
             &RowSample::full(),
-            usize::MAX,
+            &mut Meter::unlimited(),
         );
 
         // An edit claims no endpoint, so the map knows nothing about it and the
@@ -575,19 +600,18 @@ mod tests {
             "b" => [10, 20],
         };
 
-        // The exchange needs two crossing measurements of two matched rows
-        // each; two rows fund only the first, so the candidate was never
-        // fully examined. Nothing is accepted — not even the half that
-        // measured close — and the same-name identities stand exactly as if
-        // no swap had been found.
-        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        // The exchange needs two crossing measurements; a budget of one funds
+        // only the first, so the candidate was never fully examined. Nothing
+        // is accepted — not even the half that measured close — and the
+        // same-name identities stand exactly as if no swap had been found.
+        let (schema, complete) = infer_with_budget(&old, &new, 1);
 
         assert!(!complete);
         assert_eq!(pairs(&schema), [(1, 1), (2, 2)]);
         assert_eq!(basis(&schema, 1), IdentityBasis::Name);
 
-        // Four rows complete the enumeration and the swap goes through.
-        let (schema, complete) = infer_with_budget(&old, &new, 4);
+        // Two measurements complete the enumeration and the swap goes through.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
         assert!(complete);
         assert_eq!(pairs(&schema), [(1, 2), (2, 1)]);
     }
