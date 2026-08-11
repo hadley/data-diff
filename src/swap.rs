@@ -169,14 +169,17 @@ fn rewritten(
 /// Whether one identity's old end holds the other's new values, unconverted.
 ///
 /// A crossing has to be the same type on both sides, not merely a comparable
-/// one, so a swap never carries a type change. Rename inference is more
-/// permissive because it fills a vacuum: the alternative to a cross-type
-/// rename is a drop and an addition, which relate the columns not at all. A
-/// swap instead overrides an identity that name matching already established,
-/// so it answers to a higher bar, and an exchange evidenced by values compared
-/// in their own representation is the cleaner claim. Columns that were both
-/// exchanged *and* retyped fall back to two `col_edit()` events, which is a
-/// truthful description and a less specific one.
+/// one, so a swap never carries a type change. Inference of either kind
+/// compares within a type only, and the reasons are rename inference's own:
+/// cross-type agreement is evidence read through a conversion, reserved for
+/// identities already established by a name, a hint, or the key, and the
+/// candidate crossings are many where the cross-type comparison is the
+/// expensive one. An exchange evidenced by values compared in their own
+/// representation is the cleaner claim, and columns that were both exchanged
+/// *and* retyped fall back to two `col_edit()` events, which is a truthful
+/// description and a less specific one. The user who knows the exchange
+/// happened can say so — two `col_rename()` hints assert it — and the pairs
+/// then compare cross-type as column edits.
 ///
 /// The type check consumes nothing; only the measurement is a budget unit.
 fn crosses(

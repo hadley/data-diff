@@ -227,11 +227,13 @@ fn exact_pairs(
 
 /// Added columns grouped by digest, one map per comparison plan.
 ///
-/// The join is built lazily: a plan's bucket fills the first time a drop needs
-/// it, one type group at a time, so a plan no drop asks about costs nothing.
-/// Projection construction behind the digests is cached per (column, plan) —
-/// the amortized linear pass the design accepts — and the buckets are only
-/// ever looked up by digest, never iterated, so hash order decides nothing.
+/// Candidates compare within one type, so a drop's partners all live in the
+/// added columns of its own type, under that type's identity plan. The join
+/// is still built lazily: a plan's bucket fills the first time a drop needs
+/// it, so a type no drop asks about costs nothing. Projection construction
+/// behind the digests is cached per (column, plan) — the amortized linear
+/// pass the design accepts — and the buckets are only ever looked up by
+/// digest, never iterated, so hash order decides nothing.
 struct DigestJoin {
     /// Distinct added data types, each with its `(position, column)` pairs in
     /// add order: the position indexes the added list, the column the table.
@@ -260,9 +262,8 @@ impl DigestJoin {
     /// The added-list positions whose digest equals the drop's, with the plan
     /// each was digested under, ascending by position.
     ///
-    /// Two type groups can share one plan — the plan is a function of the
-    /// normalized kinds, not the source types — so a bucket folds in every
-    /// group that reaches it, each exactly once.
+    /// Only the drop's own type group can hold a partner, so at most one
+    /// group reaches a bucket, and it does so exactly once.
     fn matches(
         &mut self,
         old: &RecordBatch,
@@ -273,9 +274,11 @@ impl DigestJoin {
         let old_type = old.column(old_index).data_type();
         let mut found = Vec::new();
         for (group, (new_type, members)) in self.groups.iter().enumerate() {
-            let Some(plan) = ComparisonPlan::new(old_type, new_type) else {
+            if new_type != old_type {
                 continue;
-            };
+            }
+            let plan = ComparisonPlan::new(old_type, old_type)
+                .expect("an identical admitted type is comparable with itself");
             if self.folded.insert((plan, group)) {
                 let bucket = self.buckets.entry(plan).or_default();
                 for &(position, new_index) in members {
@@ -376,16 +379,33 @@ fn apply(map: &mut ColumnMap, accepted: Vec<(usize, usize)>, basis: IdentityBasi
     }
 }
 
+/// The comparison plan for a candidate pair, where the pair shares one type.
+///
+/// Rename inference compares within a type only, for two reasons. Cross-type
+/// agreement is evidence read through a conversion, and the design spends it
+/// where identity is already established — a same-named pair, an asserted
+/// rename, a declared key component — never on inventing one. And inference
+/// faces a candidate matrix, a drop's every added column a potential
+/// partner: cross-type plans canonicalize and parse where a same-type plan
+/// streams off the arrow array, so admitting them prices the search at its
+/// most expensive comparison. A dropped string column holding "10" and an
+/// added integer column holding 10 therefore stay a drop and an addition.
+/// The user who knows better pays nothing like the search: a `col_rename()`
+/// hint establishes the identity directly, and the pair then compares
+/// cross-type as a column edit, showing the differences the inference
+/// declined to look for.
 fn plan_for(
     old: &RecordBatch,
     new: &RecordBatch,
     old_index: usize,
     new_index: usize,
 ) -> Option<ComparisonPlan> {
-    ComparisonPlan::new(
-        old.column(old_index).data_type(),
-        new.column(new_index).data_type(),
-    )
+    let old_type = old.column(old_index).data_type();
+    let new_type = new.column(new_index).data_type();
+    if old_type != new_type {
+        return None;
+    }
+    ComparisonPlan::new(old_type, new_type)
 }
 
 #[cfg(test)]
@@ -460,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_is_found_across_a_compatible_type_change() {
+    fn a_rename_is_not_found_across_a_compatible_type_change() {
         let old = table! {
             "id" => [1, 2, 3],
             "amount" => ["10", "20", "30"],
@@ -470,32 +490,15 @@ mod tests {
             "total" => [10, 20, 30],
         };
 
+        // The values agree under the pair's cross-type plan, but cross-type
+        // agreement is not rename evidence: it is reserved for identities
+        // established another way, which compare as column edits. The pair
+        // stays a drop and an addition.
         let schema = infer_renames(&old, &new);
 
-        // The values are equal only under the pair's own comparison plan, so a
-        // digest taken per column rather than per plan would miss this.
-        assert_eq!(renames(&schema), [(1, 1)]);
-        assert_eq!(basis(&schema, 1), IdentityBasis::Exact);
-    }
-
-    #[test]
-    fn a_dropped_boolean_relates_to_its_integer_encoding() {
-        let old = table! {
-            "id" => [1, 2],
-            "flag" => [true, false],
-        };
-        let new = table! {
-            "id" => [1, 2],
-            "count" => [1, 0],
-        };
-
-        // These candidates were once incomparable and stayed a drop and an
-        // addition. Booleans now compare in the numeric domains, so the 0/1
-        // encoding is exact evidence like any other.
-        let schema = infer_renames(&old, &new);
-
-        assert_eq!(renames(&schema), [(1, 1)]);
-        assert_eq!(basis(&schema, 1), IdentityBasis::Exact);
+        assert!(renames(&schema).is_empty());
+        assert_eq!(schema.dropped(), [1]);
+        assert_eq!(schema.added(), [1]);
     }
 
     #[test]
