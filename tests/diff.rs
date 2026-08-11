@@ -406,7 +406,7 @@ fn an_excessive_fanout_rejects_the_declared_key() {
 fn an_undeclared_rename_is_inferred_from_the_values() {
     let old = table! {
         "id" => [1, 2, 3],
-        "amount" => i32[10, 20, 30],
+        "amount" => [10, 20, 30],
         "note" => ["a", "b", "c"],
     };
     let new = table! {
@@ -434,23 +434,15 @@ fn an_undeclared_rename_is_inferred_from_the_values() {
         ]
     );
 
-    // The rename changed type, which is an edit with no cells; the value
-    // change belongs to the other column, because an exactly inferred rename
-    // agrees everywhere by construction.
+    // The value change belongs to the other column, because an exactly
+    // inferred rename agrees everywhere by construction.
     assert_eq!(
         diff.columns.edited,
-        vec![
-            ColumnEdit {
-                column: Coordinate::from_zero_based(1, 2),
-                type_changed: true,
-                changes: 0,
-            },
-            ColumnEdit {
-                column: Coordinate::from_zero_based(2, 0),
-                type_changed: false,
-                changes: 1,
-            },
-        ]
+        vec![ColumnEdit {
+            column: Coordinate::from_zero_based(2, 0),
+            type_changed: false,
+            changes: 1,
+        }]
     );
     assert_eq!(
         diff.cells,
@@ -671,46 +663,6 @@ fn a_cross_type_exchange_is_a_swap_rather_than_two_impossible_retypes() {
     assert!(diff.columns.edited.is_empty());
     assert!(diff.cells.is_empty());
     assert_eq!(diff.order.columns, vec![Coordinate::from_zero_based(2, 1)]);
-
-    let repeated = diff_tables(&old, &new, &options).unwrap();
-    assert_eq!(diff, repeated);
-    assert_eq!(render(&diff), render(&repeated));
-}
-
-#[test]
-fn a_boolean_column_relates_to_its_integer_encoding_by_value() {
-    let old = table! {
-        "id" => [1, 2],
-        "flag" => [true, false],
-    };
-    let new = table! {
-        "id" => [1, 2],
-        "count" => [1, 0],
-    };
-    let options = declared("id");
-
-    let diff = diff_tables(&old, &new, &options).unwrap();
-
-    // A drop and an addition until rename inference measures them: the 0/1
-    // encoding is exact agreement, so the identity forms across the types and
-    // the retype rides on it.
-    assert_eq!(
-        diff.columns.identities,
-        vec![
-            identity(0, 0, IdentityBasis::Declared),
-            identity(1, 1, IdentityBasis::Exact),
-        ]
-    );
-    assert!(diff.columns.added.is_empty());
-    assert!(diff.columns.dropped.is_empty());
-    assert_eq!(
-        diff.columns.edited,
-        vec![ColumnEdit {
-            column: Coordinate::from_zero_based(1, 1),
-            type_changed: true,
-            changes: 0,
-        }]
-    );
 
     let repeated = diff_tables(&old, &new, &options).unwrap();
     assert_eq!(diff, repeated);
@@ -2611,7 +2563,7 @@ fn a_cross_unit_retype_compares_values_and_reports_the_type_change() {
 }
 
 #[test]
-fn a_dropped_timestamp_is_recovered_as_a_rename_across_units() {
+fn a_dropped_timestamp_is_not_recovered_as_a_rename_across_units() {
     let old = table! {
         "id" => [1, 2],
         "stamp" => ts_ms[1000, 2000],
@@ -2621,20 +2573,17 @@ fn a_dropped_timestamp_is_recovered_as_a_rename_across_units() {
         "logged" => ts_us[1_000_000, 2_000_000],
     };
 
-    // Exact inference hashes the pair under its plan, and the instants are
-    // equal across the unit change, so the rename is recovered on the same
-    // evidence as any other.
+    // The instants are equal across the unit change, but the types differ, so
+    // inference never measures the pair: cross-type agreement is column edit
+    // evidence, and no identity exists here for it to describe.
     let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
     assert_eq!(
         diff.columns.identities,
-        vec![
-            identity(0, 0, IdentityBasis::Declared),
-            identity(1, 1, IdentityBasis::Exact),
-        ]
+        vec![identity(0, 0, IdentityBasis::Declared)]
     );
-    assert!(diff.columns.added.is_empty());
-    assert!(diff.columns.dropped.is_empty());
+    assert_eq!(diff.columns.dropped, vec![2]);
+    assert_eq!(diff.columns.added, vec![2]);
 
     let repeated = diff_tables(&old, &new, &declared("id")).unwrap();
     assert_eq!(diff, repeated);
