@@ -56,6 +56,33 @@ pub struct Budgets {
     /// skipped and each connected component is covered by its smaller affected
     /// side, columns when tied, with [`EditSummary::optimal`] set false.
     pub summary_cells: usize,
+    /// The rows key guessing may examine searching for a key.
+    ///
+    /// Each candidate combination's validation is charged the rows it actually
+    /// reads: a uniqueness refinement costs the duplicate-cluster rows it
+    /// re-examines, and a shared-tuple measurement costs both sides' rows. Key
+    /// guessing runs before any rows are matched, so the proportional form
+    /// resolves against the input's own cells — each side's rows times its
+    /// columns, summed — rather than the matched table other budgets use, and
+    /// it never resolves below a floor, because the lattice's cost scales
+    /// with column combinations where cells scale with rows, and a small wide
+    /// table would otherwise be refused a search that costs almost nothing.
+    /// The absolute form has no floor, so tests can meter to the row. On
+    /// exhaustion the best candidate already examined wins and the diff
+    /// reports [`IncompleteStage::KeyGuess`].
+    pub key_rows: RowBudget,
+    /// The candidate combinations key guessing may admit to its lattice.
+    ///
+    /// A cap on breadth where [`Budgets::key_rows`] is a cap on depth: it
+    /// bounds the frontier the search holds position lists for, and with it
+    /// the search's memory. Exhaustion reports like row exhaustion.
+    pub key_candidates: usize,
+    /// The most columns a guessed compound key may combine.
+    ///
+    /// The width is the search's definition rather than its budget, on
+    /// `agreement_rows`' precedent: completing the lattice under this width is
+    /// a complete search of the promised space and reports nothing.
+    pub key_width: usize,
 }
 
 /// A bound on the rows a bounded search may examine.
@@ -84,18 +111,23 @@ impl RowBudget {
     }
 }
 
-/// The defaults, tuned against `benches/pipeline.rs` (2026-08-06). The search
-/// budgets are proportional, so "each bounded stage examines at most this many
-/// rows per cell of the input" holds by construction on every machine; the
-/// grid confirms what construction cannot — that no non-adversarial scenario
-/// reports an incomplete stage, and that the adversaries' wall clock stays
-/// within the multipliers recorded in `benches/README.md`. The multiples were
-/// then raised from their analytic floors until no grid point lost a
-/// completion the previous fixed pair budgets funded: rename inference's 20
-/// covers the ten-column adversaries' ~200 full-row examinations across
-/// eleven columns, and swap inference's 5 covers a fully swapped ten-column
-/// table's crossing enumeration at full rows. Rename's multiple is the larger
-/// because its examinations are mostly full-row where swap's are sampled.
+/// The defaults, tuned against `benches/pipeline.rs` (2026-08-06; key budgets
+/// 2026-08-07). The search budgets are proportional, so "each bounded stage
+/// examines at most this many rows per cell of the input" holds by
+/// construction on every machine; the grid confirms what construction cannot
+/// — that no non-adversarial scenario reports an incomplete stage, and that
+/// the adversaries' wall clock stays within the multipliers recorded in
+/// `benches/README.md`. The multiples were then raised from their analytic
+/// floors until no grid point lost a completion the previous fixed pair
+/// budgets funded: rename inference's 20 covers the ten-column adversaries'
+/// ~200 full-row examinations across eleven columns, and swap inference's 5
+/// covers a fully swapped ten-column table's crossing enumeration at full
+/// rows. Rename's multiple is the larger because its examinations are mostly
+/// full-row where swap's are sampled. Key guessing's 2 covers the
+/// `guessed_compound` grid — one width-1 measurement per column plus the
+/// hidden pair's refinements — with its floor funding the wide-and-short
+/// tables the multiple cannot, and 4096 candidates holds the frontier's
+/// memory to what the row budget already implies.
 impl Default for Budgets {
     fn default() -> Self {
         Self {
@@ -103,18 +135,23 @@ impl Default for Budgets {
             rename_rows: RowBudget::PerCell(20),
             swap_rows: RowBudget::PerCell(5),
             summary_cells: 10_000,
+            key_rows: RowBudget::PerCell(2),
+            key_candidates: 4096,
+            key_width: 4,
         }
     }
 }
 
 /// A reconciliation stage its budget cut short.
 ///
-/// Each variant's partial result is valid but conservative: unexamined rename
-/// candidates stay drops and additions, an unfinished swap enumeration accepts
-/// nothing, and an uncapped summary covers every cell with possibly more events
-/// than the minimum. The complete cell-level diff is never affected.
+/// Each variant's partial result is valid but conservative: an exhausted key
+/// search keeps the best candidate it examined, unexamined rename candidates
+/// stay drops and additions, an unfinished swap enumeration accepts nothing,
+/// and an uncapped summary covers every cell with possibly more events than
+/// the minimum. The complete cell-level diff is never affected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncompleteStage {
+    KeyGuess,
     Renames,
     Swaps,
     Summary,
@@ -124,6 +161,7 @@ impl IncompleteStage {
     /// The operation word the human format writes this stage as.
     pub fn name(&self) -> &'static str {
         match self {
+            IncompleteStage::KeyGuess => "incomplete_key_guess",
             IncompleteStage::Renames => "incomplete_renames",
             IncompleteStage::Swaps => "incomplete_swaps",
             IncompleteStage::Summary => "incomplete_summary",

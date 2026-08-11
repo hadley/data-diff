@@ -96,7 +96,7 @@ pub fn diff_tables(
     // Resolution cannot fail: a declared key this data will not support is
     // refused as a value, and the chain falls back to a guess and then to row
     // position, so the identities the declaration asserted survive it.
-    let key = key::resolve_key(old, new, &declared, &hinted);
+    let key = key::resolve_key(old, new, &declared, &hinted, &options.budgets);
     let first = run_pass(old, new, key, hinted.clone(), &edits, &options.budgets);
 
     // Reconsider the key at most once: a straight second pass, never a loop.
@@ -109,7 +109,7 @@ pub fn diff_tables(
     let reconsider::Reconsideration {
         key: second,
         retraction,
-    } = reconsider::reconsider(old, new, &first.key, &first.map, &first.rows, &first.cells);
+    } = reconsider::reconsider(old, new, &first, &hinted, &options.budgets);
     let pass = match second {
         Some(second) => {
             let mut map = hinted;
@@ -270,15 +270,15 @@ pub fn diff_tables(
 }
 
 /// Everything one run of the pipeline learned below key resolution.
-struct Pass {
-    key: ResolvedKey,
-    map: ColumnMap,
-    rows: RowMatches,
-    order: OrderMatches,
-    cells: CellChanges,
-    edit_issues: Vec<PendingIssue>,
-    summary: SummaryChanges,
-    incomplete: Vec<IncompleteStage>,
+pub(crate) struct Pass {
+    pub(crate) key: ResolvedKey,
+    pub(crate) map: ColumnMap,
+    pub(crate) rows: RowMatches,
+    pub(crate) order: OrderMatches,
+    pub(crate) cells: CellChanges,
+    pub(crate) edit_issues: Vec<PendingIssue>,
+    pub(crate) summary: SummaryChanges,
+    pub(crate) incomplete: Vec<IncompleteStage>,
 }
 
 /// Run every stage below key resolution over one key.
@@ -306,6 +306,11 @@ fn run_pass(
     // and the matching, not of the stage asking.
     let sample = RowSample::select(&key, &rows, budgets.agreement_rows);
     let mut incomplete = Vec::new();
+    // The guess's exhaustion arrived with the key; it leads the fixed order
+    // because key resolution leads the pipeline.
+    if key.exhausted {
+        incomplete.push(IncompleteStage::KeyGuess);
+    }
 
     // The proportional budgets resolve against the table the linear pass
     // reads — matched rows times the wider side's columns — afresh each pass,
