@@ -84,10 +84,18 @@ export interface FanoutGroup {
   lines: RowLine[];
 }
 
+export interface EditedGroup {
+  rows: number[];
+  key: ValueDto[];
+  changed: boolean[];
+  lines: RowLine[];
+}
+
 export interface RowViewData {
   columns: string[];
   rows: Page<RowLine> | null;
   groups: Page<FanoutGroup> | null;
+  edited: Page<EditedGroup> | null;
 }
 
 export type ViewKind = "column" | "row" | "cell";

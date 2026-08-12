@@ -118,11 +118,10 @@ fn row_view_sections_read_their_rows() {
 
     let edited = commands::row_view_section(&session, "edited", false, 0, 50);
     insta::assert_json_snapshot!(edited);
-    let lines = edited.rows.unwrap().items;
-    // Stacked old/new lines, two per changed row.
-    assert!(lines.len().is_multiple_of(2));
-    assert_eq!(lines[0].label, "old");
-    assert_eq!(lines[1].label, "new");
+    // The fixture's changed cells are all in `price`, which the summary
+    // covers as a column edit — so the row view's edited section is empty,
+    // each event shown in exactly one place.
+    assert_eq!(edited.edited.unwrap().total, 0);
 
     let added = commands::row_view_section(&session, "added", false, 0, 50);
     assert_eq!(added.rows.unwrap().total, 1);
@@ -134,6 +133,42 @@ fn row_view_sections_read_their_rows() {
 
     let moved = commands::row_view_section(&session, "moved", false, 0, 50);
     assert_eq!(moved.rows.unwrap().total, 0);
+}
+
+#[test]
+fn edited_rows_group_by_changed_column_set_and_paginate_as_groups() {
+    // Twenty rows, so that naming a changed row is cheap and the cover
+    // describes the rectangle by its rows rather than its columns.
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        "a" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+        "b" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+        "c" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        "a" => [11, 21, 31, 40, 50, 61, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+        "b" => [11, 21, 31, 40, 50, 61, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+        "c" => [10, 20, 30, 40, 51, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200],
+    };
+    let session = session(old, new, "id");
+
+    // A rectangle over "a" and "b", a singleton changed in "c" interrupting
+    // it, then one more rectangle row: two groups, one per distinct column
+    // set, and a page of one holds exactly one of them.
+    let view = commands::row_view_section(&session, "edited", false, 0, 50);
+    let groups = view.edited.unwrap().items;
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].rows, [1, 2, 3, 6]);
+    assert_eq!(groups[0].changed, [true, true, false]);
+    assert_eq!(groups[1].rows, [5]);
+    assert_eq!(groups[1].changed, [false, false, true]);
+
+    let page = commands::row_view_section(&session, "edited", false, 1, 1);
+    let page = page.edited.unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].rows, [5]);
 }
 
 #[test]

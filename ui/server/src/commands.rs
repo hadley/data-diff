@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use data_diff::{Diff, Side};
 
 use crate::dto::{
-    self, CellRowDto, ColumnCellDto, ColumnHeaderDto, ColumnRowDto, ColumnViewDto, FanoutGroupDto,
-    PageDto, RowLineDto, RowViewDto, SchemaRowDto, SessionSummaryDto, ValueDto,
+    self, CellRowDto, ColumnCellDto, ColumnHeaderDto, ColumnRowDto, ColumnViewDto, EditedGroupDto,
+    FanoutGroupDto, PageDto, RowLineDto, RowViewDto, SchemaRowDto, SessionSummaryDto, ValueDto,
 };
 use crate::session::Session;
 
@@ -285,9 +285,12 @@ pub fn column_view(
     let cells = &session.cells;
     let matched = &session.matched;
 
+    // The column view shows the cover's column edits, not every changed
+    // column: a column the summary covers by its rows (a rectangle's r1–r5)
+    // is the row view's story, and showing it here too would tell it twice.
     let edited: BTreeSet<usize> = diff
+        .summary
         .columns
-        .edited
         .iter()
         .map(|edit| edit.column.positions().1 - 1)
         .collect();
@@ -356,8 +359,11 @@ pub fn column_view(
     let mut rows: Vec<usize> = if all_rows {
         matched.keys().copied().collect()
     } else {
+        // Rows changed in a shown column; a row whose changes are all covered
+        // by row edits has nothing to show here.
         cells
             .keys()
+            .filter(|&(_, col)| edited.contains(col))
             .map(|&(row, _)| row)
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -403,9 +409,13 @@ pub fn column_view(
     }
 }
 
-/// The columns a row-view section shows: changed identity columns, or every
-/// identity, as new-side positions and names.
-fn section_columns(session: &Session, all_columns: bool) -> Vec<(usize, String)> {
+/// The columns a row-view section shows: those changed in the given rows, or
+/// every identity, as new-side positions and names.
+fn section_columns(
+    session: &Session,
+    rows: &BTreeSet<usize>,
+    all_columns: bool,
+) -> Vec<(usize, String)> {
     let diff = &session.diff;
     if all_columns {
         identities(diff)
@@ -416,6 +426,7 @@ fn section_columns(session: &Session, all_columns: bool) -> Vec<(usize, String)>
         session
             .cells
             .keys()
+            .filter(|&(row, _)| rows.contains(row))
             .map(|&(_, col)| col)
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -437,21 +448,31 @@ pub fn row_view_section(
 
     match kind {
         "edited" => {
-            let columns = section_columns(session, all_columns);
+            // The cover's row edits only: a row whose changes are all covered
+            // by a `col_edit()` is the column view's story, and each event is
+            // shown in exactly one place.
+            let mut edits: Vec<&data_diff::RowEdit> = diff.summary.rows.iter().collect();
+            edits.sort_by_key(|edit| edit.row.positions().1);
+            let row_set: BTreeSet<usize> = edits
+                .iter()
+                .map(|edit| edit.row.positions().1 - 1)
+                .collect();
+            let columns = section_columns(session, &row_set, all_columns);
             // New-side column position to its identity pair, for the old line.
             let by_new: BTreeMap<usize, Pair> = identities(diff)
                 .into_iter()
                 .map(|pair| (pair.new, pair))
                 .collect();
-            let changed_rows: Vec<usize> = cells
-                .keys()
-                .map(|&(row, _)| row)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
 
-            let mut lines = Vec::new();
-            for &new_row in &changed_rows {
+            // Rows with identical changed-column sets collapse into one
+            // group each, the row view's rendering of the summary's grouped
+            // `row_edit()` line; pagination then counts groups, so a
+            // rectangle is one expando and one page unit. Groups are ordered
+            // by where their first row occurs, rows within a group ascending.
+            let mut groups: Vec<EditedGroupDto> = Vec::new();
+            let mut by_columns: BTreeMap<&[usize], usize> = BTreeMap::new();
+            for edit in edits {
+                let new_row = edit.row.positions().1 - 1;
                 let old_row = matched[&new_row];
                 let key = key_values(session, Side::New, new_row);
                 let mut old_line = RowLineDto {
@@ -478,19 +499,30 @@ pub fn row_view_section(
                     old_line.changed.push(changed);
                     new_line.changed.push(changed);
                 }
-                lines.push(old_line);
-                lines.push(new_line);
+                let mask = new_line.changed.clone();
+                let index = *by_columns.entry(&edit.columns).or_insert_with(|| {
+                    groups.push(EditedGroupDto {
+                        rows: Vec::new(),
+                        key: old_line.key.clone(),
+                        changed: mask,
+                        lines: Vec::new(),
+                    });
+                    groups.len() - 1
+                });
+                groups[index].rows.push(new_row as u32 + 1);
+                groups[index].lines.extend([old_line, new_line]);
             }
-            let total = lines.len();
-            let items = lines
+            let total = groups.len();
+            let items = groups
                 .into_iter()
                 .skip(page * page_size)
                 .take(page_size)
                 .collect();
             RowViewDto {
                 columns: columns.into_iter().map(|(_, name)| name).collect(),
-                rows: Some(dto::page(items, total, page, page_size)),
+                rows: None,
                 groups: None,
+                edited: Some(dto::page(items, total, page, page_size)),
             }
         }
         "added" | "dropped" => {
@@ -528,6 +560,7 @@ pub fn row_view_section(
                     .collect(),
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
+                edited: None,
             }
         }
         "moved" => {
@@ -556,6 +589,7 @@ pub fn row_view_section(
                 columns: vec!["old position".to_owned(), "new position".to_owned()],
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
+                edited: None,
             }
         }
         "fanout" => {
@@ -620,6 +654,7 @@ pub fn row_view_section(
                 columns,
                 rows: None,
                 groups: Some(dto::page(groups, total, page, page_size)),
+                edited: None,
             }
         }
         _ => panic!("unknown row view section {kind:?}"),

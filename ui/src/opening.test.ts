@@ -53,4 +53,14 @@ describe("openingView", () => {
   it("opens the cell view when nothing changed", () => {
     expect(openingView(summary({}))).toBe("cell");
   });
+
+  it("opens the row view for an even row-column split over many cells", () => {
+    // The issue-#38 demo pair: one col_edit(price) plus one grouped row_edit
+    // for the 50x5 rectangle, over 749 changed cells. Grouping is
+    // presentation-only, so the rule is unchanged — and now correctly opens
+    // the row view here.
+    expect(
+      openingView(summary({ cover_columns: 1, cover_rows: 1, cells: 749 })),
+    ).toBe("row");
+  });
 });
