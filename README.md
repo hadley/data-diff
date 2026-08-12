@@ -17,9 +17,9 @@ If you know the primary key (that is, the set of columns that uniquely identifie
 ```console
 data-diff old.parquet new.parquet --key customer_id,date
 > table_key([customer_id, date], basis: declared)
-> row_drop(4)
-> row_add(9)
-> row_edit(2, changes: 3)
+> row_drop(rows: 1)
+> row_add(rows: 1)
+> row_edit(rows: 1, changes: 3, columns: [quantity, price, note])
 ```
 
 Otherwise `data-diff` guesses, and takes the single column that identifies the most rows across both files. Where nothing can identify a row, it matches rows by position and says so. `--key :row` asks for that key directly. The key line always says which key was used and, for a guess, how much of the data it accounts for. 
@@ -34,7 +34,7 @@ data-diff old.parquet new.parquet --key customer_id/id
 > ----
 > table_key([:row], basis: fallback)
 > col_rename(customer_id -> id, basis: declared)
-> row_edit(2, changes: 1)
+> row_edit(rows: 1, changes: 1, columns: [value])
 ```
 
 A paired component asserts two things: that the two columns are one, and that the column identifies rows. The first assertion survives even if the second fails.
@@ -54,7 +54,7 @@ Use a pair when the key column itself was renamed:
 data-diff old.parquet new.parquet --key customer_id/id
 > table_key([customer_id -> id], basis: declared)
 > col_rename(customer_id -> id, basis: declared)
-> row_edit(2, changes: 1)
+> row_edit(rows: 1, changes: 1, columns: [value])
 ```
 
 ## Hints
@@ -90,8 +90,8 @@ Output goes to stdout, one operation per line:
 | `col_rename(old -> new, basis: how)` | one column, named differently in each file, and how that was established |
 | `col_edit(new, ...)` | a column whose type or values changed, and how many cells |
 | `col_order(new, old_idx -> new_idx)` | the fewest columns that must move to explain the new order |
-| `row_add(new_idx)`, `row_drop(old_idx)` | a row that only exists on one side |
-| `row_edit(idx, changes: n)` | a row whose non-key values changed, and how many cells |
+| `row_add(rows: n)`, `row_drop(rows: n)` | rows that only exist on one side |
+| `row_edit(rows: n, changes: m, columns: [...])` | rows sharing one changed-column set: how many rows, how many cells, and which columns when the list is short |
 | `row_fanout(old_idx -> [new_idx, ...])` | one old row that several new rows share a key with |
 | `row_order(old_idx -> new_idx)` | the fewest rows that must move to explain the new order |
 | `table_regenerate()` | the new file is not usefully described as an edit of the old |

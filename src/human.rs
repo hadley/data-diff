@@ -7,6 +7,10 @@ use crate::{
 
 const SEPARATOR: &str = "----";
 
+/// The most changed columns a `row_edit()` line lists by name; a longer set
+/// keeps only its `changes:` count.
+const COLUMN_LIST_MAX: usize = 8;
+
 /// Write a compact, operation-oriented description of a diff.
 ///
 /// Anything that went wrong comes first — a rejected key, a declined hint —
@@ -136,11 +140,15 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     if regenerated {
         operations.push("table_regenerate()".to_owned());
     } else {
-        for &position in &diff.rows.dropped {
-            operations.push(format!("row_drop({position})"));
+        // Added and dropped rows are one operation each, counted rather than
+        // listed: the positions are in the model and the UI, and fifty
+        // near-identical lines say nothing one count doesn't. The field is
+        // `rows`, `changes` being a cell count everywhere it appears.
+        if !diff.rows.dropped.is_empty() {
+            operations.push(format!("row_drop(rows: {})", diff.rows.dropped.len()));
         }
-        for &position in &diff.rows.added {
-            operations.push(format!("row_add({position})"));
+        if !diff.rows.added.is_empty() {
+            operations.push(format!("row_add(rows: {})", diff.rows.added.len()));
         }
         for event in &diff.rows.fanout {
             // The coordinates cannot say how far the new rows differ from the
@@ -165,14 +173,40 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
             let (old, new) = coordinate.positions();
             operations.push(format!("row_order({old} -> {new})"));
         }
-        for edit in &diff.summary.rows {
-            let (old, new) = edit.row.positions();
-            let row = if old == new {
-                format!("{old}")
-            } else {
-                format!("{old} -> {new}")
-            };
-            operations.push(format!("row_edit({row}, changes: {})", edit.changes));
+        // Row edits are counted, not positioned: a group is rows whose
+        // changed-column sets are identical, full stop, and the line states
+        // the rectangle as a rectangle — how many rows, how many cells, and
+        // the shared columns when the list is short. The positions stay in
+        // the model and the UI. Groups are ordered by where their first row
+        // occurs.
+        let mut edits = diff.summary.rows.iter().collect::<Vec<_>>();
+        edits.sort_by_key(|edit| edit.row.positions().1);
+        let mut groups: Vec<Vec<&crate::RowEdit>> = Vec::new();
+        let mut by_columns: std::collections::BTreeMap<&[usize], usize> =
+            std::collections::BTreeMap::new();
+        for edit in edits {
+            let index = *by_columns.entry(&edit.columns).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[index].push(edit);
+        }
+        for group in &groups {
+            let mut details = format!(
+                "rows: {}, changes: {}",
+                group.len(),
+                group.iter().map(|edit| edit.changes).sum::<usize>()
+            );
+            if group[0].columns.len() <= COLUMN_LIST_MAX {
+                let names = group[0]
+                    .columns
+                    .iter()
+                    .map(|&position| column_name(&diff.schemas.new, position))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                details.push_str(&format!(", columns: [{names}]"));
+            }
+            operations.push(format!("row_edit({details})"));
         }
     }
 
@@ -533,6 +567,11 @@ mod tests {
             render(&key_only, &key_only),
             render(&renamed_old, &renamed_new),
             render(&fanned_old, &fanned_new),
+            // A row edit, carrying the format's one list-valued field.
+            render(
+                &table! { "id" => [1, 2], "a" => [10, 20], "b" => [30, 40] },
+                &table! { "id" => [1, 2], "a" => [10, 21], "b" => [30, 41] },
+            ),
             // Issue lines are part of the format too, and carry fields of
             // their own, so a rendering that has them belongs here. Every reason
             // the channel can give is rendered, since a new one is exactly where
@@ -593,7 +632,7 @@ mod tests {
         assert_eq!(
             field_names(&rendered),
             BTreeSet::from([
-                "basis", "changes", "missing", "overlap", "reason", "rows", "type"
+                "basis", "changes", "columns", "missing", "overlap", "reason", "rows", "type"
             ])
         );
     }
@@ -617,8 +656,8 @@ mod tests {
         col_add(add)
         col_order(value, 3 -> 1)
         col_edit(value, type: Int32 -> Int64, changes: 2)
-        row_drop(3)
-        row_add(3)
+        row_drop(rows: 1)
+        row_add(rows: 1)
         row_order(2 -> 1)
         ");
     }
@@ -649,10 +688,10 @@ mod tests {
 
         insta::assert_snapshot!(render_with(&old, &new, &[]), @"
         table_key([id], basis: guessed, overlap: 0.67)
-        row_drop(2)
-        row_add(3)
+        row_drop(rows: 1)
+        row_add(rows: 1)
         row_order(3 -> 1)
-        row_edit(3 -> 1, changes: 1)
+        row_edit(rows: 1, changes: 1, columns: [value])
         ");
     }
 
@@ -679,11 +718,11 @@ mod tests {
 
         insta::assert_snapshot!(render(&old, &new), @"
         table_key([id], basis: declared)
-        row_drop(11)
-        row_add(12)
+        row_drop(rows: 1)
+        row_add(rows: 1)
         row_fanout(4 -> [4, 5], changes: 1)
         row_order(2 -> 1)
-        row_edit(7 -> 8, changes: 1)
+        row_edit(rows: 1, changes: 1, columns: [value])
         ");
     }
 
@@ -838,7 +877,7 @@ mod tests {
 
         assert_eq!(
             render(&old, &new),
-            "table_key([id], basis: declared)\nrow_edit(2, changes: 2)"
+            "table_key([id], basis: declared)\nrow_edit(rows: 1, changes: 2, columns: [a, b])"
         );
     }
 
@@ -888,8 +927,143 @@ mod tests {
         insta::assert_snapshot!(render(&old, &new), @"
         table_key([id], basis: declared)
         col_edit(c, changes: 3)
-        row_edit(1, changes: 3)
+        row_edit(rows: 1, changes: 3, columns: [a, b, c])
         ");
+    }
+
+    #[test]
+    fn rows_with_identical_column_sets_group_into_one_rectangle_line() {
+        use arrow_array::{ArrayRef, Int64Array};
+        use std::sync::Arc;
+
+        // A four-by-three rectangle in a twenty-row, six-column table: the
+        // four rows underbid the three columns, and sharing one column set,
+        // they collapse into a single line stating the rectangle.
+        let fixture = |changed: bool| {
+            fn column(name: &str, values: [i64; 20]) -> (&str, ArrayRef) {
+                (
+                    name,
+                    Arc::new(Int64Array::from(values.to_vec())) as ArrayRef,
+                )
+            }
+            let edited = |row: i64| (2..=5).contains(&row);
+            let change = if changed { 1 } else { 0 };
+            let mut ids = [0; 20];
+            let mut cells = [100; 20];
+            let mut scaled = [0; 20];
+            let sevens = [7; 20];
+            for row in 1..=20_i64 {
+                ids[(row - 1) as usize] = row;
+                scaled[(row - 1) as usize] = row * 100;
+                if edited(row) {
+                    cells[(row - 1) as usize] = change;
+                }
+            }
+            test_support::table_from_columns(vec![
+                column("id", ids),
+                column("a", cells),
+                column("b", cells),
+                column("c", cells),
+                column("d", scaled),
+                column("e", sevens),
+            ])
+        };
+
+        assert_eq!(
+            render(&fixture(false), &fixture(true)),
+            "table_key([id], basis: declared)\nrow_edit(rows: 4, changes: 12, columns: [a, b, c])"
+        );
+    }
+
+    #[test]
+    fn grouping_spans_interruptions_by_other_column_sets() {
+        use arrow_array::{ArrayRef, Int64Array};
+        use std::sync::Arc;
+
+        // Rows 2, 3, and 5 change in "a" and "b", row 4 in "c". The
+        // rectangle's rows are not consecutive, and they still form one
+        // group: a group is a column set, not a run.
+        fn column(name: &str, values: [i64; 20]) -> (&str, ArrayRef) {
+            (
+                name,
+                Arc::new(Int64Array::from(values.to_vec())) as ArrayRef,
+            )
+        }
+        let fixture = |change: i64| {
+            let mut ids = [0; 20];
+            let mut ab = [100; 20];
+            let mut c = [100; 20];
+            for row in 1..=20_i64 {
+                ids[(row - 1) as usize] = row;
+                if row == 2 || row == 3 || row == 5 {
+                    ab[(row - 1) as usize] = change;
+                }
+                if row == 4 {
+                    c[(row - 1) as usize] = change;
+                }
+            }
+            test_support::table_from_columns(vec![
+                column("id", ids),
+                column("a", ab),
+                column("b", ab),
+                column("c", c),
+            ])
+        };
+
+        assert_eq!(
+            render(&fixture(0), &fixture(1)),
+            "table_key([id], basis: declared)\n\
+             row_edit(rows: 3, changes: 6, columns: [a, b])\n\
+             row_edit(rows: 1, changes: 1, columns: [c])"
+        );
+    }
+
+    #[test]
+    fn a_long_column_list_keeps_only_the_count() {
+        use arrow_array::{ArrayRef, Int64Array};
+        use std::sync::Arc;
+
+        // Nine changed columns is past the list threshold: the line keeps
+        // `changes:` alone rather than spelling the set out.
+        let fixture = |add: i64| {
+            let mut columns = vec![("id", Arc::new(Int64Array::from_iter(1..=20)) as ArrayRef)];
+            for index in 0..9 {
+                let name: &'static str = Box::leak(format!("c{index}").into_boxed_str());
+                columns.push((
+                    name,
+                    Arc::new(Int64Array::from_iter(
+                        (1..=20).map(|row| row * 100 + add * (row == 2) as i64),
+                    )) as ArrayRef,
+                ));
+            }
+            test_support::table_from_columns(columns)
+        };
+
+        assert_eq!(
+            render(&fixture(0), &fixture(1)),
+            "table_key([id], basis: declared)\nrow_edit(rows: 1, changes: 9)"
+        );
+    }
+
+    #[test]
+    fn rows_with_different_column_sets_do_not_group() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "a" => [10, 20, 30],
+            "b" => [10, 20, 30],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "a" => [11, 20, 30],
+            "b" => [10, 20, 31],
+        };
+
+        assert_eq!(
+            render(&old, &new),
+            "table_key([id], basis: declared)\n\
+             row_edit(rows: 1, changes: 1, columns: [a])\n\
+             row_edit(rows: 1, changes: 1, columns: [b])"
+        );
     }
 
     #[test]
@@ -1029,7 +1203,7 @@ mod tests {
         // Nothing can identify a row, so the chain reaches its last resort.
         assert_eq!(
             render_with(&old, &new, &[]),
-            "table_key([:row], basis: fallback)\nrow_edit(2, changes: 1)"
+            "table_key([:row], basis: fallback)\nrow_edit(rows: 1, changes: 1, columns: [label])"
         );
     }
 
@@ -1043,7 +1217,7 @@ mod tests {
 
         assert_eq!(
             declared,
-            "table_key([:row], basis: declared)\nrow_edit(2, changes: 1)"
+            "table_key([:row], basis: declared)\nrow_edit(rows: 1, changes: 1, columns: [label])"
         );
         // The two routes reach one key: only the line saying how differs.
         assert_eq!(

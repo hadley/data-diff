@@ -84,9 +84,9 @@ fn guesses_a_key_when_the_flag_is_omitted() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: guessed, overlap: 0.67)
-    row_drop(3)
-    row_add(3)
-    row_edit(2, changes: 1)
+    row_drop(rows: 1)
+    row_add(rows: 1)
+    row_edit(rows: 1, changes: 1, columns: [label])
     ");
 }
 
@@ -284,8 +284,8 @@ fn reports_mixed_changes_in_human_format() {
     col_add(add)
     col_order(value, 2 -> 1)
     col_edit(value, changes: 2)
-    row_drop(3)
-    row_add(3)
+    row_drop(rows: 1)
+    row_add(rows: 1)
     row_order(2 -> 1)
     ");
 }
@@ -349,7 +349,7 @@ fn infers_a_rename_from_the_values() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: declared)
     col_rename(amount -> total, basis: exact)
-    row_edit(2, changes: 1)
+    row_edit(rows: 1, changes: 1, columns: [note])
     ");
 }
 
@@ -382,7 +382,7 @@ fn infers_a_rename_that_carried_an_edit() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: declared)
     col_rename(amount -> total, basis: approximate)
-    row_edit(7, changes: 1)
+    row_edit(rows: 1, changes: 1, columns: [total])
     ");
 }
 
@@ -449,7 +449,7 @@ fn accepts_a_paired_key_component() {
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([customer_id -> id], basis: declared)
     col_rename(customer_id -> id, basis: declared)
-    row_edit(2, changes: 1)
+    row_edit(rows: 1, changes: 1, columns: [value])
     ");
 }
 
@@ -505,8 +505,8 @@ fn reports_a_declared_key_that_fans_out_too_broadly() {
     key_invalid([id], reason: excessive_fanout)
     ----
     table_key([:row], basis: fallback)
-    row_add(3)
-    row_edit(2, changes: 1)
+    row_add(rows: 1)
+    row_edit(rows: 1, changes: 1, columns: [id])
     ");
 }
 
@@ -608,8 +608,8 @@ fn reads_hints_from_a_file_with_comments_and_blank_lines() {
     table_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
     col_rename(note -> comment, basis: hinted)
-    row_edit(1, changes: 2)
-    row_edit(2, changes: 2)
+    col_edit(markdown, changes: 2)
+    col_edit(comment, changes: 2)
     ");
 }
 
@@ -919,7 +919,7 @@ fn a_temporal_file_diffs_end_to_end() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: declared)
-    row_edit(2, changes: 1)
+    row_edit(rows: 1, changes: 1, columns: [when])
     ");
 }
 

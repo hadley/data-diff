@@ -144,7 +144,9 @@ pub struct SessionSummaryDto {
     /// Every count the opening-view rule and the expandos read.
     pub cells: usize,
     pub optimal: bool,
-    /// Columns and rows with changed cells — the expando counts.
+    /// Columns and rows with changed cells, however they are covered. The
+    /// views show each event in exactly one place, so these counts no longer
+    /// feed an expando; they remain the cells-derived magnitudes.
     pub edited_columns: usize,
     pub edited_rows: usize,
     /// The minimum cover's events — what the opening-view rule reads, a
@@ -249,13 +251,31 @@ pub struct FanoutGroupDto {
     pub lines: Vec<RowLineDto>,
 }
 
+/// A block of consecutive edited rows sharing one changed-column set: the
+/// summary's grouped `row_edit()` line as an expando. Pagination counts
+/// groups, not raw rows, so a fifty-row rectangle is one page unit.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EditedGroupDto {
+    /// The group's rows, as one-based new-side positions.
+    pub rows: Vec<u32>,
+    /// The first row's key, for the title.
+    pub key: Vec<ValueDto>,
+    /// The changed-column mask every row in the group shares, over the
+    /// section's columns.
+    pub changed: Vec<bool>,
+    /// The stacked old/new lines, two per row.
+    pub lines: Vec<RowLineDto>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RowViewDto {
     pub columns: Vec<String>,
-    /// Paged lines for `edited`, `added`, `dropped`, and `moved`.
+    /// Paged lines for `added`, `dropped`, and `moved`.
     pub rows: Option<PageDto<RowLineDto>>,
     /// Paged groups for `fanout`.
     pub groups: Option<PageDto<FanoutGroupDto>>,
+    /// Paged edited-row blocks for `edited`.
+    pub edited: Option<PageDto<EditedGroupDto>>,
 }
 
 #[cfg(test)]

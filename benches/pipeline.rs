@@ -11,7 +11,7 @@
 //! the same run's own linear pass, so the rule does not depend on the machine.
 
 use arrow_array::RecordBatch;
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use data_diff::{DiffOptions, diff_tables};
 use test_support::generate;
 
@@ -77,4 +77,14 @@ fn pipeline(criterion: &mut Criterion) {
 }
 
 criterion_group!(benches, pipeline);
-criterion_main!(benches);
+
+// `criterion_main!` expanded by hand to add the guard: `cargo test
+// --all-targets` builds and runs bench targets, and only `cargo bench`
+// passes `--bench`, so without it this is a test run and the grid must
+// not execute.
+fn main() {
+    if !std::env::args().any(|arg| arg == "--bench") {
+        return;
+    }
+    benches();
+}

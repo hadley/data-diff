@@ -14,7 +14,7 @@ export function RowView({ summary }: { summary: SessionSummary }) {
   return (
     <div class="row-view">
       <h2>Value changes by row</h2>
-      <Section kind="edited" title="EDITED" count={summary.edited_rows} toggles keyColumns={summary.key_columns} />
+      <Section kind="edited" title="EDITED" count={summary.cover_rows} toggles keyColumns={summary.key_columns} />
       <Section kind="added" title="ADDED" count={summary.added_rows} keyColumns={summary.key_columns} />
       <Section kind="dropped" title="DROPPED" count={summary.dropped_rows} keyColumns={summary.key_columns} />
       <Section kind="moved" title="MOVED" count={summary.moved_rows} keyColumns={summary.key_columns} />
@@ -80,6 +80,28 @@ function SectionBody({ kind, toggles, keyColumns }: { kind: string; toggles: boo
             page={data.rows.page}
             pageSize={data.rows.page_size}
             total={data.rows.total}
+            onPage={setPage}
+          />
+        </>
+      )}
+      {data.edited && (
+        <>
+          {data.edited.items.map((group, index) => {
+            // The group *is* its shared changed-column set, so the columns
+            // are the title; the expando's count is the number of rows.
+            const columns = data.columns
+              .filter((_, i) => group.changed[i])
+              .join(", ");
+            return (
+              <Expando key={index} title={columns} count={group.rows.length}>
+                <LinesTable data={data} lines={group.lines} keyColumns={keyColumns} />
+              </Expando>
+            );
+          })}
+          <Pager
+            page={data.edited.page}
+            pageSize={data.edited.page_size}
+            total={data.edited.total}
             onPage={setPage}
           />
         </>

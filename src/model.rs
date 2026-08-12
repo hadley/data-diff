@@ -45,9 +45,10 @@ pub struct Budgets {
     pub swap_pairs: PairBudget,
     /// The changed cells up to which the edit summary is exactly minimal.
     ///
-    /// Above this many residual changed cells, the minimum-cover solve is
-    /// skipped and each connected component is covered by its smaller affected
-    /// side, columns when tied, with [`EditSummary::optimal`] set false.
+    /// Above this many residual changed cells, the minimum-weight cover solve
+    /// is skipped and each connected component is covered by its lighter
+    /// affected side under the summary weights, columns when tied, with
+    /// [`EditSummary::optimal`] set false.
     pub summary_cells: usize,
     /// The rows key guessing may examine searching for a key.
     ///
@@ -485,11 +486,16 @@ pub struct ColumnEdit {
 ///
 /// `changes` counts every changed cell in the row, over the identified columns.
 /// A row edit has no aspect but its values, so unlike a column edit this count
-/// is never zero.
+/// is never zero. `columns` names them: the changed identified columns as
+/// ascending one-based new-side positions, the same convention as every other
+/// public model position, and unambiguous under rename and reorder because
+/// display is always under the new name. It is the same cover-independent
+/// fact as `changes`, which is its length.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowEdit {
     pub row: Coordinate,
     pub changes: usize,
+    pub columns: Vec<usize>,
 }
 
 /// Resolved column identities and schema events.
@@ -713,7 +719,11 @@ pub struct OrderDiff {
     pub rows: Vec<Coordinate>,
 }
 
-/// A minimum semantic summary of row and column edits.
+/// A minimum-weight semantic summary of row and column edits.
+///
+/// `optimal` means the exact solver ran: the cover is minimum-weight under
+/// the description-length weights, which are a per-event upper bound rather
+/// than an exact bit count — a doubly-covered cell is specified twice.
 ///
 /// Each event carries a count of every changed cell incident to it, so the
 /// counts of a row edit and a column edit that cross both include the cell they

@@ -15,11 +15,13 @@ fn identity(old: usize, new: usize, basis: IdentityBasis) -> ColumnIdentity {
     }
 }
 
-/// One row edit, spelled as its two zero-based positions and its cell count.
-fn row_edit(old: usize, new: usize, changes: usize) -> RowEdit {
+/// One row edit, spelled as its two zero-based positions and its changed
+/// columns as one-based new-side positions.
+fn row_edit(old: usize, new: usize, columns: &[usize]) -> RowEdit {
     RowEdit {
         row: Coordinate::from_zero_based(old, new),
-        changes,
+        changes: columns.len(),
+        columns: columns.to_vec(),
     }
 }
 
@@ -149,7 +151,7 @@ fn summary_combines_row_and_column_edits_minimally() {
                 type_changed: false,
                 changes: 2,
             }],
-            rows: vec![row_edit(0, 0, 2)],
+            rows: vec![row_edit(0, 0, &[2, 3])],
         }
     );
 }
@@ -170,7 +172,7 @@ fn selected_row_retains_its_moved_coordinate() {
     let diff = diff_tables(&old, &new, &declared("id")).unwrap();
 
     assert!(diff.summary.columns.is_empty());
-    assert_eq!(diff.summary.rows, vec![row_edit(0, 1, 2)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(0, 1, &[2, 3])]);
 }
 
 #[test]
@@ -375,7 +377,7 @@ fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
         EditSummary {
             optimal: true,
             columns: vec![],
-            rows: vec![row_edit(6, 7, 1)],
+            rows: vec![row_edit(6, 7, &[2])],
         }
     );
 }
@@ -498,7 +500,7 @@ fn a_rename_is_inferred_despite_an_edit_it_carried() {
         EditSummary {
             optimal: true,
             columns: vec![],
-            rows: vec![row_edit(0, 0, 2)],
+            rows: vec![row_edit(0, 0, &[2, 3])],
         }
     );
 
@@ -1062,7 +1064,7 @@ fn a_hint_can_be_guessed_as_the_key() {
             retraction: None,
         }
     );
-    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, &[2])]);
     assert!(diff.rows.added.is_empty());
     assert!(diff.rows.dropped.is_empty());
 }
@@ -1220,22 +1222,23 @@ fn an_edit_hint_withdraws_a_swap() {
 #[test]
 fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
     let old = table! {
-        "id" => [1, 2],
-        "a" => [10, 20],
-        "b" => [30, 40],
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "a" => [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        "b" => [30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
     };
     let new = table! {
-        "id" => [1, 2],
-        "a" => [11, 21],
-        "b" => [31, 40],
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "a" => [11, 21, 30, 40, 50, 60, 70, 80, 90, 100],
+        "b" => [31, 40, 50, 60, 70, 80, 90, 100, 110, 120],
     };
 
-    // Column "a" changes in both rows and "b" in the first, so covering the
-    // two rows is the smaller description.
+    // Column "a" changes in two rows and "b" in the first of them, and the
+    // ten-row table makes naming a changed row among them cheap: covering the
+    // two rows is the lighter description.
     let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
     assert_eq!(
         inferred.summary.rows,
-        [row_edit(0, 0, 2), row_edit(1, 1, 1)]
+        [row_edit(0, 0, &[2, 3]), row_edit(1, 1, &[2])]
     );
     assert!(inferred.summary.columns.is_empty());
 
@@ -1254,7 +1257,7 @@ fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
     );
     // The surviving row edit counts the cell in the hinted column too: a hint
     // moves which events are reported, not what is true of row 1.
-    assert_eq!(edited.summary.rows, [row_edit(0, 0, 2)]);
+    assert_eq!(edited.summary.rows, [row_edit(0, 0, &[2, 3])]);
     // The hint changed how the same cells are described, not which cells there
     // are: the complete diff is untouched.
     assert_eq!(edited.cells, inferred.cells);
@@ -1319,7 +1322,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
     let inferred = diff_tables(&old, &new, &declared("id")).unwrap();
     let rendered = String::from_utf8(render(&inferred)).unwrap();
     assert!(rendered.contains("col_rename(amount -> total, basis: approximate)"));
-    assert!(rendered.contains("row_edit(7, changes: 1)"));
+    assert!(rendered.contains("row_edit(rows: 1, changes: 1, columns: [total])"));
 
     // A col_edit() line names its column as the new file does, so feeding one
     // back means naming an identity by an end the old file does not have. It
@@ -1476,7 +1479,7 @@ fn every_stage_still_runs_under_a_fallback_key() {
     assert_eq!(diff.rows.matched.len(), 3);
     assert!(diff.rows.added.is_empty());
     assert!(diff.rows.dropped.is_empty());
-    assert_eq!(diff.summary.rows, vec![row_edit(2, 2, 1)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(2, 2, &[3])]);
 }
 
 #[test]
@@ -1542,7 +1545,7 @@ fn a_rejected_pair_keeps_the_identity_it_asserted() {
          ----\n\
          table_key([:row], basis: fallback)\n\
          col_rename(customer_id -> id, basis: declared)\n\
-         row_edit(2, changes: 1)"
+         row_edit(rows: 1, changes: 1, columns: [value])"
     );
 }
 
@@ -1849,7 +1852,7 @@ fn an_exhausted_search_still_keeps_the_best_candidate_it_examined() {
         "incomplete_key_guess()\n\
          ----\n\
          table_key([id], basis: guessed, overlap: 1.00)\n\
-         row_edit(3, changes: 1)"
+         row_edit(rows: 1, changes: 1, columns: [note])"
     );
 }
 
@@ -2188,7 +2191,7 @@ fn an_opaque_column_is_edited_like_any_other() {
         diff.cells,
         vec![CellCoordinate::from_zero_based(1, 1, 1, 1)]
     );
-    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, 1)]);
+    assert_eq!(diff.summary.rows, vec![row_edit(1, 1, &[2])]);
 
     let repeated = diff_tables(&old, &new, &options).unwrap();
     assert_eq!(diff, repeated);

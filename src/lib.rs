@@ -263,6 +263,7 @@ pub fn diff_tables(
                 .map(|row| RowEdit {
                     row: Coordinate::from_zero_based(row.old, row.new),
                     changes: row.changes,
+                    columns: one_based(&row.columns),
                 })
                 .collect(),
         },
@@ -313,7 +314,7 @@ fn run_pass(
         incomplete.push(IncompleteStage::KeyGuess);
     }
 
-    // The budgets resolve against the wider side's column count. 
+    // The budgets resolve against the wider side's column count.
     // Rename and swap each get their own budget, but anything left over from
     // rename is given to swap.
     let columns = old.num_columns().max(new.num_columns());
@@ -333,7 +334,13 @@ fn run_pass(
     // Edit hints are judged here rather than with the rest: whether the identity
     // they name exists needs inference, and whether it changed needs the cells.
     let (edit_issues, forced) = hint::validate_edits(edits, &map, &cells);
-    let summary = summary::summarize(&cells, &forced, budgets.summary_cells);
+    let summary = summary::summarize(
+        &cells,
+        &forced,
+        budgets.summary_cells,
+        rows.matched.len(),
+        map.pairs().len(),
+    );
     if !summary.optimal {
         incomplete.push(IncompleteStage::Summary);
     }

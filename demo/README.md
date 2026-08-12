@@ -21,7 +21,7 @@ The commands below use that installed `data-diff` binary. Every command is shown
 ```console
 $ data-diff demo/basic-old.parquet demo/basic-new.parquet --key id
 table_key([id], basis: declared)
-row_edit(2, changes: 2)
+row_edit(rows: 1, changes: 2, columns: [name, score])
 ```
 
 If you do not supply a key, `data-diff` guesses. It looks for columns that have the same name on both sides and takes the one that identifies the most rows:
@@ -29,7 +29,7 @@ If you do not supply a key, `data-diff` guesses. It looks for columns that have 
 ```console
 $ data-diff demo/basic-old.parquet demo/basic-new.parquet
 table_key([id], basis: guessed, overlap: 1.00)
-row_edit(2, changes: 2)
+row_edit(rows: 1, changes: 2, columns: [name, score])
 ```
 
 A guessed key does not have to be one column. Here no single column identifies every row — regions repeat across quarters and quarters across regions, and the edited `revenue` column matches only three rows to the pair's four — so the search combines columns and the evidence picks the pair:
@@ -37,7 +37,7 @@ A guessed key does not have to be one column. Here no single column identifies e
 ```console
 $ data-diff demo/compound-key-old.parquet demo/compound-key-new.parquet
 table_key([region, quarter], basis: guessed, overlap: 1.00)
-row_edit(3, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [revenue])
 ```
 
 You can also match keys that were renamed. Name both sides as a pair:
@@ -46,7 +46,7 @@ You can also match keys that were renamed. Name both sides as a pair:
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet --key customer_id/id
 table_key([customer_id -> id], basis: declared)
 col_rename(customer_id -> id, basis: declared)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [amount])
 ```
 
 The pair is not required, however. Without it, `data-diff` goes to work. First it looks at all pairs of identically named columns and searches for potential keys that overlap between the two files. Here it settles on `amount`. But then rename inference identifies `customer_id` and `id` as one column, so the key is reconsidered once with that identity in hand. The renamed pair wins on the evidence, and the correct key is reconstructed:
@@ -55,7 +55,7 @@ The pair is not required, however. Without it, `data-diff` goes to work. First i
 $ data-diff demo/key-rename-old.parquet demo/key-rename-new.parquet
 table_key([customer_id -> id], basis: guessed, overlap: 1.00)
 col_rename(customer_id -> id, basis: exact)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [amount])
 ```
 
 The result is the same diff the explicit pair produces. `basis: guessed` records that the tool arrived at the key rather than being told.
@@ -67,7 +67,7 @@ Both columns here repeat a value, so neither can be a key. Rather than give up, 
 ```console
 $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet
 table_key([:row], basis: fallback)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [reading])
 ```
 
 You can also ask for positional matching directly:
@@ -75,7 +75,7 @@ You can also ask for positional matching directly:
 ```console
 $ data-diff demo/no-key-old.parquet demo/no-key-new.parquet --key :row
 table_key([:row], basis: declared)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [reading])
 ```
 
 ### When the whole file changed
@@ -102,13 +102,13 @@ row_fanout(4 -> [4, 5], changes: 1)
 
 ## Value edits
 
-When cells change, `data-diff` reports the minimum set of rows and columns that accounts for them. For example, here four cells change in an L shape: `a` and `b` both change in row 1, and `c` changes in rows 2 and 3.
+When cells change, `data-diff` reports the cheapest set of row and column edits that accounts for them, each edit priced by the bits needed to state it. For example, here four cells change in an L shape: `a` and `b` both change in row 1, and `c` changes in rows 2 and 3.
 
 ```console
 $ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id
 table_key([id], basis: declared)
 col_edit(c, changes: 2)
-row_edit(1, changes: 2)
+row_edit(rows: 1, changes: 2, columns: [a, b])
 ```
 
 A column whose type changed is also reported, even when all of its values compare as equal:
@@ -139,7 +139,7 @@ row_order(3 -> 1)
 $ data-diff demo/rename-old.parquet demo/rename-new.parquet --key id
 table_key([id], basis: declared)
 col_rename(amount -> total, basis: exact)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [note])
 ```
 
 Or if a small fraction of values are different:
@@ -148,7 +148,7 @@ Or if a small fraction of values are different:
 $ data-diff demo/approx-rename-old.parquet demo/approx-rename-new.parquet --key id
 table_key([id], basis: declared)
 col_rename(amount -> total, basis: approximate)
-row_edit(7, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [total])
 ```
 
 Or if the values in two columns were swapped:
@@ -189,7 +189,7 @@ Dates, timestamps, decimals, binary, and nested values all take part. Here the `
 $ data-diff demo/temporal-old.parquet demo/temporal-new.parquet
 table_key([id], basis: guessed, overlap: 1.00)
 col_edit(flag, type: Int64 -> Date32)
-row_edit(2, changes: 1)
+row_edit(rows: 1, changes: 1, columns: [when])
 ```
 
 ### Retypes that keep their values
