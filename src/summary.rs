@@ -9,10 +9,14 @@
 //! and `k` are the vertex's changed-cell counts. The cover that minimizes the
 //! summed weight is found exactly, as a minimum s–t cut.
 //!
-//! The weights are irrational, so byte-identical output requires fixed
-//! precision: they are computed in `f64` and rounded to centi-bits (`i64`),
-//! which is far finer than any realistic gap between covers. Ties after
-//! rounding break by the solver's deterministic traversal order.
+//! The solver compares and accumulates the weights, so they are computed in
+//! `f64` and rounded to two decimal places (`i64`): exact integer arithmetic keeps
+//! the maximum flow correct by construction, where floating-point residuals
+//! would need epsilon tolerances. The rounding is far finer than any
+//! realistic gap between covers, and it happens to absorb the last-ulp
+//! differences in `log2` across libm implementations — but cross-platform
+//! byte-identity is a side effect, not a contract. Ties after rounding break
+//! by the solver's deterministic traversal order.
 //!
 //! The sum is a deliberate upper bound on description length rather than an
 //! exact bit count: a cell covered by both its row and its column is specified
@@ -216,7 +220,7 @@ pub(crate) fn summarize(
 /// The base-2 logarithm of `n choose k`, summed term by term.
 ///
 /// The weights are irrational almost everywhere, which is why the callers
-/// round to centi-bits: two runs must agree bit for bit, and a fixed-precision
+/// round to two decimal places: two runs must agree bit for bit, and a fixed-precision
 /// sum of logarithms is reproducible where a floating-point comparison of
 /// exact values would not need to be.
 fn log2_choose(n: usize, k: usize) -> f64 {
