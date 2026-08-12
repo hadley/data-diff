@@ -5,10 +5,10 @@
 //! skipping combinations above 10⁷ cells. `identical` is the floor — one
 //! linear pass of cell comparison with nothing to infer — and the acceptance
 //! rule for the default budgets is measured against it: on every grid point,
-//! each adversarial scenario completes within twice the same-sized `identical`
-//! run, and no non-adversarial scenario reports an incomplete stage. The
-//! multiplier is a ratio against the same run's own linear pass, so the rule
-//! does not depend on the machine.
+//! no non-adversarial scenario reports an incomplete stage, and each
+//! adversarial scenario stays within its multiplier of the same-sized
+//! `identical` run recorded in `README.md`. The multiplier is a ratio against
+//! the same run's own linear pass, so the rule does not depend on the machine.
 
 use arrow_array::RecordBatch;
 use criterion::{BenchmarkId, Criterion, criterion_group};

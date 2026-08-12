@@ -26,18 +26,19 @@ use crate::{IdentityBasis, Side};
 /// both what the instruction means and the performance argument the design
 /// makes for these two kinds, candidates being compared pairwise.
 ///
-/// `budget` is the rows both stages may examine at value level — each
-/// examination charging the rows it reads — and the return value says whether
-/// they finished: `false` means the budget exhausted, some candidates were
-/// never examined, and the endpoints they would have resolved remain drops
-/// and additions.
+/// `meter` funds the pair examinations both stages may spend — one unit per
+/// first-time value-level question about a candidate pair — and the return
+/// value says whether they finished: `false` means the meter exhausted, some
+/// candidates were never examined, and the endpoints they would have resolved
+/// remain drops and additions. What the meter has left goes back to the
+/// caller, which shares it onward to swap inference.
 pub(crate) fn infer(
     old: &RecordBatch,
     new: &RecordBatch,
     map: &mut ColumnMap,
     rows: &RowMatches,
     sample: &RowSample,
-    budget: usize,
+    meter: &mut Meter,
 ) -> bool {
     infer_with(
         old,
@@ -45,7 +46,7 @@ pub(crate) fn infer(
         map,
         rows,
         &mut Aligned::new(old, new, rows, sample),
-        budget,
+        meter,
     )
 }
 
@@ -62,15 +63,14 @@ fn infer_with(
     map: &mut ColumnMap,
     rows: &RowMatches,
     values: &mut Aligned,
-    budget: usize,
+    meter: &mut Meter,
 ) -> bool {
     if rows.matched.is_empty() {
         return true;
     }
-    let mut meter = Meter::new(budget);
-    let (exact, exact_complete) = exact_pairs(old, new, map, values, &mut meter);
+    let (exact, exact_complete) = exact_pairs(old, new, map, values, meter);
     apply(map, exact, IdentityBasis::Exact);
-    let (approximate, approximate_complete) = approximate_pairs(old, new, map, values, &mut meter);
+    let (approximate, approximate_complete) = approximate_pairs(old, new, map, values, meter);
     apply(map, approximate, IdentityBasis::Approximate);
     exact_complete && approximate_complete
 }
@@ -416,7 +416,7 @@ mod tests {
     use super::{infer, infer_with};
     use crate::DiffOptions;
     use crate::IdentityBasis;
-    use crate::agreement::{Aligned, RowSample};
+    use crate::agreement::{Aligned, Meter, RowSample};
     use crate::compare::CanonicalValue;
     use crate::key::testing::resolve_key;
     use crate::rows::match_rows;
@@ -438,7 +438,14 @@ mod tests {
         let rows = match_rows(&key);
         let mut schema = reconcile_schema(old, new, &key);
         let sample = RowSample::full();
-        let complete = infer(old, new, &mut schema, &rows, &sample, budget);
+        let complete = infer(
+            old,
+            new,
+            &mut schema,
+            &rows,
+            &sample,
+            &mut Meter::new(budget),
+        );
         (schema, complete)
     }
 
@@ -617,7 +624,7 @@ mod tests {
             &mut schema,
             &rows,
             &mut values,
-            usize::MAX
+            &mut Meter::unlimited()
         ));
 
         // Every column now digests alike, so the join offers every pair and
@@ -905,20 +912,20 @@ mod tests {
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1), (2, 2)]);
 
-        // Each examination reads the 11 matched rows. Two examinations' worth
-        // funds a's row of candidates but not the mutual-uniqueness column, so
-        // the group exhausts mid-way: nothing is accepted and both endpoints
-        // strand as the drop and addition they were.
-        let (schema, complete) = infer_with_budget(&old, &new, 22);
+        // Two examinations fund a's row of candidates but not the
+        // mutual-uniqueness column, so the group exhausts mid-way: nothing is
+        // accepted and both endpoints strand as the drop and addition they
+        // were.
+        let (schema, complete) = infer_with_budget(&old, &new, 2);
         assert!(!complete);
         assert!(renames(&schema).is_empty());
         assert_eq!(schema.dropped(), [1, 2]);
         assert_eq!(schema.added(), [1, 2]);
 
-        // Three examinations' worth completes a's whole endpoint group — its
-        // row and the one fresh column measurement — so (a, x) is accepted
-        // before the budget dies inside b's group, which strands b and y only.
-        let (schema, complete) = infer_with_budget(&old, &new, 33);
+        // Three examinations complete a's whole endpoint group — its row and
+        // the one fresh column measurement — so (a, x) is accepted before the
+        // budget dies inside b's group, which strands b and y only.
+        let (schema, complete) = infer_with_budget(&old, &new, 3);
         assert!(!complete);
         assert_eq!(renames(&schema), [(1, 1)]);
         assert_eq!(schema.dropped(), [2]);
@@ -944,12 +951,11 @@ mod tests {
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1)]);
 
-        // Two rows fund the diagonal verification of (gone, fresh) — one
-        // examination of the two matched rows — and die on its informativeness
-        // measurement. The join never runs, so the whole verified matrix does
-        // not exist, and the uninformative pair is not accepted on evidence
-        // that was never gathered.
-        let (schema, complete) = infer_with_budget(&old, &new, 2);
+        // One examination funds the diagonal verification of (gone, fresh)
+        // and dies on its informativeness measurement. The join never runs,
+        // so the whole verified matrix does not exist, and the uninformative
+        // pair is not accepted on evidence that was never gathered.
+        let (schema, complete) = infer_with_budget(&old, &new, 1);
         assert!(!complete);
         assert!(renames(&schema).is_empty());
         assert_eq!(schema.dropped(), [1, 2]);
@@ -972,10 +978,9 @@ mod tests {
         };
 
         // Every column renamed in place: the diagonal claims each pair with
-        // one verification and one informativeness measurement, each reading
-        // the 3 matched rows, so exactly two examinations' worth of rows per
-        // column completes the stage.
-        let (schema, complete) = infer_with_budget(&old, &new, 18);
+        // one verification and one informativeness measurement, so exactly
+        // two examinations per column complete the stage.
+        let (schema, complete) = infer_with_budget(&old, &new, 6);
         assert!(complete);
         assert_eq!(renames(&schema), [(1, 1), (2, 2), (3, 3)]);
     }
