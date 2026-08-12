@@ -18,6 +18,10 @@ Every scenario runs over rows {1 000, 100 000, 1 000 000} by columns {10, 100, 1
 | `renamed_strings` | every string column renamed in place, distinct values | the digest join and rename verification over string columns |
 | `guessed_compound` | no declared key; a hidden (g1, g2) pair behind near-perfect payload columns | the honest keyless case: the compound search must find the pair and outrank every one-row-short single column |
 | `keyless_duplicates` | no declared key; low-cardinality columns with no key at any width | the key-search adversary: the lattice must exhaust into the positional fallback under its budgets |
+| `wide_diagonal` | 10,000 × 10,000, one changed cell per row and column on the diagonal | the issue #41 case: the swap filter measures every identity and admits none, so its per-column constant dominates at this width |
+| `wide_path` | 5,000 × 5,000, changed cells forming a path through the grid | the same stress, two changes per column |
+
+The two `wide_*` scenarios exceed the grid's 10⁷-cell cap and run at their own fixed shapes, outside the grid and its acceptance rule; they exist to time the swap stage's rewritten filter at the widths issue #41 reported.
 
 `identical`, `identical_strings`, `renamed_distinct`, `renamed_strings`, and `guessed_compound` are the non-adversarial scenarios; the others are the adversaries the budgets exist to cut. `keyless_duplicates` is special among the adversaries: exhausting is its expected result, so the acceptance check on it is that `Diff::incomplete` holds exactly the key guess, and that the fallback diff over its identical sides stays empty.
 
@@ -52,6 +56,8 @@ Ratios of scenario time to `identical` at the same size; `identical` absolute ti
 | `full_rewrite` | 4.52× | 13.56× | 13.75× | 6.25× | 15.01× | 5.36× |
 | `guessed_compound` | 2.87× | 2.85× | 2.86× | 6.01× | 13.63× | 5.94× |
 | `keyless_duplicates` | 3.02× | 2.95× | 4.87× | 5.14× | 12.85× | 4.25× |
+
+The wide points are absolute times at their fixed shapes, not ratios. With the swap stage's rewritten filter asking its narrow sampled question natively (2026-08-12, issue #41), `wide_diagonal` runs in 0.60 s against 3.0 s for the measuring filter it replaced, and `wide_path` in 0.17 s against 1.3 s — the remainder being the linear cell-diff floor at 10⁸ and 2.5×10⁷ cells. Output was verified fingerprint-identical to the pre-change build over every scenario at 1k×1000 and 100k×100 plus the wide shapes, by the procedure below.
 
 The 2026-08-11 re-record accompanies the pair denomination of the search budgets (issue #31) and the owner's narrowing of their defaults to 20 examinations per column, shared — rename inference draws first and its remainder joins swap's allowance. Completion was verified against the row-denominated build point by point: the non-adversarial scenarios still complete everywhere, and five adversary points were deliberately given up — `rename_and_modify`, `swapped`, and `full_rewrite` at 100k×100, and `renamed_constant` at 100k×10 and 1M×10, whose exact stage plus sampled re-measure needs about 30 examinations per column. Everywhere else the complete diff is fingerprint-identical to the old build's. Two ratio movements are worth naming. The short-wide `swapped` and `full_rewrite` points rise because the shared pool funds up to 4,040 crossings where the row purse funded 505. And `swapped` 100k×100 rises from 3.89× to about 15× even though its search now does *less* — failing the swap leaves every same-name pair rewritten, so the pipeline materializes the ten-million-cell diff a resolved exchange avoids, converging on `full_rewrite`'s cost, which is that scenario's floor.
 

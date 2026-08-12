@@ -426,6 +426,102 @@ impl<'a> Aligned<'a> {
         self.measure(meter, over, plan, old, new)
     }
 
+    /// Whether the pair agrees in so few sampled rows that it reads as
+    /// rewritten.
+    ///
+    /// The swap filter's question, narrower than [`Self::measure_sampled`]:
+    /// the verdict needs only the agreeing count, so where the pair admits a
+    /// native comparison it is answered straight off the arrow columns — no
+    /// take, no canonicalization, and none of the frequency maps an
+    /// `Agreement`'s expected count would need. Everything else falls back to
+    /// the sampled projection, still without the counts. The verdict is
+    /// bit-identical to `measure_sampled(...).is_distant()`, the native
+    /// comparator partitioning values exactly as canonical values do.
+    ///
+    /// The answer is not memoized in `measured` — it is not an `Agreement`,
+    /// and the filter asks each pair's question exactly once — and the native
+    /// arm populates no projection: a column the filter passes pays for its
+    /// sampled values once, at crossing time. The meter is charged one unit
+    /// per question, as everywhere.
+    pub(crate) fn is_distant_sampled(
+        &mut self,
+        meter: &mut Meter,
+        plan: ComparisonPlan,
+        old: usize,
+        new: usize,
+    ) -> Option<bool> {
+        if !meter.charge() {
+            return None;
+        }
+        if self.native
+            && let Some(native) = NativeEq::under_plan(
+                self.old.column(old).as_ref(),
+                self.new.column(new).as_ref(),
+                plan,
+            )
+        {
+            let pairs = &self.rows.matched;
+            let (rows, agreeing) = match self.sample.0.as_deref() {
+                Some(positions) => (
+                    positions.len() as u64,
+                    positions
+                        .iter()
+                        .filter(|&&position| {
+                            let (old_row, new_row) = pairs[position];
+                            native.equal(old_row, new_row)
+                        })
+                        .count() as u64,
+                ),
+                None => (
+                    pairs.len() as u64,
+                    pairs
+                        .iter()
+                        .filter(|&&(old_row, new_row)| native.equal(old_row, new_row))
+                        .count() as u64,
+                ),
+            };
+            return Some(
+                Agreement {
+                    rows,
+                    agreeing,
+                    expected: 0,
+                }
+                .is_distant(),
+            );
+        }
+        // The fallback compares the projections without their frequency
+        // counts, which only an expected-agreement question needs.
+        let (old_values, new_values) = if self.sample.is_full() {
+            self.ensure_full(plan, Side::Old, old);
+            self.ensure_full(plan, Side::New, new);
+            (
+                self.cache[&(Side::Old, old, plan)].full.as_deref(),
+                self.cache[&(Side::New, new, plan)].full.as_deref(),
+            )
+        } else {
+            self.ensure_sampled(plan, Side::Old, old);
+            self.ensure_sampled(plan, Side::New, new);
+            (
+                self.cache[&(Side::Old, old, plan)].sampled.as_deref(),
+                self.cache[&(Side::New, new, plan)].sampled.as_deref(),
+            )
+        };
+        let old_values = old_values.expect("ensured above");
+        let new_values = new_values.expect("ensured above");
+        Some(
+            Agreement {
+                rows: old_values.len() as u64,
+                agreeing: old_values
+                    .iter()
+                    .zip(new_values)
+                    .filter(|(old, new)| old == new)
+                    .count() as u64,
+                expected: 0,
+            }
+            .is_distant(),
+        )
+    }
+
     fn measure(
         &mut self,
         meter: &mut Meter,
@@ -1001,6 +1097,184 @@ mod tests {
                 "agreements diverged at ({old_index}, {new_index})"
             );
         }
+    }
+
+    /// The swap filter's narrow question must give the `measure_sampled`
+    /// verdict by every path: native and materialized, full sample and capped
+    /// sample, near and distant pairs, across the admitted types — including
+    /// the float normalizations, -0.0 against 0.0 and NaN against NaN, that
+    /// agree canonically without agreeing bitwise.
+    #[test]
+    fn the_distant_question_agrees_with_the_full_measurement() {
+        let old = table! {
+            "id" => [1, 2, 3, 4, 5, 6],
+            "ints" => [10, 20, 30, 40, 50, 60],
+            "doubles" => [0.0, f64::NAN, 1.5, 2.5, 3.5, 4.5],
+            "text" => ["a", "b", "c", "d", "e", "f"],
+            "flags" => [true, false, true, false, true, false],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4, 5, 6],
+            "ints" => [10, 20, 30, 40, 50, 60],
+            "doubles" => [-0.0, f64::NAN, 1.5, 2.5, 3.5, 4.5],
+            "text" => ["a", "b", "c", "d", "e", "f"],
+            "flags" => [true, false, true, false, true, false],
+        };
+        let shuffled = table! {
+            "id" => [1, 2, 3, 4, 5, 6],
+            "ints" => [60, 50, 40, 30, 20, 10],
+            "doubles" => [4.5, 3.5, 2.5, 1.5, f64::NAN, 0.0],
+            "text" => ["f", "e", "d", "c", "b", "a"],
+            "flags" => [false, true, false, true, false, true],
+        };
+        let options = DiffOptions {
+            key: vec!["id".into()],
+            ..DiffOptions::default()
+        };
+        let key = resolve_key(&old, &new, &options).unwrap();
+        let rows = match_rows(&key);
+
+        for sample in [RowSample::full(), RowSample::select(&key, &rows, 4)] {
+            for column in 1..=4 {
+                let plan = ComparisonPlan::new(
+                    old.column(column).data_type(),
+                    old.column(column).data_type(),
+                )
+                .unwrap();
+                let mut meter = Meter::unlimited();
+                // Identical columns are not distant; every column against the
+                // shuffled table is. The full measurement is the oracle.
+                for (other, expected) in [(&new, false), (&shuffled, true)] {
+                    let reference = Aligned::new(&old, other, &rows, &sample)
+                        .measure_sampled(&mut meter, plan, column, column)
+                        .unwrap()
+                        .is_distant();
+                    assert_eq!(reference, expected);
+                    for mut values in [
+                        Aligned::new(&old, other, &rows, &sample),
+                        Aligned::with_digest(
+                            &old,
+                            other,
+                            &rows,
+                            &sample,
+                            crate::compare::sequence_hash,
+                        ),
+                    ] {
+                        assert_eq!(
+                            values.is_distant_sampled(&mut meter, plan, column, column),
+                            Some(reference),
+                            "distant verdicts diverged for column {column}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A retyped same-name pair has a cross-type plan, which the native
+    /// comparator rightly refuses: the raw values alone do not determine the
+    /// shared canonical domain. The fallback must still measure — the verdict
+    /// decides whether the identity enters the crossing enumeration.
+    #[test]
+    fn the_distant_question_falls_back_for_cross_type_pairs() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [1, 2, 3, 4],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [1.0, 2.0, 3.0, 4.0],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+
+        // The values survive the retype, so the pair is not distant — and the
+        // answer came from the materialized fallback, which with a full sample
+        // builds the full projection but never its frequency counts.
+        assert_eq!(
+            values.is_distant_sampled(&mut Meter::unlimited(), plan, 1, 1),
+            Some(false)
+        );
+        let entry = &values.cache[&(crate::Side::Old, 1, plan)];
+        assert!(entry.full.is_some());
+        assert!(entry.counts.is_none() && entry.sampled_counts.is_none());
+    }
+
+    /// Types outside the comparison matrix — binary here — canonicalize as
+    /// opaque row bytes, which the fallback compares without counting.
+    #[test]
+    fn the_distant_question_falls_back_for_opaque_types() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => binary["a", "b", "c", "d"],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => binary["w", "x", "y", "z"],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+
+        assert_eq!(
+            values.is_distant_sampled(&mut Meter::unlimited(), plan, 1, 1),
+            Some(true)
+        );
+        let entry = &values.cache[&(crate::Side::Old, 1, plan)];
+        assert!(entry.sampled_counts.is_none() && entry.counts.is_none());
+    }
+
+    /// The native arm builds nothing: no projection, no counts. A column the
+    /// filter passes pays for its sampled values later, at crossing time.
+    #[test]
+    fn the_native_distant_question_populates_no_projection() {
+        let old = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [10, 20, 30, 40],
+        };
+        let new = table! {
+            "id" => [1, 2, 3, 4],
+            "value" => [40, 30, 20, 10],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+
+        assert_eq!(
+            values.is_distant_sampled(&mut Meter::unlimited(), plan, 1, 1),
+            Some(true)
+        );
+        assert!(values.cache.is_empty());
+    }
+
+    /// One question is one examination, and the verdict is not memoized: the
+    /// filter asks each pair exactly once, so a repeat is a new charge.
+    #[test]
+    fn the_distant_question_charges_each_asking() {
+        let old = table! {
+            "id" => [1, 2],
+            "value" => [10, 20],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "value" => [20, 10],
+        };
+        let rows = matched(&old, &new);
+        let sample = RowSample::full();
+        let plan =
+            ComparisonPlan::new(old.column(1).data_type(), new.column(1).data_type()).unwrap();
+        let mut values = Aligned::new(&old, &new, &rows, &sample);
+        let mut meter = Meter::new(1);
+
+        assert!(values.is_distant_sampled(&mut meter, plan, 1, 1).is_some());
+        assert_eq!(values.is_distant_sampled(&mut meter, plan, 1, 1), None);
     }
 
     #[test]

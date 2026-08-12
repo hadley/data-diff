@@ -194,6 +194,51 @@ pub fn keyless_duplicates(rows: usize, columns: usize) -> (RecordBatch, RecordBa
     (build(), build())
 }
 
+/// One changed cell per row and column, on the diagonal: the issue #41
+/// wide-table case. Every identity agrees in all but one row, so the swap
+/// stage's rewritten filter measures each of the many columns and admits
+/// none of them — the filter's per-column constant is what this stresses.
+pub fn wide_diagonal(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let old = table(
+        names("c", columns),
+        (0..columns).map(|column| int_column(rows, move |row| distinct(column, row))),
+    );
+    let new = table(
+        names("c", columns),
+        (0..columns).map(|column| {
+            int_column(rows, move |row| {
+                let value = distinct(column, row);
+                if row == column { value + 1 } else { value }
+            })
+        }),
+    );
+    (old, new)
+}
+
+/// Changed cells forming a path through the grid — column `c` changes in
+/// rows `c` and `c + 1`: the second issue #41 shape, same stress as the
+/// diagonal with two changes per column instead of one.
+pub fn wide_path(rows: usize, columns: usize) -> (RecordBatch, RecordBatch) {
+    let old = table(
+        names("c", columns),
+        (0..columns).map(|column| int_column(rows, move |row| distinct(column, row))),
+    );
+    let new = table(
+        names("c", columns),
+        (0..columns).map(|column| {
+            int_column(rows, move |row| {
+                let value = distinct(column, row);
+                if row == column || row == column + 1 {
+                    value + 1
+                } else {
+                    value
+                }
+            })
+        }),
+    );
+    (old, new)
+}
+
 /// The largest `block` with `block * block <= rows`, without floating point.
 fn integer_sqrt(rows: usize) -> usize {
     let mut block = 1;
