@@ -45,6 +45,15 @@ const GUESSED_SCENARIOS: [(&str, Scenario); 2] = [
     ("keyless_duplicates", generate::keyless_duplicates),
 ];
 
+/// The issue #41 wide-table points, above the grid's 10⁷-cell cap and so
+/// benched at their own fixed shapes rather than across the grid: the swap
+/// stage's rewritten filter asks one question per column, and at this width
+/// the per-column constant dominates the pipeline.
+const WIDE_SCENARIOS: [(&str, Scenario, usize, usize); 2] = [
+    ("wide_diagonal", generate::wide_diagonal, 10_000, 10_000),
+    ("wide_path", generate::wide_path, 5_000, 5_000),
+];
+
 fn pipeline(criterion: &mut Criterion) {
     let declared = DiffOptions {
         key: vec!["id".into()],
@@ -72,6 +81,19 @@ fn pipeline(criterion: &mut Criterion) {
                 },
             );
         }
+        group.finish();
+    }
+    for (name, scenario, rows, columns) in WIDE_SCENARIOS {
+        let mut group = criterion.benchmark_group(name);
+        group.sample_size(10);
+        let (old, new) = scenario(rows, columns);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{rows}x{columns}")),
+            &(old, new),
+            |bencher, (old, new)| {
+                bencher.iter(|| diff_tables(old, new, &declared).unwrap());
+            },
+        );
         group.finish();
     }
 }

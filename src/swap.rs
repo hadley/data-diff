@@ -44,7 +44,8 @@ pub(crate) fn infer(
     // weighed against each other before any of them rewires it.
     let eligible = eligible(map, edits);
 
-    // The rewritten filter is one measurement per eligible identity — linear,
+    // The rewritten filter asks one narrow sampled question per eligible
+    // identity — answered natively where the pair admits it — a linear pass,
     // and deliberately unbudgeted the way every other linear pass is. Only
     // identities rewritten under their own names enter the enumeration, which
     // is what keeps the budgeted part to the candidates that could matter.
@@ -161,9 +162,8 @@ fn rewritten(
 ) -> bool {
     match plan_for(old, new, identity.old, identity.new) {
         Some(plan) => values
-            .measure_sampled(meter, plan, identity.old, identity.new)
-            .expect("the rewritten filter's meter is unlimited")
-            .is_distant(),
+            .is_distant_sampled(meter, plan, identity.old, identity.new)
+            .expect("the rewritten filter's meter is unlimited"),
         None => true,
     }
 }
