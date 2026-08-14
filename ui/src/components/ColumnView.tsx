@@ -1,8 +1,8 @@
 import { useState } from "preact/hooks";
 import { columnView } from "../api";
-import type { ColumnHeader } from "../types";
+import type { ColumnHeader, Side } from "../types";
 import { FrozenTd, FrozenTh } from "./PagedTable";
-import { ValueText } from "./ValueText";
+import { ChangeTooltip, ValueText } from "./ValueText";
 import { usePages, VirtualTable } from "./VirtualTable";
 
 /** The column view's three changed/all axes, lifted to the toolbar. */
@@ -13,17 +13,20 @@ export interface ColumnOptions {
 }
 
 /**
- * Every edited column side by side, keyed rows aligned: a row that changed
- * in two columns shows both edits on one line.
+ * Every edited column, keyed rows aligned: a row that changed in two
+ * columns shows both edits on one line. `side` picks which file's values
+ * the changed columns show.
  */
 export function ColumnView({
   keyColumns,
   options,
   group,
+  side,
 }: {
   keyColumns: string[];
   options: ColumnOptions;
   group: number | null;
+  side: Side;
 }) {
   const { allColumns, allRows, addedDropped } = options;
   const [columns, setColumns] = useState<ColumnHeader[]>([]);
@@ -36,9 +39,7 @@ export function ColumnView({
     [allColumns, allRows, addedDropped, group],
   );
 
-  const colSpan =
-    keyColumns.length +
-    columns.reduce((span, column) => span + (column.span === "pair" ? 2 : 1), 0);
+  const colSpan = keyColumns.length + columns.length;
 
   return (
     <VirtualTable
@@ -47,27 +48,14 @@ export function ColumnView({
       ensure={list.ensure}
       version={list.version}
       head={
-        <>
-          <tr>
-            {keyColumns.map((name, i) => (
-              <FrozenTh index={i} rowspan={2}>{name}</FrozenTh>
-            ))}
-            {columns.map((column) =>
-              column.span === "pair" ? (
-                <th colspan={2} class="group">{column.name}</th>
-              ) : (
-                <th rowspan={2} class={`single ${column.origin}`}>{column.name}</th>
-              ),
-            )}
-          </tr>
-          <tr class="sub-row">
-            {columns.flatMap((column) =>
-              column.span === "pair"
-                ? [<th class="sub">old</th>, <th class="sub">new</th>]
-                : [],
-            )}
-          </tr>
-        </>
+        <tr>
+          {keyColumns.map((name, i) => (
+            <FrozenTh index={i}>{name}</FrozenTh>
+          ))}
+          {columns.map((column) => (
+            <th class={`single ${column.origin}`}>{column.name}</th>
+          ))}
+        </tr>
       }
       renderRow={(index) => {
         const row = list.item(index);
@@ -85,24 +73,38 @@ export function ColumnView({
                 <ValueText value={value} />
               </FrozenTd>
             ))}
-            {row.cells.flatMap((cell, i) => {
+            {row.cells.map((cell, i) => {
               const column = columns[i];
-              if (column.span === "single") {
-                const value = column.side === "old" ? cell.old : cell.new;
-                return [
-                  <td class={`single ${column.origin}`}>
-                    {value && <ValueText value={value} />}
-                  </td>,
-                ];
-              }
-              return [
-                <td class={cell.changed ? "changed" : ""}>
-                  {cell.old && <ValueText value={cell.old} />}
-                </td>,
-                <td class={cell.changed ? "changed" : ""}>
-                  {cell.new && <ValueText value={cell.new} />}
-                </td>,
-              ];
+              // A one-sided (added/dropped) column has a value only on its
+              // own side; a changed column follows the toolbar's side.
+              const value =
+                column.span === "single"
+                  ? column.side === "old"
+                    ? cell.old
+                    : cell.new
+                  : side === "old"
+                    ? cell.old
+                    : cell.new;
+              const tip = column.span !== "single" && cell.changed && cell.old && cell.new;
+              return (
+                <td
+                  class={
+                    column.span === "single"
+                      ? `single ${column.origin}`
+                      : cell.changed
+                        ? "changed"
+                        : ""
+                  }
+                >
+                  {tip ? (
+                    <ChangeTooltip old={cell.old!} newValue={cell.new!}>
+                      {value && <ValueText value={value} />}
+                    </ChangeTooltip>
+                  ) : (
+                    value && <ValueText value={value} />
+                  )}
+                </td>
+              );
             })}
           </tr>
         );

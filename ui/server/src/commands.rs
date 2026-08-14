@@ -595,6 +595,7 @@ pub fn row_view_section(
     kind: &str,
     all_columns: bool,
     group: Option<usize>,
+    side: Option<Side>,
     page: usize,
     page_size: usize,
 ) -> RowViewDto {
@@ -639,21 +640,48 @@ pub fn row_view_section(
                 .map(|pair| (pair.new, pair))
                 .collect();
 
-            // The table is the stacked old/new lines, two per edited row,
-            // paginated by line so the windowed frontend sees one flat list.
-            // Values are looked up only for the page's lines.
-            let total = rows.len() * 2;
+            // The table is the edited rows' lines, paginated by line so the
+            // windowed frontend sees one flat list. Without a side the lines
+            // are stacked old/new pairs, two per row; with one, each row
+            // contributes its single old or new line. Values are looked up
+            // only for the page's lines.
+            let total = if side.is_some() {
+                rows.len()
+            } else {
+                rows.len() * 2
+            };
             let items = (page * page_size).min(total)..(page * page_size + page_size).min(total);
             let items = items
                 .map(|line| {
-                    let new_row = rows[line / 2];
+                    let new_row = rows[if side.is_some() { line } else { line / 2 }];
                     let old_row = matched[&new_row];
                     let key = key_values(session, Side::New, new_row);
                     let changed: Vec<bool> = columns
                         .iter()
                         .map(|&(col, _)| cells.contains_key(&(new_row, col)))
                         .collect();
-                    if line % 2 == 0 {
+                    let show_old = match side {
+                        Some(Side::Old) => true,
+                        Some(Side::New) => false,
+                        None => line % 2 == 0,
+                    };
+                    // A single-side line still carries the hidden side's
+                    // values, so a changed cell's tooltip can say old → new.
+                    let alt = |yes: bool| {
+                        yes.then(|| {
+                            columns
+                                .iter()
+                                .map(|&(col, _)| {
+                                    if show_old {
+                                        value_at(session, Side::New, new_row, by_new[&col].new)
+                                    } else {
+                                        value_at(session, Side::Old, old_row, by_new[&col].old)
+                                    }
+                                })
+                                .collect()
+                        })
+                    };
+                    if show_old {
                         RowLineDto {
                             label: "old".to_owned(),
                             key,
@@ -664,6 +692,7 @@ pub fn row_view_section(
                                 })
                                 .collect(),
                             changed,
+                            alt: alt(side.is_some()),
                         }
                     } else {
                         RowLineDto {
@@ -676,6 +705,7 @@ pub fn row_view_section(
                                 })
                                 .collect(),
                             changed,
+                            alt: alt(side.is_some()),
                         }
                     }
                 })
@@ -711,6 +741,7 @@ pub fn row_view_section(
                             .map(|&column| value_at(session, side, row, column))
                             .collect(),
                         changed: vec![false; shown.len()],
+                        alt: None,
                     }
                 })
                 .collect();
@@ -742,6 +773,7 @@ pub fn row_view_section(
                         key: key_values(session, Side::New, new - 1),
                         values: vec![position(old), position(new)],
                         changed: vec![false, false],
+                        alt: None,
                     }
                 })
                 .collect();
@@ -786,6 +818,7 @@ pub fn row_view_section(
                             .map(|pair| value_at(session, Side::Old, old_row, pair.old))
                             .collect(),
                         changed: vec![false; by_new.len()],
+                        alt: None,
                     });
                     for (index, &new_position) in event.new.iter().enumerate() {
                         let new_row = new_position - 1;
@@ -800,6 +833,7 @@ pub fn row_view_section(
                                 .keys()
                                 .map(|&col| changed.contains(&(new_row, col)))
                                 .collect(),
+                            alt: None,
                         });
                     }
                     FanoutGroupDto {

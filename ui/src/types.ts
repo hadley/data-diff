@@ -1,3 +1,6 @@
+/** The file a value comes from; the toolbar's old/new toggle picks one. */
+export type Side = "old" | "new";
+
 export interface ValueDto {
   kind: string;
   text: string;
@@ -74,6 +77,8 @@ export interface RowLine {
   key: ValueDto[];
   values: ValueDto[];
   changed: boolean[];
+  /** The hidden side's values on a single-side edited line; null otherwise. */
+  alt: ValueDto[] | null;
 }
 
 export interface FanoutGroup {

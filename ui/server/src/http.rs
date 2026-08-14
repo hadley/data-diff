@@ -128,6 +128,11 @@ impl Server {
                         query.text("kind", "edited"),
                         query.flag("all_columns", false),
                         query.number("group").map(|group| group as usize),
+                        match query.text("side", "") {
+                            "old" => Some(data_diff::Side::Old),
+                            "new" => Some(data_diff::Side::New),
+                            _ => None,
+                        },
                         query.number("page").unwrap_or(0) as usize,
                         query.number("page_size").unwrap_or(50) as usize,
                     )

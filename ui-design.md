@@ -6,30 +6,30 @@ title: data-diff UI design
 
 This document sketches the interactive UI for data-diff. It assumes the reconciliation design in [design.md](design.md) and maps every view onto the existing `Diff` model; nothing here requires new reconciliation machinery. The one new library surface is a lazy, paginated lookup of cell and row values from the input tables, described at the end.
 
-The layout is master-detail: a narrow sidebar on the left lists every component of the diff — schema, columns (expanding to one sub-entry per multi-column group sharing a changed-row set), rows edited (expanding to one sub-entry per group of rows sharing a changed-column set, the CLI's granularity), rows added, dropped, moved, fanout, and cells — each with its count, empty categories hidden. Selecting an entry switches the main panel on the right to that component's view. A common toolbar at the top of the main panel holds the active view's toggles, and the schema view is always the opening view.
+The layout is master-detail: a narrow sidebar on the left lists every component of the diff — schema, columns (expanding to one sub-entry per multi-column group sharing a changed-row set), rows edited (expanding to one sub-entry per group of rows sharing a changed-column set, the CLI's granularity), rows added, dropped, moved, fanout, and cells — each with its count, empty categories hidden. Selecting an entry switches the main panel on the right to that component's view. A common toolbar at the top of the main panel holds the active view's toggles, and the schema view is always the opening view. The two-sided views (schema, columns, rows edited) show one file at a time: a shared old/new toggle in the toolbar picks which side's values are on display, defaulting to old, and clicking the active segment flips to the other side. The cell view keeps both columns as the evidence layer, and the one-sided views (rows added, dropped, moved, fanout) have no use for the toggle and do not show it. Where only one side is on display, a changed cell's tooltip shows `old → new`, with the difference appended for numeric values.
 
 Everything is lazily loaded. The model retains the complete cell set by invariant, but no view holds more than a window of it; old and new values are fetched from the input tables on demand, a page at a time, as the user scrolls. Each table view fills the main panel and scrolls in both directions, with the key columns pinned at the left edge and the column names pinned at the top. The schema view is the exception: it does not fill its space with a table, leaving room for a summary of the changes beside the alignment.
 
 # Schema view
 
-The opening view, and the hint surface. A two-sided alignment of old and new schemas, one row per column identity or unmatched column, ordered by new-file position with drops interleaved at their old position:
+The opening view, and the hint surface. An alignment of old and new schemas, one row per column identity or unmatched column, ordered by new-file position with drops interleaved at their old position. The toolbar's old/new toggle picks which side's position and name each row shows; a one-sided row (an addition or a drop) has values only on its own side:
 
 ```
-SCHEMA                                       [changed only | all columns]
+SCHEMA                          [old | new]   [changed only | all columns]
 ──────────────────────────────────────────────────────────────────────────
-key   old                      new
+key     old
 ──────────────────────────────────────────────────────────────────────────
- 🔑  1 id            ⇄        id          int64
-     2 price         ⇄        price       int64 → double
-     3 name          ⇄      4 label       string         rename (exact)
-     4 qty           ✕                      int64          dropped
-                          3   sku         string         added
+ 🔑   1 id            int64
+      2 price         int64 → double
+      3 name          string         rename (exact)
+      4 qty           int64          dropped
+        sku           string         added
 ```
 
 * A narrow marker column leads each row with the change-kind swatch — the soft fill as a square with the full hue as a circle inside, the same marker the header legend explains: added, edited (renames, type changes, moves), deleted. Rows carry no background fills; the swatch says it.
 * Key columns are marked in a dedicated first column (🔑), one mark per key component
-* The old position always shows. The new position shows only when it differs from the old — an unmoved identity needs no second number, and a moved column's new position says everything a move badge would.
-* Renames show both names with a basis badge (`exact`, `approximate`, `hinted`, `declared`, `swapped`). The badge matters because some bases are certainties and some are judgements — the same rationale as the human format printing `basis:`.
+* The shown side's position always shows; a moved column's move is visible as the position changing when the toggle flips.
+* Renames show the chosen side's name with a basis badge (`exact`, `approximate`, `hinted`, `declared`, `swapped`). The badge matters because some bases are certainties and some are judgements — the same rationale as the human format printing `basis:`.
 * Type changes render inline as `int64 → double`. A type-only edit (no changed cells) lives here and nowhere else; the value views are about values.
 * The toggle fills in unchanged identities as plain rows, giving the full aligned schema. Changed-only is the default.
 * This panel is where hints happen: split a rename into drop + add, join an add/drop pair into a rename, assert `col_edit()`.
@@ -42,29 +42,28 @@ In every table the key columns are frozen at the left edge and the header row at
 
 ## Column view
 
-One table of the cover's column edits, with changed/all toggles in the toolbar — one per axis, so the columns shown and the rows shown each switch independently.
+One table of the cover's column edits, with changed/all toggles in the toolbar — one per axis, so the columns shown and the rows shown each switch independently. The old/new toggle picks which file's values the edited columns show.
 
 ```
-VALUE CHANGES BY COLUMN      [changed cols | all cols] [+ added/dropped]
+VALUE CHANGES BY COLUMN      [old | new] [changed cols | all cols] [+ added/dropped]
                              [changed rows | all rows]
 ───────────────────────────────────────────────────────────────────────
-      |  price                sku               discount
-key   |  old      new         old      new      old      new
+key   |  price      sku       discount
 ───────────────────────────────────────────────────────────────────────
-1042  |  9.99     12.99       A-100    A-100X   0.00     0.00
-1047  |  14.50    16.00       A-205    A-215    0.10     0.15
+1042  |  9.99       A-100     0.00
+1047  |  14.50      A-205     0.10
 …                          (scrolls; more rows load as you go)
 ```
 
-* The column name is a grouped header spanning its two sub-columns `old` and `new`. The whole EDITED section is one table: every edited column side by side, keyed rows aligned, so a row that changed in two columns shows both edits on one line.
+* The whole EDITED section is one table: every edited column side by side, keyed rows aligned, so a row that changed in two columns shows both edits on one line.
 * The sidebar's Columns entry expands to one sub-entry per group of columns sharing a changed-row set — the CLI's grouped `col_edit()` line — so a systematic change across several columns is navigable directly. Selecting a sub-entry narrows the table to that group's columns and rows; the parent entry keeps every edited column.
 * Highlighting marks the cells that actually differ.
-* The rows toggle fills in unchanged rows for context, page by page. The columns toggle fills in unchanged columns, which join as single-span columns (no old/new split — there is nothing to compare). Both default to changed-only.
-* A separate control adds the added and dropped columns, so their values are visible too. They join as single-span columns in schema order: an added column shows its values under `new` with the `old` side blank, a dropped column the reverse. They are not part of either changed/all toggle because they are not identities — there is no old/new pair to split — and because their values are context rather than changes: an added column's cells are not in `Diff::cells`, exactly as an added row's are not.
+* The rows toggle fills in unchanged rows for context, page by page. The columns toggle fills in unchanged columns, which join as plain columns showing the chosen side's values. Both default to changed-only.
+* The added and dropped columns show by default, so their values are visible too; a separate control removes them. They join as plain columns in schema order, each with values only on its own side — an added column is blank while the toggle is on `old`, a dropped column while it is on `new`. They are not part of either changed/all toggle because they are not identities, and because their values are context rather than changes: an added column's cells are not in `Diff::cells`, exactly as an added row's are not.
 
 ## Row views
 
-The transpose of the column view: same grid, with the two-level structure on the rows instead of the columns. Each row category is its own sidebar entry — rows edited, added, dropped, moved, fanout — and "rows edited" expands to one sub-entry per group of rows sharing a changed-column set, so a rectangle is navigable directly. Selecting a sub-entry shows that group's rows with the columns narrowed to the group's changed set; the toolbar's columns toggle fills in the rest, defaulting to changed-only.
+The transpose of the column view: the same grid, organized by row instead of by column. Each row category is its own sidebar entry — rows edited, added, dropped, moved, fanout — and "rows edited" expands to one sub-entry per group of rows sharing a changed-column set, so a rectangle is navigable directly. Selecting a sub-entry shows that group's rows with the columns narrowed to the group's changed set; the toolbar's columns toggle fills in the rest, defaulting to changed-only.
 
 ```
 ROWS EDITED (41)               [changed columns | all columns]
@@ -76,16 +75,16 @@ ROWS MOVED (3)
 FANOUT (1)
 ```
 
-* The row views lead each row with the same marker column as the schema view: the added or deleted swatch on every line of a one-sided row, the edited swatch on the old line of each edited pair. Changed cells keep their own highlight; rows carry no fills.
-* In the EDITED table, changed cells render as stacked rows
+* The row views lead each row with the same marker column as the schema view: the added or deleted swatch on every line of a one-sided row, the edited swatch on every edited line. Changed cells keep their own highlight; rows carry no fills.
+* In the EDITED table, each edited row is one line on the toolbar's chosen side; there is no label column, since the toggle already names the side:
 
 ```
-                                     [changed columns | all columns]
+                          [old | new]   [changed columns | all columns]
 ───────────────────────────────────────────────────────────────────────
- key |         price      sku         discount
+ key |  price      sku         discount
 ───────────────────────────────────────────────────────────────────────
-1042 | old     9.99       A-100       0.00
-1042 | new     12.99      A-100X      0.00
+1042 |  9.99       A-100       0.00
+1047 |  14.50      A-205       0.10
 ```
 
 * ADDED and DROPPED are tables of the rows' values from the one side that has them. Their cells are deliberately not in `Diff::cells`, so these tables read the input rows directly through the same lazy lookup.
@@ -119,7 +118,7 @@ key   |  column      old          new
 …                          (scrolls; more cells load as you go)
 ```
 
-* Columns are `key | column | old | new`. Compound keys widen into one column per component.
+* Columns are `key | column | old | new`: the evidence layer keeps both sides, exempt from the toolbar's old/new toggle. Compound keys widen into one column per component.
 * Column names come from the identity map, so a changed cell in a renamed column displays under its new name — the design's display rule, since the reader will find that name in the new data.
 * Old and new values render in their own source types, so a type-changed column shows `"9.99" → 9.99` honestly rather than normalized into sameness. Null renders distinctly from `NaN` and from empty string, since the comparison semantics treat all three differently.
 * Deliberately absent: added- and dropped-row cells (row events, shown in the row view), fanout cells (shown only in the fanout expansion), and key-column cells (unequal keys are different rows, not edits). The cell view is exactly `Diff::cells` — no more, no less. That fidelity is what makes it the evidence layer: every count elsewhere in the UI is a filter of this table.

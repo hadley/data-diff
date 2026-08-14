@@ -6,7 +6,7 @@ import type { Page, SessionSummary } from "../types";
 import { Sidebar } from "./Sidebar";
 import { Swatch } from "./Swatch";
 import { Toggle } from "./Toggle";
-import { ValueText } from "./ValueText";
+import { changeDelta, ChangeTooltip, ValueText } from "./ValueText";
 import { ROW_HEIGHT, usePages, VirtualTable } from "./VirtualTable";
 
 describe("ValueText", () => {
@@ -21,6 +21,49 @@ describe("ValueText", () => {
     expect(document.querySelector(".value.null")).not.toBeNull();
     expect(document.querySelector(".value.nan")).not.toBeNull();
     expect(document.querySelector(".value.empty")).not.toBeNull();
+  });
+});
+
+describe("changeDelta", () => {
+  it("formats the signed difference for numerics, null otherwise", () => {
+    expect(changeDelta({ kind: "double", text: "9.99" }, { kind: "double", text: "12.99" })).toBe(
+      "+3",
+    );
+    expect(changeDelta({ kind: "int64", text: "10" }, { kind: "int64", text: "7" })).toBe("-3");
+    // No difference across non-numeric kinds, or when a side is NaN.
+    expect(
+      changeDelta({ kind: "string", text: "A-100" }, { kind: "string", text: "A-100X" }),
+    ).toBeNull();
+    expect(changeDelta({ kind: "double", text: "NaN" }, { kind: "double", text: "1.00" })).toBeNull();
+  });
+});
+
+describe("ChangeTooltip", () => {
+  it("renders both sides and the difference as a hover tooltip", () => {
+    render(
+      <ChangeTooltip
+        old={{ kind: "double", text: "9.99" }}
+        newValue={{ kind: "double", text: "12.99" }}
+      >
+        <ValueText value={{ kind: "double", text: "9.99" }} />
+      </ChangeTooltip>,
+    );
+    const tip = document.querySelector(".tip")!;
+    expect(tip.getAttribute("role")).toBe("tooltip");
+    expect(tip.querySelector(".tip-values")!.textContent).toBe("9.99→12.99");
+    expect(tip.querySelector(".tip-delta")!.textContent).toBe("Δ +3");
+  });
+
+  it("omits the difference line for non-numeric values", () => {
+    render(
+      <ChangeTooltip
+        old={{ kind: "string", text: "A-100" }}
+        newValue={{ kind: "string", text: "A-100X" }}
+      >
+        <ValueText value={{ kind: "string", text: "A-100" }} />
+      </ChangeTooltip>,
+    );
+    expect(document.querySelector(".tip-delta")).toBeNull();
   });
 });
 
@@ -62,6 +105,10 @@ describe("Toggle", () => {
     expect(segments[1].className).toBe("on");
     expect(segments[1].getAttribute("aria-pressed")).toBe("true");
     expect(segments[0].getAttribute("aria-pressed")).toBe("false");
+
+    // Clicking the active segment flips to the other state.
+    fireEvent.click(segments[1]);
+    expect(clicks).toEqual([true, false]);
   });
 });
 

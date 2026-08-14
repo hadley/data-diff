@@ -7,6 +7,7 @@ import type {
   RowViewData,
   SchemaRow,
   SessionSummary,
+  Side,
 } from "./types";
 
 // Request failures surface as toasts; the App registers the reporter.
@@ -103,10 +104,11 @@ export function rowViewSection(
   kind: string,
   allColumns: boolean,
   group: number | null,
+  side: Side | null,
   page: number,
   pageSize: number,
 ): Promise<RowViewData> {
   return request(
-    `/api/row-view${query({ kind, all_columns: allColumns, group, page, page_size: pageSize })}`,
+    `/api/row-view${query({ kind, all_columns: allColumns, group, side, page, page_size: pageSize })}`,
   );
 }

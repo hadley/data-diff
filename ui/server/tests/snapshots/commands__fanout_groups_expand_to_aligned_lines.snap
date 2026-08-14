@@ -1,5 +1,5 @@
 ---
-source: ui/src-tauri/tests/commands.rs
+source: ui/server/tests/commands.rs
 expression: group
 ---
 {
@@ -30,7 +30,8 @@ expression: group
       "changed": [
         false,
         false
-      ]
+      ],
+      "alt": null
     },
     {
       "label": "new 1",
@@ -53,7 +54,8 @@ expression: group
       "changed": [
         false,
         false
-      ]
+      ],
+      "alt": null
     },
     {
       "label": "new 2",
@@ -76,7 +78,8 @@ expression: group
       "changed": [
         false,
         true
-      ]
+      ],
+      "alt": null
     }
   ]
 }

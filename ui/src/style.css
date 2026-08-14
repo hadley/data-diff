@@ -607,6 +607,36 @@ input::placeholder { color: var(--ink-faint); }
 .value.timestamp,
 .value.date { color: var(--cyan); }
 
+/* A changed cell's tooltip: both sides as styled values, the numeric
+   difference on a second line. Anchored above the value, hidden until
+   hover; the host stays inline so the cell's layout is unchanged. */
+.tip-host { position: relative; }
+.tip-host .tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 7;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 8px;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 4px;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+}
+.tip-host:hover .tip { display: flex; }
+/* The values inside keep their kind's shape but take the tooltip's ink:
+   the palette's value colours are tuned for the page, not the inverted
+   bubble. */
+.tip .value { color: inherit; font-style: inherit; }
+.tip .tip-arrow { margin: 0 4px; }
+.tip .tip-delta { color: inherit; opacity: 0.75; font-variant-numeric: tabular-nums; }
+
 /* Numeric cells right-align, so magnitudes line up down a column. */
 .paged-table td:has(.value.int64),
 .paged-table td:has(.value.double),

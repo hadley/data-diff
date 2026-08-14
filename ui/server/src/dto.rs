@@ -239,6 +239,9 @@ pub struct RowLineDto {
     pub key: Vec<ValueDto>,
     pub values: Vec<ValueDto>,
     pub changed: Vec<bool>,
+    /// The hidden side's values on a single-side edited line, so a changed
+    /// cell's tooltip can still say `old → new`; null when both sides show.
+    pub alt: Option<Vec<ValueDto>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

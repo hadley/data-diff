@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { rowViewSection } from "../api";
-import type { FanoutGroup, RowLine } from "../types";
+import type { FanoutGroup, RowLine, Side } from "../types";
 import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
 import { Swatch } from "./Swatch";
-import { ValueText } from "./ValueText";
+import { ChangeTooltip, ValueText } from "./ValueText";
 import { usePages, VirtualTable } from "./VirtualTable";
 
 /**
- * The edited rows as stacked old/new line pairs, two per row. `group`
+ * The edited rows, one line per row on the toolbar's chosen side. `group`
  * selects one of the sidebar's sub-entries — rows sharing a changed-column
  * set — and narrows the default columns to that set; null shows every
  * edited row.
@@ -16,28 +16,33 @@ export function EditedView({
   keyColumns,
   group,
   allColumns,
+  side,
 }: {
   keyColumns: string[];
   group: number | null;
   allColumns: boolean;
+  side: Side;
 }) {
   const [columns, setColumns] = useState<string[]>([]);
   const list = usePages(
     (page, pageSize) =>
-      rowViewSection("edited", allColumns, group, page, pageSize).then((data) => {
+      rowViewSection("edited", allColumns, group, side, page, pageSize).then((data) => {
         setColumns(data.columns);
         return data.rows!;
       }),
-    [allColumns, group],
+    [allColumns, group, side],
   );
 
   return (
+    // No label column: every line is the toolbar's chosen side, so the
+    // old/new label would repeat what the toggle already says.
     <LinesVirtualTable
       keyColumns={keyColumns}
       columns={columns}
       list={list}
-      showLabel
+      showLabel={false}
       marker="edited"
+      singleSide
     />
   );
 }
@@ -53,7 +58,7 @@ export function RowsKindView({
   const [columns, setColumns] = useState<string[]>([]);
   const list = usePages(
     (page, pageSize) =>
-      rowViewSection(kind, false, null, page, pageSize).then((data) => {
+      rowViewSection(kind, false, null, null, page, pageSize).then((data) => {
         setColumns(data.columns);
         return data.rows!;
       }),
@@ -77,6 +82,7 @@ function LinesVirtualTable({
   list,
   showLabel,
   marker,
+  singleSide = false,
 }: {
   keyColumns: string[];
   columns: string[];
@@ -84,6 +90,8 @@ function LinesVirtualTable({
   showLabel: boolean;
   /** The swatch the marker column shows; null for no marker column. */
   marker: "edited" | "added" | "deleted" | null;
+  /** One line per row rather than stacked old/new pairs. */
+  singleSide?: boolean;
 }) {
   const colSpan = (marker ? 1 : 0) + (showLabel ? 1 : 0) + keyColumns.length + columns.length;
   return (
@@ -126,10 +134,12 @@ function LinesVirtualTable({
             }
           >
             {/* One marker per row: on the old line of an edited pair, on
-                every line of a one-sided row. */}
+                every line of a one-sided row or a single-side edited line. */}
             {marker && (
               <td class="marker">
-                {(marker !== "edited" || line.label === "old") && <Swatch kind={marker} />}
+                {(singleSide || marker !== "edited" || line.label === "old") && (
+                  <Swatch kind={marker} />
+                )}
               </td>
             )}
             {showLabel && <td class="line-label">{line.label}</td>}
@@ -138,11 +148,25 @@ function LinesVirtualTable({
                 <ValueText value={value} />
               </FrozenTd>
             ))}
-            {line.values.map((value, i) => (
-              <td class={line.changed[i] ? "changed" : ""}>
-                <ValueText value={value} />
-              </td>
-            ))}
+            {line.values.map((value, i) => {
+              // A single-side edited line carries the hidden side in `alt`;
+              // the tooltip orders them old → new whichever side is shown.
+              const alt = line.changed[i] ? line.alt?.[i] : undefined;
+              return (
+                <td class={line.changed[i] ? "changed" : ""}>
+                  {alt ? (
+                    <ChangeTooltip
+                      old={line.label === "old" ? value : alt}
+                      newValue={line.label === "old" ? alt : value}
+                    >
+                      <ValueText value={value} />
+                    </ChangeTooltip>
+                  ) : (
+                    <ValueText value={value} />
+                  )}
+                </td>
+              );
+            })}
           </tr>
         );
       }}
@@ -165,7 +189,7 @@ export function FanoutView({ keyColumns }: { keyColumns: string[] }) {
   const loadMore = () => {
     if (loading.current || (total !== null && groups.length >= total)) return;
     loading.current = true;
-    rowViewSection("fanout", false, null, nextPage.current, 20).then((data) => {
+    rowViewSection("fanout", false, null, null, nextPage.current, 20).then((data) => {
       const page = data.groups!;
       nextPage.current += 1;
       loading.current = false;

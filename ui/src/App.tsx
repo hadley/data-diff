@@ -9,7 +9,7 @@ import { Swatch } from "./components/Swatch";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { Toast, Toasts } from "./components/Toasts";
 import { Toggle } from "./components/Toggle";
-import type { Selection, SessionSummary } from "./types";
+import type { Selection, SessionSummary, Side } from "./types";
 
 export function App() {
   const [summary, setSummary] = useState<SessionSummary | null>(null);
@@ -23,10 +23,14 @@ export function App() {
   const [columnOptions, setColumnOptions] = useState<ColumnOptions>({
     allColumns: false,
     allRows: false,
-    addedDropped: false,
+    // Added and dropped columns show by default; the control removes them.
+    addedDropped: true,
   });
   const [editedAllColumns, setEditedAllColumns] = useState(false);
   const [cellByColumn, setCellByColumn] = useState(false);
+  // The old/new side the two-sided views show, shared so it survives view
+  // switches.
+  const [side, setSide] = useState<Side>("old");
 
   // Every failed request surfaces as a toast, wherever it came from.
   useEffect(() => {
@@ -67,6 +71,19 @@ export function App() {
           with the main panel's edge. It stays visible even when the active
           view has no controls, so the layout never shifts. */}
       <div class="toolbar">
+        {/* The two-sided views show one file at a time; the cell view keeps
+            both sides as the evidence layer, and added/dropped/moved rows
+            and the fanout are one-sided already. */}
+        {(selection.view === "schema" ||
+          selection.view === "columns" ||
+          selection.view === "edited") && (
+          <Toggle
+            off="old"
+            on="new"
+            checked={side === "new"}
+            onChange={(value) => setSide(value ? "new" : "old")}
+          />
+        )}
         {selection.view === "schema" && (
           <Toggle off="changed only" on="all columns" checked={schemaAll} onChange={setSchemaAll} />
         )}
@@ -108,12 +125,15 @@ export function App() {
         <Sidebar summary={summary} selection={selection} onSelect={setSelection} />
         <section class="main-panel">
           <div class="view-body">
-            {selection.view === "schema" && <SchemaPanel summary={summary} all={schemaAll} />}
+            {selection.view === "schema" && (
+              <SchemaPanel summary={summary} all={schemaAll} side={side} />
+            )}
             {selection.view === "columns" && (
               <ColumnView
                 keyColumns={summary.key_columns}
                 options={columnOptions}
                 group={selection.group}
+                side={side}
               />
             )}
             {selection.view === "edited" && (
@@ -121,6 +141,7 @@ export function App() {
                 keyColumns={summary.key_columns}
                 group={selection.group}
                 allColumns={editedAllColumns}
+                side={side}
               />
             )}
             {(selection.view === "added" || selection.view === "dropped" || selection.view === "moved") && (

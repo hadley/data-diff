@@ -31,15 +31,15 @@ All return JSON DTOs; all lists paginated as `{ items, total, page }`.
 * `schema_panel(changed_only: bool) -> Vec<SchemaRow>` — aligned identities/adds/drops with basis badges, type changes, key marks, positions.
 * `apply_hints(hints) -> SessionSummary` — re-run the diff with the updated hint set (split rename, join add/drop, `col_edit`); replaces the session. This is the hint surface of the schema panel.
 * `cells_page(filter: {column?, row?}, sort, page) -> Page<CellRow>` — the cell view: `key | column | old | new`, values via `Lookup`, key components widened.
-* `column_view(toggles, page) -> ColumnViewData` — edited columns side by side with old/new sub-columns, changed/all toggles per axis, added/dropped columns join control.
-* `row_view_section(kind, toggles, page) -> RowViewData` — one command per expando: edited (stacked old/new rows), added, dropped, moved (positions only), fanout (aligned table from `FanoutEvent.cells`).
+* `column_view(toggles, page) -> ColumnViewData` — edited columns side by side, one value per column on the chosen side, changed/all toggles per axis, added/dropped columns join control.
+* `row_view_section(kind, toggles, side, page) -> RowViewData` — one command per expando: edited (one line per row on the chosen side), added, dropped, moved (positions only), fanout (aligned table from `FanoutEvent.cells`).
 
 DTOs are serde-serializable mirrors of the model types, defined in `src-tauri` — the library's model types stay free of serde unless the owner prefers deriving it there.
 
 # Frontend components (Preact)
 
 * `App` — session state, file pickers (Tauri dialog plugin), opening-view selection from the edit summary (column-dominated → column view; row-dominated → row view; diffuse or `optimal == false` → cell view).
-* `SchemaPanel` — two-sided aligned schema, key column, basis badges, type-change arrows, changed/all toggle, hint actions (split/join/`col_edit`) calling `apply_hints`.
+* `SchemaPanel` — aligned schema on the toolbar's chosen side, key column, basis badges, type-change arrows, changed/all toggle, hint actions (split/join/`col_edit`) calling `apply_hints`.
 * `ValueViews` — tabset over the three views.
 * `ColumnView` / `RowView` / `CellView` — per ui-design.md sections, composed from shared primitives:
   * `Expando` — minimized kind + count, expanded paginated table.
