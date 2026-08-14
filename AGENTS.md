@@ -6,6 +6,11 @@
 * `plan-next.md` — the ordered queue of future steps. Each item becomes its own `plan.md` and its own dedicated branch from `main`.
 * `design.md` — the durable design; plans must preserve its central invariants: deterministic reconciliation, no inferred event without underlying evidence, and continued access to the complete cell-level diff.
 
+## Repository layout
+
+* `src/` — the `data-diff` CLI and comparison library.
+* `ui/` — `data-diff-ui`, an interactive browser UI: a Preact frontend (`ui/src`, built to `ui/dist` with Vite/npm) served by a small dependency-free Rust server (`ui/server`, cargo package `data-diff-ui`). Run with `cargo run -p data-diff-ui -- old.parquet new.parquet --key id` after `npm install && npm run build` in `ui/`. Demo data comes from `cargo run --example generate_ui_demo`. See `ui/README.md`.
+
 ## "Next problem" workflow
 
 When the owner says "next problem" (or otherwise asks for the next plan):
