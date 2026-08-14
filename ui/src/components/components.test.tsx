@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 afterEach(cleanup);
 import type { Page, SessionSummary } from "../types";
 import { Sidebar } from "./Sidebar";
+import { Swatch } from "./Swatch";
 import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
 import { ROW_HEIGHT, usePages, VirtualTable } from "./VirtualTable";
@@ -20,6 +21,21 @@ describe("ValueText", () => {
     expect(document.querySelector(".value.null")).not.toBeNull();
     expect(document.querySelector(".value.nan")).not.toBeNull();
     expect(document.querySelector(".value.empty")).not.toBeNull();
+  });
+});
+
+describe("Swatch", () => {
+  it("renders the three change kinds", () => {
+    render(
+      <>
+        <Swatch kind="added" />
+        <Swatch kind="edited" />
+        <Swatch kind="deleted" />
+      </>,
+    );
+    expect(document.querySelector(".swatch.added")).not.toBeNull();
+    expect(document.querySelector(".swatch.edited")).not.toBeNull();
+    expect(document.querySelector(".swatch.deleted")).not.toBeNull();
   });
 });
 

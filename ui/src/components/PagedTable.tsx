@@ -13,8 +13,11 @@ export function PagedTable({ children }: { children: ComponentChildren }) {
   );
 }
 
-/** The sticky offset of the i-th frozen column. */
-const left = (index: number) => ({ left: `${index * 10}ch` });
+/** The sticky offset of the i-th frozen column, past the marker column
+ *  when the table has one (`with-marker` sets `--marker-width`). */
+const left = (index: number) => ({
+  left: `calc(var(--marker-width, 0px) + ${index * 10}ch)`,
+});
 
 export function FrozenTh({
   index,

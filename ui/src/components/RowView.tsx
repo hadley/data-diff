@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { rowViewSection } from "../api";
 import type { FanoutGroup, RowLine } from "../types";
 import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
+import { Swatch } from "./Swatch";
 import { ValueText } from "./ValueText";
 import { usePages, VirtualTable } from "./VirtualTable";
 
@@ -36,6 +37,7 @@ export function EditedView({
       columns={columns}
       list={list}
       showLabel
+      marker="edited"
     />
   );
 }
@@ -64,6 +66,7 @@ export function RowsKindView({
       columns={columns}
       list={list}
       showLabel={kind === "moved"}
+      marker={kind === "moved" ? null : kind === "added" ? "added" : "deleted"}
     />
   );
 }
@@ -73,21 +76,26 @@ function LinesVirtualTable({
   columns,
   list,
   showLabel,
+  marker,
 }: {
   keyColumns: string[];
   columns: string[];
   list: ReturnType<typeof usePages<RowLine>>;
   showLabel: boolean;
+  /** The swatch the marker column shows; null for no marker column. */
+  marker: "edited" | "added" | "deleted" | null;
 }) {
-  const colSpan = (showLabel ? 1 : 0) + keyColumns.length + columns.length;
+  const colSpan = (marker ? 1 : 0) + (showLabel ? 1 : 0) + keyColumns.length + columns.length;
   return (
     <VirtualTable
       total={list.total}
       colSpan={colSpan}
       ensure={list.ensure}
       version={list.version}
+      marker={marker !== null}
       head={
         <tr>
+          {marker && <th class="marker" />}
           {showLabel && <th />}
           {keyColumns.map((name, i) => (
             <FrozenTh index={i}>{name}</FrozenTh>
@@ -117,6 +125,13 @@ function LinesVirtualTable({
                   : "old-line"
             }
           >
+            {/* One marker per row: on the old line of an edited pair, on
+                every line of a one-sided row. */}
+            {marker && (
+              <td class="marker">
+                {(marker !== "edited" || line.label === "old") && <Swatch kind={marker} />}
+              </td>
+            )}
             {showLabel && <td class="line-label">{line.label}</td>}
             {line.key.map((value, i) => (
               <FrozenTd index={i}>

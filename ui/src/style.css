@@ -120,6 +120,46 @@ h1, h2, h3 { margin: 0; }
   white-space: nowrap;
 }
 
+/* The header legend: the change vocabulary's colours as small dots. */
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* Each marker is the soft fill as a square (the cell's look) with the
+   full hue as a small circle inside, so both strengths are legible. The
+   header legend and the views' marker column share the one swatch. */
+.swatch {
+  display: inline-block;
+  position: relative;
+  width: 17px;
+  height: 17px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.swatch::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.swatch.added { background: var(--added-soft); }
+.swatch.added::after { background: var(--added); }
+.swatch.edited { background: var(--accent2-soft); }
+.swatch.edited::after { background: var(--accent2); }
+.swatch.deleted { background: var(--dropped-soft); }
+.swatch.deleted::after { background: var(--dropped); }
+
 /* The one icon button: the theme toggle. */
 .icon-btn {
   flex: none;
@@ -379,8 +419,10 @@ input::placeholder { color: var(--ink-faint); }
 
 .schema-panel tbody tr + tr { border-top: 1px solid var(--row-line); }
 .schema-panel tbody tr:hover { background: var(--hover-row); }
-.schema-panel tr.added td { background: var(--added-soft); }
-.schema-panel tr.dropped td { background: var(--dropped-soft); }
+
+/* The marker column carries the row's change-kind swatch; rows no longer
+   wear background fills. */
+.schema-panel .marker { width: 17px; }
 
 /* The key mark: the shared palette's PK chip, worn by every key column. */
 .key-badge {
@@ -485,12 +527,25 @@ input::placeholder { color: var(--ink-faint); }
 .paged-table tbody tr:hover .frozen { background: var(--hover-row); }
 
 /* A changed cell is the edit hue at notice-strength; added and dropped
-   columns and rows wear their own gentle fills. */
+   columns wear their own gentle fills. Rows no longer wear fills — the
+   marker column carries their change-kind swatch instead. */
 .paged-table td.changed { background: var(--accent2-soft); }
 .paged-table .single.added { background: var(--added-soft); }
 .paged-table .single.dropped { background: var(--dropped-soft); }
-.paged-table tr.added td { background: var(--added-soft); }
-.paged-table tr.dropped td { background: var(--dropped-soft); }
+
+/* The marker column pins at the left edge, before the frozen keys, which
+   offset past it via --marker-width. */
+.paged-table.with-marker { --marker-width: 27px; }
+.paged-table .marker {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 27px;
+  padding-right: 0;
+  background: var(--card);
+}
+.paged-table thead .marker { z-index: 5; }
+.paged-table tbody tr:hover .marker { background: var(--hover-row); }
 
 /* The cell view's column column is the table's second axis; the rule sets
    it off from the old/new values it introduces. */

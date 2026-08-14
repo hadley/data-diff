@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { schemaPanel } from "../api";
 import type { SchemaRow, SessionSummary } from "../types";
+import { Swatch } from "./Swatch";
 
 interface SchemaPanelProps {
   summary: SessionSummary;
@@ -27,6 +28,7 @@ export function SchemaPanel({ summary, all }: SchemaPanelProps) {
       <table>
         <thead>
           <tr>
+            <th class="marker" />
             <th aria-label="key" />
             <th>#</th>
             <th>old</th>
@@ -40,6 +42,17 @@ export function SchemaPanel({ summary, all }: SchemaPanelProps) {
         <tbody>
           {rows.map((row, index) => (
             <tr key={index} class={row.status}>
+              <td class="marker">
+                {row.status === "added" ? (
+                  <Swatch kind="added" />
+                ) : row.status === "dropped" ? (
+                  <Swatch kind="deleted" />
+                ) : row.moved || row.type_change !== null || row.basis !== null ? (
+                  <Swatch kind="edited" />
+                ) : (
+                  ""
+                )}
+              </td>
               <td>{row.key && <span class="key-badge">PK</span>}</td>
               <td>{row.old_pos ?? ""}</td>
               <td>{row.old_name ?? ""}</td>

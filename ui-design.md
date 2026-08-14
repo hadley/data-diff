@@ -26,6 +26,7 @@ key   old                      new
                           3   sku         string         added
 ```
 
+* A narrow marker column leads each row with the change-kind swatch — the soft fill as a square with the full hue as a circle inside, the same marker the header legend explains: added, edited (renames, type changes, moves), deleted. Rows carry no background fills; the swatch says it.
 * Key columns are marked in a dedicated first column (🔑), one mark per key component
 * The old position always shows. The new position shows only when it differs from the old — an unmoved identity needs no second number, and a moved column's new position says everything a move badge would.
 * Renames show both names with a basis badge (`exact`, `approximate`, `hinted`, `declared`, `swapped`). The badge matters because some bases are certainties and some are judgements — the same rationale as the human format printing `basis:`.
@@ -74,6 +75,7 @@ ROWS MOVED (3)
 FANOUT (1)
 ```
 
+* The row views lead each row with the same marker column as the schema view: the added or deleted swatch on every line of a one-sided row, the edited swatch on the old line of each edited pair. Changed cells keep their own highlight; rows carry no fills.
 * In the EDITED table, changed cells render as stacked rows
 
 ```

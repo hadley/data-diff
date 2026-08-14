@@ -5,6 +5,7 @@ import { ColumnView, type ColumnOptions } from "./components/ColumnView";
 import { EditedView, FanoutView, RowsKindView } from "./components/RowView";
 import { SchemaPanel } from "./components/SchemaPanel";
 import { Sidebar } from "./components/Sidebar";
+import { Swatch } from "./components/Swatch";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { Toast, Toasts } from "./components/Toasts";
 import { Toggle } from "./components/Toggle";
@@ -54,6 +55,12 @@ export function App() {
             {summary.old_path} → {summary.new_path}
           </span>
         </div>
+        {/* The change vocabulary's colours, as the tables' markers use them. */}
+        <span class="legend" aria-label="legend">
+          <span class="legend-item"><Swatch kind="added" />added</span>
+          <span class="legend-item"><Swatch kind="edited" />edited</span>
+          <span class="legend-item"><Swatch kind="deleted" />deleted</span>
+        </span>
         <ThemeToggle />
       </header>
       {/* The toolbar sits above the whole body, its controls left-aligned

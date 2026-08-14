@@ -90,6 +90,8 @@ interface VirtualTableProps {
   renderRow: (index: number) => ComponentChildren;
   /** The thead content. */
   head: ComponentChildren;
+  /** The table has a pinned marker column before the key columns. */
+  marker?: boolean;
 }
 
 /**
@@ -98,7 +100,15 @@ interface VirtualTableProps {
  * and below hold the scroll position, and the header and key columns
  * stay pinned while scrolling.
  */
-export function VirtualTable({ total, colSpan, ensure, version = 0, renderRow, head }: VirtualTableProps) {
+export function VirtualTable({
+  total,
+  colSpan,
+  ensure,
+  version = 0,
+  renderRow,
+  head,
+  marker = false,
+}: VirtualTableProps) {
   const scroll = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: OVERSCAN });
 
@@ -128,7 +138,7 @@ export function VirtualTable({ total, colSpan, ensure, version = 0, renderRow, h
 
   return (
     <div class="table-scroll" ref={scroll} onScroll={update}>
-      <table class="paged-table virtual-table">
+      <table class={`paged-table virtual-table ${marker ? "with-marker" : ""}`}>
         <thead>{head}</thead>
         <tbody>
           {range.start > 0 && (
