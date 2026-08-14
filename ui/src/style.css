@@ -4,27 +4,29 @@
 :root {
   color-scheme: light dark;
 
-  --ink: light-dark(#1c2430, #e3e6ea);
-  --ink-soft: light-dark(#5b6675, #a3acb7);
-  --ink-faint: light-dark(#7d8794, #6f7883);
-  --paper: light-dark(#f1eee8, #14181c);
-  --card: light-dark(#ffffff, #1e242a);
-  --rule: light-dark(#d6d0c4, #333b44);
-  --row-line: light-dark(#e4e0d7, #2a3138);
+  --ink: light-dark(#1c2430, #e8e4de);
+  --ink-soft: light-dark(#5b6675, #a8a49c);
+  --ink-faint: light-dark(#7d8794, #75706a);
+  --paper: light-dark(#f1eee8, #171512);
+  --card: light-dark(#ffffff, #211e1a);
+  --rule: light-dark(#d6d0c4, #383431);
+  --row-line: light-dark(#e4e0d7, #292623);
 
-  /* The Solarized accents for identity and value kinds, and an Okabe-Ito
-     trio for the change vocabulary: every hue in it stays distinguishable
-     from the others under the common colour-vision deficiencies. */
+  /* The Solarized accents for value kinds, a warm rose for identity, and an
+     Okabe-Ito trio for the change vocabulary: every hue in it stays
+     distinguishable from the others under the common colour-vision
+     deficiencies, and the rose keeps clear of the trio's orange and
+     vermillion while sitting warm against the paper. */
   --violet: #6c71c4;
-  --blue: #268bd2;
   --cyan: #2aa198;
+  --rose: #b14e63;
   --edit-hue: #e69f00;   /* orange: edits */
   --add-hue: #009e73;    /* bluish green: additions */
   --del-hue: #d55e00;    /* vermillion: deletions */
 
-  /* The app's vocabulary: blue is identity (keys, links, focus), and the
+  /* The app's vocabulary: rose is identity (keys, links, focus), and the
      trio marks edit, add, and delete wherever they appear. */
-  --accent1-hue: var(--blue);
+  --accent1-hue: var(--rose);
   --accent2-hue: var(--edit-hue);
 
   --accent1: light-dark(
@@ -63,17 +65,16 @@
      is already the main panel's fill, so a selection wearing it sits flat
      against the panel beside it. There the selection climbs clear instead:
      the track lifts off the page and the chosen surface lifts further. */
-  --segment-track: light-dark(var(--rule), #252c33);
-  --selected-surface: light-dark(var(--card), #39424d);
-  --selected-edge: light-dark(var(--rule), #4b5666);
-  /* Blue still marks the selection, lightened for dark so an 11px label
-     holds WCAG AA on the lifted surface: 4.9:1, where the base accent on
-     that surface would reach only 3.8:1. */
+  --segment-track: light-dark(var(--rule), #26231f);
+  --selected-surface: light-dark(var(--card), #38322b);
+  --selected-edge: light-dark(var(--rule), #4a4238);
+  /* The accent still marks the selection, lightened for dark so an 11px
+     label stays legible on the lifted surface. */
   --selected-label: light-dark(
     var(--accent1),
     color-mix(in oklab, var(--accent1-hue) 60%, white));
-  --shadow-near: light-dark(rgba(28, 36, 48, 0.06), rgba(0, 0, 0, 0.35));
-  --shadow-far: light-dark(rgba(28, 36, 48, 0.25), rgba(0, 0, 0, 0.5));
+  --shadow-near: light-dark(rgba(48, 36, 28, 0.06), rgba(0, 0, 0, 0.35));
+  --shadow-far: light-dark(rgba(48, 36, 28, 0.25), rgba(0, 0, 0, 0.5));
 
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -396,13 +397,14 @@ input::placeholder { color: var(--ink-faint); }
   border-color: transparent;
   background: color-mix(in oklab, var(--selected-surface) 45%, transparent);
 }
-/* The chosen segment. Its rim matches the track in light, where it is
-   invisible and the white fill carries the shape on its own; in dark it is
+/* The chosen segment. Its label keeps the standard ink — the raised fill
+   says "chosen" on its own — and its rim matches the track in light, where
+   it is invisible and the white fill carries the shape; in dark the rim is
    the crisp edge that keeps the lifted surface from smudging into the
    track. */
 .paired-toggle button.on,
 .paired-toggle button.on:hover:not(:disabled) {
-  color: var(--selected-label);
+  color: var(--ink);
   background: var(--selected-surface);
   border-color: var(--selected-edge);
   box-shadow: 0 1px 2px var(--shadow-near);
