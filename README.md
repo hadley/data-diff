@@ -2,6 +2,22 @@
 
 `data-diff` compares two Parquet files and emits a semantic diff as a compact, operation-oriented summary.
 
+## Interactive UI
+
+`data-diff-ui` is a browser UI for exploring a diff interactively. A sidebar lists every component of the diff — schema, columns, rows edited (grouped by changed-column set), rows added, dropped, moved, fanout, and individual cells — and the selected component's table fills the main panel, scrolling in both directions with keys and column names pinned and rows loaded lazily as you scroll.
+
+<!-- To recreate ui/screenshot.png: build the frontend, generate the demo pair, serve it, then capture with headless Chrome. Use --window-size=980,560 to frame the view content -->
+![The data-diff UI showing the schema component of a demo diff](ui/screenshot.png)
+
+Build the frontend once, then run the server with the same `--key`, `--hint`, and `--hints` options as the CLI:
+
+```console
+cd ui && npm install && npm run build
+cargo run -p data-diff-ui -- old.parquet new.parquet --key id
+```
+
+The server prints its address (default http://127.0.0.1:9471) and opens it in your browser. See [ui/README.md](ui/README.md) for demo data, frontend development with hot reload, and use as a git difftool.
+
 ## Usage
 
 ```console
