@@ -243,62 +243,202 @@ fn key_cmp(a: &[data_diff::Value], b: &[data_diff::Value]) -> std::cmp::Ordering
         .unwrap_or_else(|| a.len().cmp(&b.len()))
 }
 
+/// One line of the cell view, before its values are looked up.
+enum CellEntry {
+    /// A changed cell: `(new_row, new_col)` and its `(old_row, old_col)`,
+    /// all zero-based.
+    Changed((usize, usize), (usize, usize)),
+    /// A non-key cell of an added row: `(new_row, new_col)`.
+    Added(usize, usize),
+    /// A non-key cell of a dropped row: `(old_row, old_col)`.
+    Dropped(usize, usize),
+}
+
+impl CellEntry {
+    /// Changed lines first, then added, then dropped, within one key or
+    /// column group: the evidence before the one-sided context.
+    fn kind(&self) -> usize {
+        match self {
+            CellEntry::Changed(..) => 0,
+            CellEntry::Added(..) => 1,
+            CellEntry::Dropped(..) => 2,
+        }
+    }
+
+    /// The row's position on the side it exists on.
+    fn row(&self) -> usize {
+        match *self {
+            CellEntry::Changed((row, _), _) | CellEntry::Added(row, _) => row,
+            CellEntry::Dropped(row, _) => row,
+        }
+    }
+
+    /// The row's key values, from the side the row exists on.
+    fn key(&self, session: &Session) -> Vec<data_diff::Value> {
+        match *self {
+            CellEntry::Changed((row, _), _) | CellEntry::Added(row, _) => {
+                raw_key_values(session, Side::New, row)
+            }
+            CellEntry::Dropped(row, _) => raw_key_values(session, Side::Old, row),
+        }
+    }
+
+    /// The column's display name: the new-side name where the column has
+    /// one, the old-side name for a dropped row's old-only column.
+    fn column(&self, session: &Session) -> String {
+        let diff = &session.diff;
+        match *self {
+            CellEntry::Changed((_, col), _) | CellEntry::Added(_, col) => {
+                diff.schemas.new[col].name.clone()
+            }
+            CellEntry::Dropped(_, col) => diff.schemas.old[col].name.clone(),
+        }
+    }
+}
+
 /// The flat evidence table, one page: exactly `Diff::cells`, ordered by the
-/// rows' key values so a row's cells stay together under its identity.
+/// rows' key values so a row's cells stay together under its identity. On
+/// request (`added_dropped`) every non-key cell of each added and dropped
+/// row joins the table, present on its own side and absent on the other —
+/// the row views' lines flattened into evidence, the key columns staying
+/// out as they already head every line.
 pub fn cells_page(
     session: &Session,
     sort: &str,
+    added_dropped: bool,
     page: usize,
     page_size: usize,
 ) -> PageDto<CellRowDto> {
     let diff = &session.diff;
-    let mut entries: Vec<((usize, usize), (usize, usize))> = session
+
+    if !added_dropped {
+        let mut entries: Vec<((usize, usize), (usize, usize))> = session
+            .cells
+            .iter()
+            .map(|(&cell, &at)| (cell, at))
+            .collect();
+
+        match sort {
+            "column" => entries.sort_by_key(|((row, col), _)| (*col, *row)),
+            // By the row's key values, then the column, so a row's cells
+            // stay together under its identity.
+            _ => {
+                let mut keys: BTreeMap<usize, Vec<data_diff::Value>> = BTreeMap::new();
+                for &((new_row, _), _) in &entries {
+                    keys.entry(new_row)
+                        .or_insert_with(|| raw_key_values(session, Side::New, new_row));
+                }
+                entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
+                    key_cmp(&keys[row_a], &keys[row_b]).then(col_a.cmp(col_b))
+                });
+            }
+        }
+
+        let total = entries.len();
+        let items = entries
+            .into_iter()
+            .skip(page * page_size)
+            .take(page_size)
+            .map(|((new_row, new_col), (old_row, old_col))| {
+                changed_line(session, (new_row, new_col), (old_row, old_col))
+            })
+            .collect();
+        return dto::page(items, total, page, page_size);
+    }
+
+    let mut entries: Vec<CellEntry> = session
         .cells
         .iter()
-        .map(|(&cell, &at)| (cell, at))
+        .map(|(&cell, &at)| CellEntry::Changed(cell, at))
         .collect();
-
-    match sort {
-        "column" => entries.sort_by_key(|((row, col), _)| (*col, *row)),
-        // By the row's key values, then the column, so a row's cells stay
-        // together under its identity.
-        _ => {
-            let mut keys: BTreeMap<usize, Vec<data_diff::Value>> = BTreeMap::new();
-            for &((new_row, _), _) in &entries {
-                keys.entry(new_row)
-                    .or_insert_with(|| raw_key_values(session, Side::New, new_row));
+    // Every non-key column on the row's own side, as the added/dropped row
+    // views show them.
+    let key_new: BTreeSet<usize> = key_positions(diff, Side::New).into_iter().collect();
+    for &added in &diff.rows.added {
+        for col in 0..diff.schemas.new.len() {
+            if !key_new.contains(&col) {
+                entries.push(CellEntry::Added(added - 1, col));
             }
-            entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
-                key_cmp(&keys[row_a], &keys[row_b]).then(col_a.cmp(col_b))
-            });
+        }
+    }
+    let key_old: BTreeSet<usize> = key_positions(diff, Side::Old).into_iter().collect();
+    for &dropped in &diff.rows.dropped {
+        for col in 0..diff.schemas.old.len() {
+            if !key_old.contains(&col) {
+                entries.push(CellEntry::Dropped(dropped - 1, col));
+            }
         }
     }
 
-    let total = entries.len();
-    let items = entries
+    // Keys and column names computed once per entry: the mixed set has no
+    // shared column index to sort on, a dropped row's columns having no
+    // new-side positions, so the display name stands in for it.
+    let mut keyed: Vec<(String, Vec<data_diff::Value>, CellEntry)> = entries
+        .into_iter()
+        .map(|entry| (entry.column(session), entry.key(session), entry))
+        .collect();
+    match sort {
+        "column" => keyed.sort_by(|(col_a, _, a), (col_b, _, b)| {
+            col_a
+                .cmp(col_b)
+                .then(a.kind().cmp(&b.kind()))
+                .then(a.row().cmp(&b.row()))
+        }),
+        _ => keyed.sort_by(|(col_a, key_a, a), (col_b, key_b, b)| {
+            key_cmp(key_a, key_b)
+                .then(a.kind().cmp(&b.kind()))
+                .then(col_a.cmp(col_b))
+        }),
+    }
+
+    let total = keyed.len();
+    let items = keyed
         .into_iter()
         .skip(page * page_size)
         .take(page_size)
-        .map(|((new_row, new_col), (old_row, old_col))| {
-            // Values, not DTOs, until the delta has had its look at them.
-            let old = session
-                .lookup()
-                .value(Side::Old, old_row as u32 + 1, old_col as u32 + 1)
-                .expect("model positions are in range");
-            let new = session
-                .lookup()
-                .value(Side::New, new_row as u32 + 1, new_col as u32 + 1)
-                .expect("model positions are in range");
-            CellRowDto {
-                key: key_values(session, Side::New, new_row),
-                column: diff.schemas.new[new_col].name.clone(),
-                delta: dto::delta(&old, &new),
-                old: dto::value(&old),
-                new: dto::value(&new),
-            }
+        .map(|(_, _, entry)| match entry {
+            CellEntry::Changed(cell, at) => changed_line(session, cell, at),
+            CellEntry::Added(row, col) => CellRowDto {
+                key: key_values(session, Side::New, row),
+                column: diff.schemas.new[col].name.clone(),
+                old: None,
+                new: Some(value_at(session, Side::New, row, col)),
+                delta: None,
+            },
+            CellEntry::Dropped(row, col) => CellRowDto {
+                key: key_values(session, Side::Old, row),
+                column: diff.schemas.old[col].name.clone(),
+                old: Some(value_at(session, Side::Old, row, col)),
+                new: None,
+                delta: None,
+            },
         })
         .collect();
     dto::page(items, total, page, page_size)
+}
+
+/// One changed cell's line, values looked up for the page being returned.
+fn changed_line(
+    session: &Session,
+    (new_row, new_col): (usize, usize),
+    (old_row, old_col): (usize, usize),
+) -> CellRowDto {
+    // Values, not DTOs, until the delta has had its look at them.
+    let old = session
+        .lookup()
+        .value(Side::Old, old_row as u32 + 1, old_col as u32 + 1)
+        .expect("model positions are in range");
+    let new = session
+        .lookup()
+        .value(Side::New, new_row as u32 + 1, new_col as u32 + 1)
+        .expect("model positions are in range");
+    CellRowDto {
+        key: key_values(session, Side::New, new_row),
+        column: session.diff.schemas.new[new_col].name.clone(),
+        delta: dto::delta(&old, &new),
+        old: Some(dto::value(&old)),
+        new: Some(dto::value(&new)),
+    }
 }
 
 pub fn column_view(

@@ -184,14 +184,18 @@ pub fn page<T: Serialize>(
     }
 }
 
-/// One changed cell in the cell view: `key | column | old | new`.
+/// One line of the cell view: `key | column | old | new`. A changed cell has
+/// both sides; a cell of an added or dropped row — shown only on request —
+/// has only the side it exists on, the other being `None` rather than any
+/// value, an absent cell not being a null one.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CellRowDto {
     pub key: Vec<ValueDto>,
-    /// The identity's new-side name, the design's display rule.
+    /// The identity's new-side name, the design's display rule; a dropped
+    /// row's column has no new side, so its old-side name stands.
     pub column: String,
-    pub old: ValueDto,
-    pub new: ValueDto,
+    pub old: Option<ValueDto>,
+    pub new: Option<ValueDto>,
     /// `new - old` for numeric pairs, rendered like any other double.
     pub delta: Option<ValueDto>,
 }

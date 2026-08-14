@@ -99,6 +99,7 @@ impl Server {
                     commands::cells_page(
                         session,
                         query.text("sort", "key"),
+                        query.flag("added_dropped", false),
                         query.number("page").unwrap_or(0) as usize,
                         query.number("page_size").unwrap_or(50) as usize,
                     )

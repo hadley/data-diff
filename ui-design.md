@@ -121,7 +121,7 @@ key   |  column      old          new
 * Columns are `key | column | old | new`: the evidence layer keeps both sides, exempt from the toolbar's old/new toggle. Compound keys widen into one column per component.
 * Column names come from the identity map, so a changed cell in a renamed column displays under its new name — the design's display rule, since the reader will find that name in the new data.
 * Old and new values render in their own source types, so a type-changed column shows `"9.99" → 9.99` honestly rather than normalized into sameness. Null renders distinctly from `NaN` and from empty string, since the comparison semantics treat all three differently.
-* Deliberately absent: added- and dropped-row cells (row events, shown in the row view), fanout cells (shown only in the fanout expansion), and key-column cells (unequal keys are different rows, not edits). The cell view is exactly `Diff::cells` — no more, no less. That fidelity is what makes it the evidence layer: every count elsewhere in the UI is a filter of this table.
+* Deliberately absent: fanout cells (shown only in the fanout expansion) and key-column cells (unequal keys are different rows, not edits). Added- and dropped-row cells join only on request, via a toolbar toggle that defaults off: each such row contributes one line per non-key column on its own side, the other side rendering as absent — an em-dash, not a null. The default view is exactly `Diff::cells` — no more, no less. That fidelity is what makes it the evidence layer: every count elsewhere in the UI is a filter of this table.
 * Sorting by key or column, from the toolbar. Column and row filters, with drill-down from the other views pre-setting them, are a future addition.
 
 # Lazy lookup API

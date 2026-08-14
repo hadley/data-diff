@@ -44,8 +44,10 @@ export interface Page<T> {
 export interface CellRow {
   key: ValueDto[];
   column: string;
-  old: ValueDto;
-  new: ValueDto;
+  /** Null for a cell of an added row: the old side does not exist. */
+  old: ValueDto | null;
+  /** Null for a cell of a dropped row: the new side does not exist. */
+  new: ValueDto | null;
   delta: ValueDto | null;
 }
 

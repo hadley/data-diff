@@ -64,10 +64,13 @@ export function schemaPanel(changedOnly: boolean): Promise<SchemaRow[]> {
 
 export function cellsPage(
   sort: string,
+  addedDropped: boolean,
   page: number,
   pageSize: number,
 ): Promise<Page<CellRow>> {
-  return request(`/api/cells${query({ sort, page, page_size: pageSize })}`);
+  return request(
+    `/api/cells${query({ sort, added_dropped: addedDropped, page, page_size: pageSize })}`,
+  );
 }
 
 export function columnView(

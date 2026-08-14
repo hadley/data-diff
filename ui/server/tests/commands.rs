@@ -65,18 +65,18 @@ fn schema_panel_marks_keys_renames_types_and_events() {
 fn cells_page_paginates_in_key_order() {
     let session = fixture();
 
-    let first = commands::cells_page(&session, "key", 0, 2);
+    let first = commands::cells_page(&session, "key", false, 0, 2);
     insta::assert_json_snapshot!(first);
     assert_eq!(first.items.len(), 2);
     assert!(first.total > 2);
 
-    let rest = commands::cells_page(&session, "key", 1, 2);
+    let rest = commands::cells_page(&session, "key", false, 1, 2);
     assert_eq!(first.page, 0);
     assert_eq!(rest.page, 1);
     assert_ne!(first.items, rest.items);
 
     // Column order groups by column, then row.
-    let by_column = commands::cells_page(&session, "column", 0, 50);
+    let by_column = commands::cells_page(&session, "column", false, 0, 50);
     let columns: Vec<&str> = by_column
         .items
         .iter()
@@ -85,6 +85,70 @@ fn cells_page_paginates_in_key_order() {
     let mut sorted = columns.clone();
     sorted.sort_unstable();
     assert_eq!(columns, sorted);
+}
+
+/// The fixture has one added row (id 5) and one dropped row (id 6). With
+/// the flag off the cell view is exactly the changed cells; with it on,
+/// each such row contributes one line per non-key column on its own side,
+/// the other side absent.
+#[test]
+fn cells_page_joins_added_and_dropped_rows_on_request() {
+    let session = fixture();
+
+    let changed_only = commands::cells_page(&session, "key", false, 0, 50);
+    let joined = commands::cells_page(&session, "key", true, 0, 50);
+
+    // Three non-key columns a side: price/label/sku for the added row,
+    // price/name/qty for the dropped one.
+    assert_eq!(joined.total, changed_only.total + 6);
+
+    let added: Vec<_> = joined
+        .items
+        .iter()
+        .filter(|item| item.old.is_none())
+        .collect();
+    assert_eq!(added.len(), 3);
+    assert!(added
+        .iter()
+        .all(|item| item.key[0].text == "5" && item.new.is_some() && item.delta.is_none()));
+
+    let dropped: Vec<_> = joined
+        .items
+        .iter()
+        .filter(|item| item.new.is_none())
+        .collect();
+    assert_eq!(dropped.len(), 3);
+    assert!(dropped
+        .iter()
+        .all(|item| item.key[0].text == "6" && item.old.is_some() && item.delta.is_none()));
+
+    // The changed lines keep both sides and interleave in key order: the
+    // added row's lines follow id 4's edits, the dropped row's close out.
+    let keys: Vec<&str> = joined
+        .items
+        .iter()
+        .map(|item| item.key[0].text.as_str())
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(keys, sorted);
+
+    // Column sort groups the one-sided lines under their column names too.
+    let by_column = commands::cells_page(&session, "column", true, 0, 50);
+    let columns: Vec<&str> = by_column
+        .items
+        .iter()
+        .map(|item| item.column.as_str())
+        .collect();
+    let mut sorted = columns.clone();
+    sorted.sort_unstable();
+    assert_eq!(columns, sorted);
+
+    // Repeated runs are byte-identical.
+    assert_eq!(
+        serde_json::to_string(&joined).unwrap(),
+        serde_json::to_string(&commands::cells_page(&session, "key", true, 0, 50)).unwrap()
+    );
 }
 
 #[test]
@@ -101,7 +165,7 @@ fn cells_sort_keys_numerically_not_textually() {
     };
     let session = session(old, new, "id");
 
-    let page = commands::cells_page(&session, "key", 0, 50);
+    let page = commands::cells_page(&session, "key", false, 0, 50);
     let keys: Vec<&str> = page
         .items
         .iter()
@@ -354,7 +418,7 @@ fn repeated_commands_are_byte_identical() {
     let session = fixture();
     let run = || {
         serde_json::to_string(&commands::session_summary(&session)).unwrap()
-            + &serde_json::to_string(&commands::cells_page(&session, "key", 0, 10)).unwrap()
+            + &serde_json::to_string(&commands::cells_page(&session, "key", false, 0, 10)).unwrap()
             + &serde_json::to_string(&commands::column_view(
                 &session, true, true, true, None, 0, 10,
             ))

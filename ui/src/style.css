@@ -567,6 +567,11 @@ input::placeholder { color: var(--ink-faint); }
 .paged-table td.changed { background: var(--accent2-soft); }
 .paged-table .single.added { background: var(--added-soft); }
 .paged-table .single.dropped { background: var(--dropped-soft); }
+/* The cell view's one-sided lines: the side the row exists on wears the
+   change-kind fill, the absent side a muted dash. */
+.paged-table td.added { background: var(--added-soft); }
+.paged-table td.deleted { background: var(--dropped-soft); }
+.paged-table td.absent { color: var(--muted); text-align: center; }
 
 /* The marker column pins at the left edge, before the frozen keys, which
    offset past it via --marker-width. */
