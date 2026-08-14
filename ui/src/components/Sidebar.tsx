@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
-import { editedGroups } from "../api";
-import type { EditedGroupSummary, Selection, SessionSummary } from "../types";
+import { columnGroups, editedGroups } from "../api";
+import type { ColumnGroupSummary, EditedGroupSummary, Selection, SessionSummary } from "../types";
 
 interface SidebarProps {
   summary: SessionSummary;
@@ -11,14 +11,19 @@ interface SidebarProps {
 /**
  * The component list: every category of change with its count, empty
  * categories hidden. "Rows edited" expands to one sub-entry per edited
- * group — the shared changed-column sets, the CLI's granularity.
+ * group — the shared changed-column sets — and "Columns" to one per
+ * multi-column group of a shared changed-row set, the CLI's granularity.
  */
 export function Sidebar({ summary, selection, onSelect }: SidebarProps) {
   const [groups, setGroups] = useState<EditedGroupSummary[] | null>(null);
+  const [columnGroupList, setColumnGroups] = useState<ColumnGroupSummary[] | null>(null);
 
   useEffect(() => {
     if (summary.cover_rows > 0) {
       editedGroups().then((data) => setGroups(data.groups), () => {});
+    }
+    if (summary.cover_columns > 0) {
+      columnGroups().then((data) => setColumnGroups(data.groups), () => {});
     }
   }, [summary]);
 
@@ -36,13 +41,25 @@ export function Sidebar({ summary, selection, onSelect }: SidebarProps) {
         active={selection.view === "schema"}
         onClick={() => onSelect({ view: "schema" })}
       />
-      {summary.edited_columns > 0 && (
-        <Entry
-          label="Columns"
-          count={summary.edited_columns}
-          active={selection.view === "columns"}
-          onClick={() => onSelect({ view: "columns" })}
-        />
+      {summary.cover_columns > 0 && (
+        <>
+          <Entry
+            label="Columns"
+            count={summary.cover_columns}
+            active={selection.view === "columns" && selection.group === null}
+            onClick={() => onSelect({ view: "columns", group: null })}
+          />
+          {columnGroupList?.map((group, index) => (
+            <button
+              key={index}
+              class={`entry sub ${selection.view === "columns" && selection.group === index ? "active" : ""}`}
+              onClick={() => onSelect({ view: "columns", group: index })}
+            >
+              <span class="entry-label">{group.columns.join(", ")}</span>
+              <span class="count">{group.rows}</span>
+            </button>
+          ))}
+        </>
       )}
       {summary.cover_rows > 0 && (
         <>

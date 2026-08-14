@@ -111,6 +111,16 @@ col_edit(c, changes: 2)
 row_edit(rows: 1, changes: 2, columns: [a, b])
 ```
 
+Columns that changed in exactly the same rows collapse into one line that names them all and states the shared shape once. Here the same scatter diff is told the changes were column-wise, and `a` and `b` — both changed in row 1 alone — group, while `c` keeps a line of its own:
+
+```console
+$ data-diff demo/scatter-old.parquet demo/scatter-new.parquet --key id \
+    --hint col_edit(a) --hint col_edit(b) --hint col_edit(c)
+table_key([id], basis: declared)
+col_edit(a, b, rows: 1, changes: 2)
+col_edit(c, changes: 2)
+```
+
 A column whose type changed is also reported, even when all of its values compare as equal:
 
 ```console
@@ -194,14 +204,15 @@ row_edit(rows: 1, changes: 1, columns: [when])
 
 ### Retypes that keep their values
 
-Where a decided rule connects the two types, a retyped column's values compare right across the retype — always exactly, never through a lossy conversion. Timestamps compare as instants across units and timezones. Decimals meet the integers and doubles they equal. `Date32` meets `Date64`. Strings parse against dates, timestamps, and decimals under strict ISO 8601 and exact numeric grammars. Here `at` moved from milliseconds to microseconds with one genuinely edited value, and that edit is caught across the unit change. `price` became a decimal column, and `day`'s ISO strings became real dates. Every value survived both retypes, so the type changes are the whole of their reports:
+Where a decided rule connects the two types, a retyped column's values compare right across the retype — always exactly, never through a lossy conversion. Timestamps compare as instants across units and timezones. Decimals meet the integers and doubles they equal. `Date32` meets `Date64`. Strings parse against dates, timestamps, and decimals under strict ISO 8601 and exact numeric grammars. Here `at` moved from milliseconds to microseconds with one genuinely edited value, and that edit is caught across the unit change. `price` became a decimal column, and `day`'s ISO strings became real dates. Every value survived both retypes, so the type changes are the whole of their reports. A column's type and value aspects are independent facts and print as separate lines, so `at` appears twice — once for the retype, once for the edited value:
 
 ```console
 $ data-diff demo/promoted-old.parquet demo/promoted-new.parquet
 table_key([id], basis: guessed, overlap: 1.00)
-col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))", changes: 1)
+col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))")
 col_edit(price, type: Int64 -> "Decimal128(10, 2)")
 col_edit(day, type: Utf8 -> Date32)
+col_edit(at, changes: 1)
 ```
 
 ## One-sided diffs

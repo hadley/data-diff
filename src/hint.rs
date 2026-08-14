@@ -222,8 +222,14 @@ pub(crate) fn resolve(
         match endpoints(old, new, &hint) {
             // Identity is judged after resolution, so a quoted and a bare
             // spelling of one claim collapse rather than contradicting.
-            Ok(claim) if claims.iter().any(|(_, _, held)| *held == claim) => {}
-            Ok(claim) => claims.push((at, hint, claim)),
+            Ok(resolved) => {
+                for claim in resolved {
+                    if claims.iter().any(|(_, _, held)| *held == claim) {
+                        continue;
+                    }
+                    claims.push((at, hint.clone(), claim));
+                }
+            }
             Err(issue) => result.issues.push(PendingIssue { at, issue }),
         }
     }
@@ -316,7 +322,7 @@ pub(crate) fn validate_edits(
 /// comparability — an asserted pair whose types have no comparison plan is
 /// still one column, with a type change for its whole story — so there is
 /// nothing about the columns' values for resolution to refuse.
-fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issue> {
+fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Vec<Claim>, Issue> {
     let issue = |kind: IssueKind| Issue {
         kind,
         hints: vec![hint.clone()],
@@ -329,42 +335,53 @@ fn endpoints(old: &Schema, new: &Schema, hint: &HintClaim) -> Result<Claim, Issu
     };
 
     match (hint.kind, &hint.names) {
-        (HintKind::Rename, HintNames::Pair(old_name, new_name)) => Ok(Claim::Identity {
+        (HintKind::Rename, HintNames::Pair(old_name, new_name)) => Ok(vec![Claim::Identity {
             old: position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?,
             new: position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?,
-        }),
-        (HintKind::Drop, HintNames::Single(name)) => Ok(Claim::Unmatched {
+        }]),
+        (HintKind::Drop, HintNames::Single(name)) => Ok(vec![Claim::Unmatched {
             side: Side::Old,
             index: position(old, name).ok_or_else(|| missing(Side::Old, name))?,
-        }),
-        (HintKind::Add, HintNames::Single(name)) => Ok(Claim::Unmatched {
+        }]),
+        (HintKind::Add, HintNames::Single(name)) => Ok(vec![Claim::Unmatched {
             side: Side::New,
             index: position(new, name).ok_or_else(|| missing(Side::New, name))?,
-        }),
-        (HintKind::Edit, HintNames::Pair(old_name, new_name)) => Ok(Claim::Edit {
+        }]),
+        (HintKind::Edit, HintNames::Pair(old_name, new_name)) => Ok(vec![Claim::Edit {
             old: Some(position(old, old_name).ok_or_else(|| missing(Side::Old, old_name))?),
             new: Some(position(new, new_name).ok_or_else(|| missing(Side::New, new_name))?),
-        }),
+        }]),
         (HintKind::Edit, HintNames::Single(name)) => {
-            let claim = Claim::Edit {
-                old: position(old, name),
-                new: position(new, name),
-            };
-            // One end is enough, the other being whatever it pairs with. Absent
-            // from both sides is reported against the new file, which is where a
-            // reader took the name from: every operation about a surviving
-            // column names it as the new file does.
-            match claim {
-                Claim::Edit {
-                    old: None,
-                    new: None,
-                } => Err(missing(Side::New, name)),
-                claim => Ok(claim),
-            }
+            edit_claim(old, new, hint, name).map(|claim| vec![claim])
         }
+        // A list is one edit claim per name, exactly as if each had been
+        // written as its own `col_edit()` line.
+        (HintKind::Edit, HintNames::List(names)) => names
+            .iter()
+            .map(|name| edit_claim(old, new, hint, name))
+            .collect::<Result<Vec<_>, _>>(),
         // Every remaining pairing of kind and shape is rejected while parsing,
         // where the spelling is still at hand to report.
         _ => unreachable!("parsing accepts only the shapes each kind takes"),
+    }
+}
+
+/// Resolve one edit-hint name to whichever of its endpoints exist.
+///
+/// One end is enough, the other being whatever it pairs with. Absent from
+/// both sides is reported against the new file, which is where a reader took
+/// the name from: every operation about a surviving column names it as the
+/// new file does.
+fn edit_claim(old: &Schema, new: &Schema, hint: &HintClaim, name: &str) -> Result<Claim, Issue> {
+    match (position(old, name), position(new, name)) {
+        (None, None) => Err(Issue {
+            kind: IssueKind::HintMissingTarget {
+                side: Side::New,
+                column: name.to_owned(),
+            },
+            hints: vec![hint.clone()],
+        }),
+        (old, new) => Ok(Claim::Edit { old, new }),
     }
 }
 
@@ -462,12 +479,6 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
         return Err(malformed());
     }
     let arguments = arguments(&trimmed[open + 1..trimmed.len() - 1]);
-    let (claim, detail) = arguments.split_first().ok_or_else(malformed)?;
-    if !detail.iter().all(|argument| is_field(argument)) {
-        return Err(malformed());
-    }
-    let names = names(claim).ok_or_else(malformed)?;
-
     let kind = match trimmed[..open].trim() {
         "col_rename" => HintKind::Rename,
         "col_add" => HintKind::Add,
@@ -480,8 +491,29 @@ fn parse(spelling: &str) -> Result<HintClaim, DiffError> {
             });
         }
     };
-    // A rename needs two names and a reservation one; only an edit takes either,
-    // naming an identity whose ends may or may not agree.
+    // The claim is the leading names, the detail is the fields after them,
+    // and never a name again once a field has appeared: `col_edit(a, b)` is
+    // two claims, but `col_edit(a, changes: 2, b)` is malformed. A single
+    // leading argument may still be an `old -> new` pair.
+    let detail_from = arguments
+        .iter()
+        .position(|argument| is_field(argument))
+        .unwrap_or(arguments.len());
+    let (claim, detail) = arguments.split_at(detail_from);
+    if claim.is_empty() || !detail.iter().all(|argument| is_field(argument)) {
+        return Err(malformed());
+    }
+    let names = match claim {
+        [one] => names(one).ok_or_else(malformed)?,
+        many => many
+            .iter()
+            .map(|argument| name(argument))
+            .collect::<Option<Vec<_>>>()
+            .map(HintNames::List)
+            .ok_or_else(malformed)?,
+    };
+    // A rename needs two names and a reservation one; only an edit takes any
+    // of the shapes, naming identities whose ends may or may not agree.
     let takes = matches!(
         (kind, &names),
         (HintKind::Rename, HintNames::Pair(..))
@@ -525,9 +557,9 @@ fn arguments(arguments: &str) -> Vec<&str> {
 /// renderer owns.
 ///
 /// That the format writes every detail as a field is what keeps this to one
-/// rule. A bare word would have no such marker, and admitting bare words would
-/// make `col_edit(price, cost)` — a user naming two columns — quietly mean
-/// `col_edit(price)`.
+/// rule. A bare word after a field would have no such marker, so the claim is
+/// exactly the leading names: `col_edit(a, changes: 2, b)` is malformed
+/// rather than read as `col_edit(a)` with a stray word.
 fn is_field(argument: &str) -> bool {
     let trimmed = argument.trim();
     scan(trimmed, |index, character| {
@@ -561,7 +593,7 @@ fn scan(text: &str, mut found: impl FnMut(usize, u8) -> bool) -> bool {
     false
 }
 
-/// Read an argument list as the one or two names a hint is written with.
+/// Read a single claim argument as the one or two names it is written with.
 fn names(arguments: &str) -> Option<HintNames> {
     match split_pair(arguments) {
         Some((old, new)) => Some(HintNames::Pair(name(old)?, name(new)?)),
@@ -731,20 +763,43 @@ mod tests {
 
     #[test]
     fn an_argument_after_the_claim_that_is_not_a_field_is_refused() {
-        // A second argument shaped like a second claim is much likelier to be a
-        // user meaning something else than detail the format wrote, so it is
-        // refused rather than half-honored. Every detail the format writes
-        // carries the grammar's colon, so nothing has to be spelled out here:
-        // `values` is refused with the rest, being a column name wherever it is
-        // not a field's value.
+        // A name once the detail has begun, or a second claim where the kind
+        // takes only one, is much likelier to be a user meaning something else
+        // than detail the format wrote, so it is refused rather than
+        // half-honored. Every detail the format writes carries the grammar's
+        // colon, so nothing has to be spelled out here: `values` is refused
+        // with the rest, being a column name wherever it is not a field's
+        // value. `col_edit(a, b)` is the one exception the format itself
+        // prints: a grouped edit line leads with several names, one claim
+        // attaching to each.
         for spelling in [
             "col_rename(a -> b, c -> d)",
-            "col_edit(a, b)",
-            "col_edit(a, values)",
+            "col_edit(a, changes: 2, b)",
+            "col_edit(a, b -> c)",
             "col_drop(a, b)",
         ] {
             assert!(parse(spelling).is_err(), "{spelling}");
         }
+    }
+
+    #[test]
+    fn a_grouped_edit_line_reads_back_as_one_claim_per_name() {
+        let claim = parse("col_edit(other, extra, rows: 3, changes: 6)").unwrap();
+        assert_eq!(
+            claim.names,
+            HintNames::List(vec!["other".into(), "extra".into()])
+        );
+
+        // Each name attaches exactly as if it had been written alone.
+        let (old, new) = tables();
+        assert_eq!(
+            edits(&hint_for(&old, &new, &["col_edit(other, extra)"])),
+            edits(&hint_for(
+                &old,
+                &new,
+                &["col_edit(other)", "col_edit(extra)"]
+            ))
+        );
     }
 
     #[test]

@@ -92,6 +92,7 @@ fn combines_schema_row_order_and_cell_changes() {
             column: Coordinate::from_zero_based(1, 0),
             type_changed: false,
             changes: 2,
+            rows: vec![1, 2],
         }]
     );
     assert_eq!(diff.rows.added, vec![3]);
@@ -119,6 +120,7 @@ fn combines_schema_row_order_and_cell_changes() {
                 column: Coordinate::from_zero_based(1, 0),
                 type_changed: false,
                 changes: 2,
+                rows: vec![1, 2],
             }],
             rows: vec![],
         }
@@ -150,6 +152,7 @@ fn summary_combines_row_and_column_edits_minimally() {
                 column: Coordinate::from_zero_based(3, 3),
                 type_changed: false,
                 changes: 2,
+                rows: vec![2, 3],
             }],
             rows: vec![row_edit(0, 0, &[2, 3])],
         }
@@ -370,6 +373,7 @@ fn a_bounded_fanout_keeps_its_cells_out_of_the_one_to_one_result() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
             changes: 1,
+            rows: vec![8],
         }]
     );
     assert_eq!(
@@ -444,6 +448,7 @@ fn an_undeclared_rename_is_inferred_from_the_values() {
             column: Coordinate::from_zero_based(2, 0),
             type_changed: false,
             changes: 1,
+            rows: vec![2],
         }]
     );
     assert_eq!(
@@ -585,6 +590,7 @@ fn a_faithful_boolean_reencoding_is_a_type_change_and_nothing_more() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -616,6 +622,7 @@ fn an_unfaithful_boolean_reencoding_reports_its_changed_cells() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 1,
+            rows: vec![2],
         }]
     );
     assert_eq!(
@@ -923,6 +930,7 @@ fn a_hint_identifies_a_column_inference_could_not_have() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
             changes: 3,
+            rows: vec![1, 2, 3],
         }]
     );
     assert_eq!(diff.cells.len(), 3);
@@ -1209,11 +1217,13 @@ fn an_edit_hint_withdraws_a_swap() {
                 column: Coordinate::from_zero_based(1, 1),
                 type_changed: false,
                 changes: 2,
+                rows: vec![1, 2],
             },
             ColumnEdit {
                 column: Coordinate::from_zero_based(2, 2),
                 type_changed: false,
                 changes: 2,
+                rows: vec![1, 2],
             },
         ]
     );
@@ -1253,6 +1263,7 @@ fn an_edit_hint_summarizes_by_column_where_rows_would_have_won() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
             changes: 2,
+            rows: vec![1, 2],
         }]
     );
     // The surviving row edit counts the cell in the hinted column too: a hint
@@ -1337,6 +1348,7 @@ fn a_rendered_edit_can_be_fed_back_as_a_hint() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: false,
             changes: 1,
+            rows: vec![7],
         }]
     );
     assert!(edited.summary.rows.is_empty());
@@ -2325,6 +2337,7 @@ fn an_incomparable_same_name_pair_is_a_type_change_with_no_value_story() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -2357,6 +2370,7 @@ fn a_timezone_is_part_of_the_type() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -2471,6 +2485,7 @@ fn a_rename_hint_across_an_incomparable_pair_is_honoured() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -2553,6 +2568,7 @@ fn a_cross_unit_retype_compares_values_and_reports_the_type_change() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 1,
+            rows: vec![2],
         }]
     );
     assert_eq!(
@@ -2615,6 +2631,7 @@ fn a_decimal_column_meets_the_integers_it_replaced() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 1,
+            rows: vec![3],
         }]
     );
     assert_eq!(
@@ -2649,6 +2666,7 @@ fn an_iso_date_string_column_retyped_to_dates_is_a_type_only_edit() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -2680,6 +2698,7 @@ fn an_instant_string_column_matches_an_aware_timestamp() {
             column: Coordinate::from_zero_based(1, 1),
             type_changed: true,
             changes: 0,
+            rows: vec![],
         }]
     );
     assert!(diff.cells.is_empty());
@@ -2799,16 +2818,19 @@ fn tiny_budgets_produce_valid_partial_results_and_report_them() {
                 column: Coordinate::from_zero_based(2, 2),
                 type_changed: false,
                 changes: 12,
+                rows: (1..=12).collect(),
             },
             ColumnEdit {
                 column: Coordinate::from_zero_based(3, 3),
                 type_changed: false,
                 changes: 12,
+                rows: (1..=12).collect(),
             },
             ColumnEdit {
                 column: Coordinate::from_zero_based(4, 4),
                 type_changed: false,
                 changes: 1,
+                rows: vec![1],
             },
         ]
     );

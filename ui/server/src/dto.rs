@@ -144,13 +144,10 @@ pub struct SessionSummaryDto {
     /// Every count the opening-view rule and the expandos read.
     pub cells: usize,
     pub optimal: bool,
-    /// Columns and rows with changed cells, however they are covered. The
-    /// views show each event in exactly one place, so these counts no longer
-    /// feed an expando; they remain the cells-derived magnitudes.
-    pub edited_columns: usize,
-    pub edited_rows: usize,
     /// The minimum cover's events — what the opening-view rule reads, a
     /// cover dominated by column edits opening the column view and so on.
+    /// The sidebar counts read these too, so an entry's count always matches
+    /// what its view shows.
     pub cover_columns: usize,
     pub cover_rows: usize,
     pub added_rows: usize,
@@ -264,6 +261,21 @@ pub struct EditedGroupSummaryDto {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EditedGroupsDto {
     pub groups: Vec<EditedGroupSummaryDto>,
+}
+
+/// One sidebar sub-entry under "columns": a group of columns sharing one
+/// changed-row set, as names (the entry's title) and the shared row count.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ColumnGroupSummaryDto {
+    pub columns: Vec<String>,
+    pub rows: usize,
+}
+
+/// The sidebar's sub-entries under "columns", one per multi-column group of
+/// the cover's value edits with an identical changed-row set.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ColumnGroupsDto {
+    pub groups: Vec<ColumnGroupSummaryDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

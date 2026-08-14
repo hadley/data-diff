@@ -21,8 +21,6 @@ export interface SessionSummary {
   new_path: string;
   cells: number;
   optimal: boolean;
-  edited_columns: number;
-  edited_rows: number;
   cover_columns: number;
   cover_rows: number;
   added_rows: number;
@@ -90,6 +88,12 @@ export interface EditedGroupSummary {
   rows: number;
 }
 
+/** One "columns" sub-entry in the sidebar: the group's columns and shared row count. */
+export interface ColumnGroupSummary {
+  columns: string[];
+  rows: number;
+}
+
 export interface RowViewData {
   columns: string[];
   rows: Page<RowLine> | null;
@@ -99,7 +103,7 @@ export interface RowViewData {
 /** The sidebar's selection: which component the main panel shows. */
 export type Selection =
   | { view: "schema" }
-  | { view: "columns" }
+  | { view: "columns"; group: number | null }
   | { view: "edited"; group: number | null }
   | { view: "added" }
   | { view: "dropped" }

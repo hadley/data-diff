@@ -535,8 +535,7 @@ fn empty_files_still_report_type_only_schema_changes() {
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: declared)
-    col_edit(id, type: Int32 -> Int64)
-    col_edit(value, type: Int32 -> Int64)
+    col_edit(id, value, type: Int32 -> Int64)
     ");
 }
 
@@ -608,8 +607,7 @@ fn reads_hints_from_a_file_with_comments_and_blank_lines() {
     table_key([id], basis: declared)
     col_rename(discount -> markdown, basis: hinted)
     col_rename(note -> comment, basis: hinted)
-    col_edit(markdown, changes: 2)
-    col_edit(comment, changes: 2)
+    col_edit(markdown, comment, rows: 2, changes: 4)
     ");
 }
 
@@ -717,8 +715,7 @@ fn withdraws_a_swap_when_told_the_column_was_edited() {
     assert!(output.status.success());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @"
     table_key([id], basis: declared)
-    col_edit(price, changes: 2)
-    col_edit(cost, changes: 2)
+    col_edit(price, cost, rows: 2, changes: 4)
     ");
 }
 
@@ -1018,7 +1015,8 @@ fn a_promoted_retype_compares_values_across_units() {
     assert!(output.stderr.is_empty());
     insta::assert_snapshot!(String::from_utf8(output.stdout).unwrap(), @r##"
     table_key([id], basis: declared)
-    col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))", changes: 1)
+    col_edit(at, type: "Timestamp(Millisecond, Some(\"UTC\"))" -> "Timestamp(Microsecond, Some(\"UTC\"))")
+    col_edit(at, changes: 1)
     "##);
 }
 
@@ -1082,7 +1080,6 @@ fn a_summary_past_its_cap_reports_itself_incomplete() {
     incomplete_summary()
     ----
     table_key([id], basis: declared)
-    col_edit(c0, changes: 5001)
-    col_edit(c1, changes: 5001)
+    col_edit(c0, c1, rows: 5001, changes: 10002)
     ");
 }

@@ -71,8 +71,6 @@ function summary(overrides: Partial<SessionSummary>): SessionSummary {
     new_path: "new.parquet",
     cells: 0,
     optimal: true,
-    edited_columns: 0,
-    edited_rows: 0,
     cover_columns: 0,
     cover_rows: 0,
     added_rows: 0,
@@ -89,7 +87,7 @@ describe("Sidebar", () => {
   it("lists categories with counts and hides empty ones", () => {
     render(
       <Sidebar
-        summary={summary({ cells: 87, edited_columns: 3, added_rows: 12 })}
+        summary={summary({ cells: 87, cover_columns: 3, added_rows: 12 })}
         selection={{ view: "cells" }}
         onSelect={() => {}}
       />,
@@ -137,7 +135,7 @@ describe("Sidebar", () => {
     const selections: unknown[] = [];
     render(
       <Sidebar
-        summary={summary({ cover_rows: 5, edited_rows: 5 })}
+        summary={summary({ cover_rows: 5 })}
         selection={{ view: "schema" }}
         onSelect={(s) => selections.push(s)}
       />,
@@ -146,6 +144,37 @@ describe("Sidebar", () => {
     expect(screen.getByText("c")).toBeTruthy();
     fireEvent.click(entry);
     expect(selections).toEqual([{ view: "edited", group: 0 }]);
+    vi.unstubAllGlobals();
+  });
+
+  it("expands columns into one sub-entry per shared-row-set group", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              groups: [{ columns: ["price", "cost"], rows: 3 }],
+            }),
+        }),
+      ),
+    );
+    const selections: unknown[] = [];
+    render(
+      <Sidebar
+        summary={summary({ cover_columns: 3 })}
+        selection={{ view: "schema" }}
+        onSelect={(s) => selections.push(s)}
+      />,
+    );
+    const entry = await screen.findByText("price, cost");
+    expect(entry.nextSibling?.textContent).toBe("3");
+    fireEvent.click(entry);
+    expect(selections).toEqual([{ view: "columns", group: 0 }]);
+    // The parent entry still selects every edited column.
+    fireEvent.click(screen.getByText("Columns"));
+    expect(selections[1]).toEqual({ view: "columns", group: null });
     vi.unstubAllGlobals();
   });
 });

@@ -120,7 +120,7 @@ fn cells_sort_keys_numerically_not_textually() {
 fn column_view_aligns_edits_and_joins_context() {
     let session = fixture();
 
-    let view = commands::column_view(&session, false, false, false, 0, 50);
+    let view = commands::column_view(&session, false, false, false, None, 0, 50);
     insta::assert_json_snapshot!(view);
     // Every edited column is a pair; changed rows only.
     assert!(view.columns.iter().all(|column| column.span == "pair"));
@@ -130,7 +130,7 @@ fn column_view_aligns_edits_and_joins_context() {
         .iter()
         .any(|row| row.cells.iter().any(|cell| cell.changed)));
 
-    let everything = commands::column_view(&session, true, true, true, 0, 50);
+    let everything = commands::column_view(&session, true, true, true, None, 0, 50);
     // Unchanged identities and the added/dropped columns join as singles —
     // except the key, which is already frozen at the left edge of every row.
     assert!(everything
@@ -139,6 +139,82 @@ fn column_view_aligns_edits_and_joins_context() {
         .any(|column| column.span == "single"));
     assert!(everything.columns.iter().all(|column| column.name != "id"));
     assert!(everything.rows.total > view.rows.total);
+}
+
+#[test]
+fn edited_columns_group_by_changed_row_set() {
+    // "a" and "b" change in exactly the same rows, "c" in a row of its own,
+    // and hints force the column description the optimizer would not choose
+    // for so small a rectangle.
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5],
+        "a" => [10, 20, 30, 40, 50],
+        "b" => [60, 70, 80, 90, 100],
+        "c" => [110, 120, 130, 140, 150],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5],
+        "a" => [11, 22, 30, 40, 50],
+        "b" => [61, 72, 80, 90, 100],
+        "c" => [110, 120, 131, 140, 150],
+    };
+    let hints = vec![
+        "col_edit(a)".to_owned(),
+        "col_edit(b)".to_owned(),
+        "col_edit(c)".to_owned(),
+    ];
+    let diff = diff_tables(
+        &old,
+        &new,
+        &DiffOptions {
+            key: vec!["id".to_owned()],
+            hints: hints.clone(),
+            ..DiffOptions::default()
+        },
+    )
+    .unwrap();
+    let session = Session::new(
+        Path::new("old.parquet"),
+        Path::new("new.parquet"),
+        vec!["id".to_owned()],
+        hints,
+        old,
+        new,
+        diff,
+    );
+
+    // One multi-column sub-entry, titled by the members and counted in the
+    // shared rows; "c" is a singleton and stays with the parent entry.
+    let groups = commands::edited_column_groups(&session).groups;
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].columns, ["a", "b"]);
+    assert_eq!(groups[0].rows, 2);
+
+    // The parent entry shows every edited column; the sub-entry narrows to
+    // the group's columns and rows.
+    let all = commands::column_view(&session, false, false, false, None, 0, 50);
+    assert_eq!(
+        all.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(all.rows.total, 3);
+    let one = commands::column_view(&session, false, false, false, Some(0), 0, 50);
+    assert_eq!(
+        one.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(one.rows.total, 2);
+
+    // An unknown group index is empty rather than an error.
+    let none = commands::column_view(&session, false, false, false, Some(9), 0, 50);
+    assert!(none.columns.is_empty());
+    assert_eq!(none.rows.total, 0);
 }
 
 #[test]
@@ -247,13 +323,16 @@ fn repeated_commands_are_byte_identical() {
     let run = || {
         serde_json::to_string(&commands::session_summary(&session)).unwrap()
             + &serde_json::to_string(&commands::cells_page(&session, "key", 0, 10)).unwrap()
-            + &serde_json::to_string(&commands::column_view(&session, true, true, true, 0, 10))
-                .unwrap()
+            + &serde_json::to_string(&commands::column_view(
+                &session, true, true, true, None, 0, 10,
+            ))
+            .unwrap()
             + &serde_json::to_string(&commands::row_view_section(
                 &session, "edited", true, None, 0, 10,
             ))
             .unwrap()
             + &serde_json::to_string(&commands::edited_groups(&session)).unwrap()
+            + &serde_json::to_string(&commands::edited_column_groups(&session)).unwrap()
     };
     assert_eq!(run(), run());
 }
