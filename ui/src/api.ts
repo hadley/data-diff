@@ -1,6 +1,7 @@
 import type {
   CellRow,
   ColumnViewData,
+  EditedGroupSummary,
   Page,
   RowViewData,
   SchemaRow,
@@ -85,13 +86,19 @@ export function columnView(
   );
 }
 
+/** The sidebar's "rows edited" sub-entries: one per shared changed-column set. */
+export function editedGroups(): Promise<{ groups: EditedGroupSummary[] }> {
+  return request("/api/edited-groups");
+}
+
 export function rowViewSection(
   kind: string,
   allColumns: boolean,
+  group: number | null,
   page: number,
   pageSize: number,
 ): Promise<RowViewData> {
   return request(
-    `/api/row-view${query({ kind, all_columns: allColumns, page, page_size: pageSize })}`,
+    `/api/row-view${query({ kind, all_columns: allColumns, group, page, page_size: pageSize })}`,
   );
 }

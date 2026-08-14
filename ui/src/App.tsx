@@ -1,19 +1,31 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { currentSession, onRequestError, openFiles } from "./api";
 import { CellView } from "./components/CellView";
-import { ColumnView } from "./components/ColumnView";
-import { RowView } from "./components/RowView";
+import { ColumnView, type ColumnOptions } from "./components/ColumnView";
+import { EditedView, FanoutView, RowsKindView } from "./components/RowView";
 import { SchemaPanel } from "./components/SchemaPanel";
+import { Sidebar } from "./components/Sidebar";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { Toast, Toasts } from "./components/Toasts";
-import { openingView } from "./opening";
-import type { SessionSummary, ViewKind } from "./types";
+import { Toggle } from "./components/Toggle";
+import type { Selection, SessionSummary } from "./types";
 
 export function App() {
   const [summary, setSummary] = useState<SessionSummary | null>(null);
-  const [view, setView] = useState<ViewKind>("cell");
+  // The schema view is always the opening view.
+  const [selection, setSelection] = useState<Selection>({ view: "schema" });
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextToast = useRef(1);
+
+  // Per-view toolbar state, held here so it survives view switches.
+  const [schemaAll, setSchemaAll] = useState(true);
+  const [columnOptions, setColumnOptions] = useState<ColumnOptions>({
+    allColumns: false,
+    allRows: false,
+    addedDropped: false,
+  });
+  const [editedAllColumns, setEditedAllColumns] = useState(false);
+  const [cellByColumn, setCellByColumn] = useState(false);
 
   // Every failed request surfaces as a toast, wherever it came from.
   useEffect(() => {
@@ -25,19 +37,16 @@ export function App() {
   // A session launched with paths is already open; pick it up once.
   useEffect(() => {
     currentSession().then((existing) => {
-      if (existing) {
-        setSummary(existing);
-        setView(openingView(existing));
-      }
+      if (existing) setSummary(existing);
     });
   }, []);
 
   if (!summary) {
-    return <OpenForm onOpen={(s) => { setSummary(s); setView(openingView(s)); }} />;
+    return <OpenForm onOpen={setSummary} />;
   }
 
   return (
-    <main>
+    <main class="app">
       <header class="app-header">
         <div class="head-title">
           <h1>data-diff</h1>
@@ -47,26 +56,72 @@ export function App() {
         </div>
         <ThemeToggle />
       </header>
-      <SchemaPanel summary={summary} />
-      <section class="value-views">
-        <nav class="tabs" role="tablist">
-          {(["column", "row", "cell"] as ViewKind[]).map((kind) => (
-            <button
-              role="tab"
-              aria-selected={view === kind}
-              class={view === kind ? "tab active" : "tab"}
-              onClick={() => setView(kind)}
-            >
-              {kind}
-            </button>
-          ))}
-        </nav>
-        <div class="view-body" role="tabpanel">
-          {view === "column" && <ColumnView keyColumns={summary.key_columns} />}
-          {view === "row" && <RowView summary={summary} />}
-          {view === "cell" && <CellView total={summary.cells} keyColumns={summary.key_columns} />}
-        </div>
-      </section>
+      {/* The toolbar sits above the whole body, its controls left-aligned
+          with the main panel's edge. It stays visible even when the active
+          view has no controls, so the layout never shifts. */}
+      <div class="toolbar">
+        {selection.view === "schema" && (
+          <Toggle off="changed only" on="all columns" checked={schemaAll} onChange={setSchemaAll} />
+        )}
+        {selection.view === "columns" && (
+          <>
+            <Toggle
+              off="changed cols"
+              on="all cols"
+              checked={columnOptions.allColumns}
+              onChange={(value) => setColumnOptions((o) => ({ ...o, allColumns: value }))}
+            />
+            <Toggle
+              off="changed rows"
+              on="all rows"
+              checked={columnOptions.allRows}
+              onChange={(value) => setColumnOptions((o) => ({ ...o, allRows: value }))}
+            />
+            <Toggle
+              off="without added/dropped"
+              on="+ added/dropped"
+              checked={columnOptions.addedDropped}
+              onChange={(value) => setColumnOptions((o) => ({ ...o, addedDropped: value }))}
+            />
+          </>
+        )}
+        {selection.view === "edited" && (
+          <Toggle
+            off="changed columns"
+            on="all columns"
+            checked={editedAllColumns}
+            onChange={setEditedAllColumns}
+          />
+        )}
+        {selection.view === "cells" && (
+          <Toggle off="by key" on="by column" checked={cellByColumn} onChange={setCellByColumn} />
+        )}
+      </div>
+      <div class="app-body">
+        <Sidebar summary={summary} selection={selection} onSelect={setSelection} />
+        <section class="main-panel">
+          <div class="view-body">
+            {selection.view === "schema" && <SchemaPanel summary={summary} all={schemaAll} />}
+            {selection.view === "columns" && (
+              <ColumnView keyColumns={summary.key_columns} options={columnOptions} />
+            )}
+            {selection.view === "edited" && (
+              <EditedView
+                keyColumns={summary.key_columns}
+                group={selection.group}
+                allColumns={editedAllColumns}
+              />
+            )}
+            {(selection.view === "added" || selection.view === "dropped" || selection.view === "moved") && (
+              <RowsKindView kind={selection.view} keyColumns={summary.key_columns} />
+            )}
+            {selection.view === "fanout" && <FanoutView keyColumns={summary.key_columns} />}
+            {selection.view === "cells" && (
+              <CellView total={summary.cells} keyColumns={summary.key_columns} byColumn={cellByColumn} />
+            )}
+          </div>
+        </section>
+      </div>
       <Toasts
         toasts={toasts}
         onDismiss={(id) => setToasts((current) => current.filter((t) => t.id !== id))}

@@ -76,24 +76,26 @@ body {
   line-height: 1.55;
 }
 
-main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 32px 40px 80px;
+/* The session view is a full-viewport master-detail layout: header across
+   the top, sidebar left, main panel right. */
+main.app {
+  height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 18px;
 }
 
-h1, h2 { margin: 0; }
+h1, h2, h3 { margin: 0; }
 
 /* ---- page head ---------------------------------------------------------- */
 
 .app-header {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
 }
 
 .head-title {
@@ -173,38 +175,109 @@ h1, h2 { margin: 0; }
 }
 .toast button:hover { color: var(--ink); }
 
-/* ---- cards and micro-labels ---------------------------------------------- */
+/* ---- layout: sidebar, main panel, toolbar ---------------------------------- */
 
-.schema-panel {
-  padding: 14px 16px;
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 
-/* The tabset owns the card: the tabs sit on its top edge and the active
-   view is the card's body, so column/row/cell visibly contain the page. */
-.value-views .view-body, .schema-panel {
-  padding: 14px 16px;
+/* The sidebar reads as a stack of folder tabs: the selected entry wears
+   the main panel's background and meets its left edge, so tab and panel
+   read as one surface. There is deliberately no rule between sidebar and
+   panel — the background contrast separates them, and a rule would draw a
+   line across the selected tab's right edge. */
+.sidebar {
+  flex: none;
+  width: 220px;
+  overflow-y: auto;
+  padding: 10px 0 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar .entry {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 7px 0 0 7px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+  text-align: left;
+}
+.sidebar .entry:hover { background: var(--hover-row); }
+/* The selected tab pops forward: a little taller than its neighbours, no
+   right border, and a drop shadow lifting it off the stack. */
+.sidebar .entry.active {
+  position: relative;
+  z-index: 1;
+  /* Taller than its neighbours and shadowed: the tab sits in front. */
+  margin: -1px 0;
+  padding: 8px 9px;
   background: var(--card);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  box-shadow: 0 1px 2px var(--shadow-near);
+  border-color: var(--rule);
+  border-right: none;
+  color: var(--accent1);
+  box-shadow:
+    -2px 2px 4px var(--shadow-near),
+    -4px 6px 14px -6px var(--shadow-far);
+}
+.sidebar .entry.active .count { color: var(--accent1); }
+
+/* The edited-group sub-entries: the shared changed-column set as the title. */
+.sidebar .entry.sub {
+  padding-left: 22px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.sidebar .entry-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.schema-panel header,
-.cell-view header,
-.column-view header {
+.main-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+}
+
+/* The toolbar is a full-width band above the body, the page background
+   behind raised controls. Its left padding lands the controls exactly at
+   the main panel's left edge, where they sat inside the panel. */
+.toolbar {
+  flex: none;
+  position: relative;
+  z-index: 6;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  /* A fixed height, so a view with no controls doesn't shrink the band
+     and the layout never jumps when switching views. */
+  height: 44px;
+  padding: 0 16px 0 220px;
+  background: var(--paper);
 }
 
-/* Section headings and expando titles share the micro-label voice. */
-.schema-panel h2,
-.cell-view h2,
-.column-view h2,
-.row-view h2,
-.expando-header {
+.view-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The fanout group headings use the micro-label voice. */
+.fanout-group h3 {
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 700;
@@ -271,41 +344,16 @@ input::placeholder { color: var(--ink-faint); }
   position: relative;
 }
 
-/* ---- tabs ------------------------------------------------------------------ */
-
-/* Real tabs on the card's top edge: the active one is continuous with the
-   body below it, the inactive ones sit on the rule. */
-.tabs {
-  display: flex;
-  gap: 2px;
-  padding: 0 16px;
-}
-
-.tab {
-  position: relative;
-  top: 1px;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 7px 7px 0 0;
-  background: none;
-  padding: 7px 16px;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-.tab:hover { color: var(--ink); border-color: transparent; }
-.tab.active {
-  color: var(--accent1);
-  background: var(--card);
-  border-color: var(--rule);
-  /* overwrite the card's bottom rule where the tab meets the body */
-  box-shadow: 0 1px 0 var(--card);
-}
-
 /* ---- schema panel ----------------------------------------------------------- */
+
+/* The schema view is the one panel that does not fill its space with a
+   table; it scrolls as a whole and leaves room beside the alignment. */
+.schema-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
 
 .schema-panel table {
   border-collapse: collapse;
@@ -364,9 +412,11 @@ input::placeholder { color: var(--ink-faint); }
 
 /* ---- value tables ------------------------------------------------------------- */
 
+/* The table fills the main panel and scrolls in both directions. */
 .table-scroll {
-  overflow-x: auto;
-  max-width: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .paged-table {
@@ -382,7 +432,13 @@ input::placeholder { color: var(--ink-faint); }
   white-space: nowrap;
 }
 
+/* The header stays pinned at the top while scrolling; in the column view's
+   two-level header the sub row pins just below the group row. */
 .paged-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 27px;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -391,6 +447,8 @@ input::placeholder { color: var(--ink-faint); }
   border-bottom: 1px solid var(--rule);
   background: var(--card);
 }
+.paged-table thead tr.sub-row th { top: 27px; }
+.paged-table thead .frozen { z-index: 5; }
 
 .paged-table th.group { text-align: center; }
 .paged-table th.sub { font-weight: 400; color: var(--ink-faint); }
@@ -399,15 +457,28 @@ input::placeholder { color: var(--ink-faint); }
 .paged-table tbody tr:hover { background: var(--hover-row); }
 
 /* The row view's old/new pairs: no rule between the two lines of a pair —
-   they are one row of the story — and a breath of padding between pairs. */
+   they are one row of the story. */
 .paged-table tbody tr.new-line { border-top: none; }
-.paged-table tbody tr.old-line:not(:first-child) td,
-.paged-table tbody tr.old-line:not(:first-child) th {
-  padding-top: 12px;
+
+/* Windowed tables run on a fixed row height: the scroll math in
+   VirtualTable (ROW_HEIGHT) counts on it, so vertical padding stays zero
+   and the spacer rows carry no borders of their own. */
+.virtual-table tbody td {
+  height: 29px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
+.virtual-table tr.spacer td {
+  height: auto;
+  padding: 0;
+  border: none;
+}
+.virtual-table tr.spacer:hover { background: none; }
+.virtual-table tr.pending td { border: none; }
 
 .paged-table .frozen {
   position: sticky;
+  z-index: 2;
   background: var(--card);
   font-weight: 650;
 }
@@ -423,7 +494,7 @@ input::placeholder { color: var(--ink-faint); }
 
 /* The cell view's column column is the table's second axis; the rule sets
    it off from the old/new values it introduces. */
-.cell-view .paged-table .col-name { border-right: 1px solid var(--rule); }
+.virtual-table .col-name { border-right: 1px solid var(--rule); }
 .paged-table td.single { color: var(--ink-soft); }
 
 .line-label {
@@ -457,32 +528,18 @@ input::placeholder { color: var(--ink-faint); }
   text-align: right;
 }
 
-/* ---- expandos and pagers ------------------------------------------------------- */
+/* ---- the fanout view ----------------------------------------------------------- */
 
-.expando { margin: 4px 0; }
-
-.expando-header {
-  border: none;
-  background: none;
-  cursor: pointer;
-  padding: 4px 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+/* Fanout groups are few and unevenly sized, so the view appends on scroll
+   rather than windowing; each group is its own small aligned table. */
+.fanout-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px;
 }
-.expando-header:hover { color: var(--ink); border-color: transparent; }
-
-.expando-body { margin-left: 16px; }
-
-.pager {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink-soft);
-}
+.fanout-group { margin-bottom: 18px; }
+.fanout-group h3 { margin-bottom: 6px; }
 
 /* ---- the open form -------------------------------------------------------------- */
 

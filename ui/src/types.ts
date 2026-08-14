@@ -84,18 +84,25 @@ export interface FanoutGroup {
   lines: RowLine[];
 }
 
-export interface EditedGroup {
-  rows: number[];
-  key: ValueDto[];
-  changed: boolean[];
-  lines: RowLine[];
+/** One "rows edited" sub-entry in the sidebar: its changed columns and row count. */
+export interface EditedGroupSummary {
+  columns: string[];
+  rows: number;
 }
 
 export interface RowViewData {
   columns: string[];
   rows: Page<RowLine> | null;
   groups: Page<FanoutGroup> | null;
-  edited: Page<EditedGroup> | null;
 }
 
-export type ViewKind = "column" | "row" | "cell";
+/** The sidebar's selection: which component the main panel shows. */
+export type Selection =
+  | { view: "schema" }
+  | { view: "columns" }
+  | { view: "edited"; group: number | null }
+  | { view: "added" }
+  | { view: "dropped" }
+  | { view: "moved" }
+  | { view: "fanout" }
+  | { view: "cells" };

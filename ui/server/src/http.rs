@@ -116,12 +116,14 @@ impl Server {
                     )
                 })
             }),
+            ("GET", "/api/edited-groups") => self.json(|| self.with(commands::edited_groups)),
             ("GET", "/api/row-view") => self.json(|| {
                 self.with(|session| {
                     commands::row_view_section(
                         session,
                         query.text("kind", "edited"),
                         query.flag("all_columns", false),
+                        query.number("group").map(|group| group as usize),
                         query.number("page").unwrap_or(0) as usize,
                         query.number("page_size").unwrap_or(50) as usize,
                     )

@@ -88,6 +88,35 @@ fn cells_page_paginates_in_key_order() {
 }
 
 #[test]
+fn cells_sort_keys_numerically_not_textually() {
+    // Twenty rows each with one edit; the key sort must read the keys as
+    // numbers — 1, 2, …, 20 — not as text, which would give 1, 10, 11, ….
+    let old = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        "v" => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let new = table! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        "v" => [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    };
+    let session = session(old, new, "id");
+
+    let page = commands::cells_page(&session, "key", 0, 50);
+    let keys: Vec<&str> = page
+        .items
+        .iter()
+        .map(|item| item.key[0].text.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+            "17", "18", "19", "20"
+        ]
+    );
+}
+
+#[test]
 fn column_view_aligns_edits_and_joins_context() {
     let session = fixture();
 
@@ -116,27 +145,27 @@ fn column_view_aligns_edits_and_joins_context() {
 fn row_view_sections_read_their_rows() {
     let session = fixture();
 
-    let edited = commands::row_view_section(&session, "edited", false, 0, 50);
+    let edited = commands::row_view_section(&session, "edited", false, None, 0, 50);
     insta::assert_json_snapshot!(edited);
     // The fixture's changed cells are all in `price`, which the summary
     // covers as a column edit — so the row view's edited section is empty,
     // each event shown in exactly one place.
-    assert_eq!(edited.edited.unwrap().total, 0);
+    assert_eq!(edited.rows.unwrap().total, 0);
 
-    let added = commands::row_view_section(&session, "added", false, 0, 50);
+    let added = commands::row_view_section(&session, "added", false, None, 0, 50);
     assert_eq!(added.rows.unwrap().total, 1);
     // The key is frozen at the left edge, not repeated among the values.
     assert!(added.columns.iter().all(|column| column != "id"));
-    let dropped = commands::row_view_section(&session, "dropped", false, 0, 50);
+    let dropped = commands::row_view_section(&session, "dropped", false, None, 0, 50);
     assert_eq!(dropped.rows.unwrap().total, 1);
     assert!(dropped.columns.iter().all(|column| column != "id"));
 
-    let moved = commands::row_view_section(&session, "moved", false, 0, 50);
+    let moved = commands::row_view_section(&session, "moved", false, None, 0, 50);
     assert_eq!(moved.rows.unwrap().total, 0);
 }
 
 #[test]
-fn edited_rows_group_by_changed_column_set_and_paginate_as_groups() {
+fn edited_rows_group_by_changed_column_set() {
     // Twenty rows, so that naming a changed row is cheap and the cover
     // describes the rectangle by its rows rather than its columns.
     let old = table! {
@@ -154,21 +183,40 @@ fn edited_rows_group_by_changed_column_set_and_paginate_as_groups() {
     let session = session(old, new, "id");
 
     // A rectangle over "a" and "b", a singleton changed in "c" interrupting
-    // it, then one more rectangle row: two groups, one per distinct column
-    // set, and a page of one holds exactly one of them.
-    let view = commands::row_view_section(&session, "edited", false, 0, 50);
-    let groups = view.edited.unwrap().items;
+    // it, then one more rectangle row: two sidebar sub-entries, one per
+    // distinct column set.
+    let groups = commands::edited_groups(&session).groups;
     assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].rows, [1, 2, 3, 6]);
-    assert_eq!(groups[0].changed, [true, true, false]);
-    assert_eq!(groups[1].rows, [5]);
-    assert_eq!(groups[1].changed, [false, false, true]);
+    assert_eq!(groups[0].columns, ["a", "b"]);
+    assert_eq!(groups[0].rows, 4);
+    assert_eq!(groups[1].columns, ["c"]);
+    assert_eq!(groups[1].rows, 1);
 
-    let page = commands::row_view_section(&session, "edited", false, 1, 1);
-    let page = page.edited.unwrap();
-    assert_eq!(page.total, 2);
-    assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].rows, [5]);
+    // The parent entry: every edited row as old/new line pairs over the
+    // section's changed columns, paginated by line.
+    let all = commands::row_view_section(&session, "edited", false, None, 0, 50);
+    assert_eq!(all.columns, ["a", "b", "c"]);
+    let lines = all.rows.unwrap();
+    assert_eq!(lines.total, 10);
+    assert_eq!(lines.items.len(), 10);
+    assert_eq!(lines.items[0].label, "old");
+    assert_eq!(lines.items[1].label, "new");
+    let page = commands::row_view_section(&session, "edited", false, None, 1, 4);
+    let page = page.rows.unwrap();
+    assert_eq!(page.total, 10);
+    assert_eq!(page.items.len(), 4);
+
+    // A sub-entry: one group's rows, the column set narrowing to the
+    // group's changed columns.
+    let one = commands::row_view_section(&session, "edited", false, Some(1), 0, 50);
+    assert_eq!(one.columns, ["c"]);
+    let lines = one.rows.unwrap();
+    assert_eq!(lines.total, 2);
+    assert_eq!(lines.items[0].key[0].text, "5");
+
+    // The all-columns toggle fills in every identity instead.
+    let wide = commands::row_view_section(&session, "edited", true, Some(1), 0, 50);
+    assert_eq!(wide.columns, ["id", "a", "b", "c"]);
 }
 
 #[test]
@@ -183,7 +231,7 @@ fn fanout_groups_expand_to_aligned_lines() {
     };
     let session = session(old, new, "id");
 
-    let view = commands::row_view_section(&session, "fanout", false, 0, 50);
+    let view = commands::row_view_section(&session, "fanout", false, None, 0, 50);
     let groups = view.groups.unwrap();
     assert_eq!(groups.total, 1);
     let group = &groups.items[0];
@@ -201,8 +249,11 @@ fn repeated_commands_are_byte_identical() {
             + &serde_json::to_string(&commands::cells_page(&session, "key", 0, 10)).unwrap()
             + &serde_json::to_string(&commands::column_view(&session, true, true, true, 0, 10))
                 .unwrap()
-            + &serde_json::to_string(&commands::row_view_section(&session, "edited", true, 0, 10))
-                .unwrap()
+            + &serde_json::to_string(&commands::row_view_section(
+                &session, "edited", true, None, 0, 10,
+            ))
+            .unwrap()
+            + &serde_json::to_string(&commands::edited_groups(&session)).unwrap()
     };
     assert_eq!(run(), run());
 }

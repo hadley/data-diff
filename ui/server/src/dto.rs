@@ -251,31 +251,29 @@ pub struct FanoutGroupDto {
     pub lines: Vec<RowLineDto>,
 }
 
-/// A block of consecutive edited rows sharing one changed-column set: the
-/// summary's grouped `row_edit()` line as an expando. Pagination counts
-/// groups, not raw rows, so a fifty-row rectangle is one page unit.
+/// One edited-row group as the sidebar lists it: the shared changed-column
+/// set as names (the entry's title) and the group's row count.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct EditedGroupDto {
-    /// The group's rows, as one-based new-side positions.
-    pub rows: Vec<u32>,
-    /// The first row's key, for the title.
-    pub key: Vec<ValueDto>,
-    /// The changed-column mask every row in the group shares, over the
-    /// section's columns.
-    pub changed: Vec<bool>,
-    /// The stacked old/new lines, two per row.
-    pub lines: Vec<RowLineDto>,
+pub struct EditedGroupSummaryDto {
+    pub columns: Vec<String>,
+    pub rows: usize,
+}
+
+/// The sidebar's sub-entries under "rows edited", one per distinct
+/// changed-column set among the cover's row edits.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EditedGroupsDto {
+    pub groups: Vec<EditedGroupSummaryDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RowViewDto {
     pub columns: Vec<String>,
-    /// Paged lines for `added`, `dropped`, and `moved`.
+    /// Paged lines for `edited` (old/new pairs, two per row), `added`,
+    /// `dropped`, and `moved`.
     pub rows: Option<PageDto<RowLineDto>>,
     /// Paged groups for `fanout`.
     pub groups: Option<PageDto<FanoutGroupDto>>,
-    /// Paged edited-row blocks for `edited`.
-    pub edited: Option<PageDto<EditedGroupDto>>,
 }
 
 #[cfg(test)]

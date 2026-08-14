@@ -1,75 +1,75 @@
 import { useEffect, useState } from "preact/hooks";
 import { cellsPage } from "../api";
-import type { CellRow, Page } from "../types";
-import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
-import { Pager } from "./Pager";
-import { Toggle } from "./Toggle";
+import { FrozenTd, FrozenTh } from "./PagedTable";
 import { ValueText } from "./ValueText";
-
-const PAGE_SIZE = 20;
+import { usePages, VirtualTable } from "./VirtualTable";
 
 /** The flat evidence table: exactly Diff::cells, no more, no less. */
-export function CellView({ total, keyColumns }: { total: number; keyColumns: string[] }) {
-  const [byColumn, setByColumn] = useState(false);
-  const [page, setPage] = useState(0);
-  const [data, setData] = useState<Page<CellRow> | null>(null);
+export function CellView({
+  total,
+  keyColumns,
+  byColumn,
+}: {
+  total: number;
+  keyColumns: string[];
+  byColumn: boolean;
+}) {
+  const [hasDelta, setHasDelta] = useState(false);
+  const list = usePages(
+    (page, pageSize) =>
+      cellsPage(byColumn ? "column" : "key", page, pageSize).then((data) => {
+        if (data.items.some((item) => item.delta != null)) setHasDelta(true);
+        return data;
+      }),
+    [byColumn],
+  );
 
-  useEffect(() => {
-    cellsPage(byColumn ? "column" : "key", page, PAGE_SIZE).then(setData, () => {});
-  }, [byColumn, page]);
+  useEffect(() => setHasDelta(false), [byColumn]);
 
-  const numeric = data?.items.some((item) => item.delta != null) ?? false;
+  const colSpan = keyColumns.length + 3 + (hasDelta ? 1 : 0);
 
   return (
-    <div class="cell-view">
-      <header>
-        <h2>All changed cells</h2>
-        <span class="count">{data?.total ?? total} cells</span>
-        <Toggle
-          off="by key"
-          on="by column"
-          checked={byColumn}
-          onChange={(value) => {
-            setByColumn(value);
-            setPage(0);
-          }}
-        />
-      </header>
-      {data && (
-        <>
-          <PagedTable>
-            <thead>
-              <tr>
-                {keyColumns.map((name, i) => (
-                  <FrozenTh index={i}>{name}</FrozenTh>
-                ))}
-                <th class="col-name">column</th>
-                <th>old</th>
-                <th>new</th>
-                {numeric && <th class="delta">Δ</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((item, index) => (
-                <tr key={index}>
-                  {item.key.map((value, i) => (
-                    <FrozenTd index={i}>
-                      <ValueText value={value} />
-                    </FrozenTd>
-                  ))}
-                  <td class="col-name">{item.column}</td>
-                  <td><ValueText value={item.old} /></td>
-                  <td class="changed"><ValueText value={item.new} /></td>
-                  {numeric && (
-                    <td class="delta">{item.delta && <ValueText value={item.delta} />}</td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </PagedTable>
-          <Pager page={data.page} pageSize={data.page_size} total={data.total} onPage={setPage} />
-        </>
-      )}
-    </div>
+    <VirtualTable
+      total={list.total ?? total}
+      colSpan={colSpan}
+      ensure={list.ensure}
+      version={list.version}
+      head={
+        <tr>
+          {keyColumns.map((name, i) => (
+            <FrozenTh index={i}>{name}</FrozenTh>
+          ))}
+          <th class="col-name">column</th>
+          <th>old</th>
+          <th>new</th>
+          {hasDelta && <th class="delta">Δ</th>}
+        </tr>
+      }
+      renderRow={(index) => {
+        const item = list.item(index);
+        if (!item) {
+          return (
+            <tr key={index} class="pending">
+              <td colSpan={colSpan} />
+            </tr>
+          );
+        }
+        return (
+          <tr key={index}>
+            {item.key.map((value, i) => (
+              <FrozenTd index={i}>
+                <ValueText value={value} />
+              </FrozenTd>
+            ))}
+            <td class="col-name">{item.column}</td>
+            <td><ValueText value={item.old} /></td>
+            <td class="changed"><ValueText value={item.new} /></td>
+            {hasDelta && (
+              <td class="delta">{item.delta && <ValueText value={item.delta} />}</td>
+            )}
+          </tr>
+        );
+      }}
+    />
   );
 }

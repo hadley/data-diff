@@ -170,6 +170,17 @@ fn every_route_serves_an_open_session() {
         );
         assert_eq!(status, 200, "{kind} all_columns");
     }
+
+    // The sidebar's edited-group sub-entries and the group filter they
+    // drive. This fixture's edits are covered by a column edit, so the
+    // edited section is empty and group 0 does not exist — an empty page,
+    // not an error.
+    let (status, groups) = get(address, "/api/edited-groups");
+    assert_eq!(status, 200);
+    assert_eq!(groups["groups"].as_array().unwrap().len(), 0);
+    let (status, edited) = get(address, "/api/row-view?kind=edited&group=0");
+    assert_eq!(status, 200);
+    assert_eq!(edited["rows"]["total"], 0);
 }
 
 #[test]

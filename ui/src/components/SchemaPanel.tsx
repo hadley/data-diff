@@ -1,15 +1,15 @@
 import { useEffect, useState } from "preact/hooks";
 import { schemaPanel } from "../api";
 import type { SchemaRow, SessionSummary } from "../types";
-import { Toggle } from "./Toggle";
 
 interface SchemaPanelProps {
   summary: SessionSummary;
+  /** The toolbar's changed-only/all-columns toggle. */
+  all: boolean;
 }
 
 /** The two-sided schema alignment: identities, additions, and drops. */
-export function SchemaPanel({ summary }: SchemaPanelProps) {
-  const [all, setAll] = useState(false);
+export function SchemaPanel({ summary, all }: SchemaPanelProps) {
   const [rows, setRows] = useState<SchemaRow[]>(summary.schema);
 
   useEffect(() => {
@@ -24,10 +24,6 @@ export function SchemaPanel({ summary }: SchemaPanelProps) {
 
   return (
     <div class="schema-panel">
-      <header>
-        <h2>Schema</h2>
-        <Toggle off="changed only" on="all columns" checked={all} onChange={setAll} />
-      </header>
       <table>
         <thead>
           <tr>

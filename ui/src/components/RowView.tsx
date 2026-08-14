@@ -1,160 +1,112 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { rowViewSection } from "../api";
-import type { RowViewData, SessionSummary } from "../types";
-import { Expando } from "./Expando";
+import type { FanoutGroup, RowLine } from "../types";
 import { FrozenTd, FrozenTh, PagedTable } from "./PagedTable";
-import { Pager } from "./Pager";
-import { Toggle } from "./Toggle";
 import { ValueText } from "./ValueText";
+import { usePages, VirtualTable } from "./VirtualTable";
 
-const PAGE_SIZE = 20;
+/**
+ * The edited rows as stacked old/new line pairs, two per row. `group`
+ * selects one of the sidebar's sub-entries — rows sharing a changed-column
+ * set — and narrows the default columns to that set; null shows every
+ * edited row.
+ */
+export function EditedView({
+  keyColumns,
+  group,
+  allColumns,
+}: {
+  keyColumns: string[];
+  group: number | null;
+  allColumns: boolean;
+}) {
+  const [columns, setColumns] = useState<string[]>([]);
+  const list = usePages(
+    (page, pageSize) =>
+      rowViewSection("edited", allColumns, group, page, pageSize).then((data) => {
+        setColumns(data.columns);
+        return data.rows!;
+      }),
+    [allColumns, group],
+  );
 
-/** The transpose of the column view: the two-level structure on the rows. */
-export function RowView({ summary }: { summary: SessionSummary }) {
   return (
-    <div class="row-view">
-      <h2>Value changes by row</h2>
-      <Section kind="edited" title="EDITED" count={summary.cover_rows} toggles keyColumns={summary.key_columns} />
-      <Section kind="added" title="ADDED" count={summary.added_rows} keyColumns={summary.key_columns} />
-      <Section kind="dropped" title="DROPPED" count={summary.dropped_rows} keyColumns={summary.key_columns} />
-      <Section kind="moved" title="MOVED" count={summary.moved_rows} keyColumns={summary.key_columns} />
-      <Section kind="fanout" title="FANOUT" count={summary.fanout_groups} keyColumns={summary.key_columns} />
-    </div>
+    <LinesVirtualTable
+      keyColumns={keyColumns}
+      columns={columns}
+      list={list}
+      showLabel
+    />
   );
 }
 
-function Section({
+/** The one-sided sections: added and dropped rows, and moved rows. */
+export function RowsKindView({
   kind,
-  title,
-  count,
   keyColumns,
-  toggles = false,
 }: {
-  kind: string;
-  title: string;
-  count: number;
+  kind: "added" | "dropped" | "moved";
   keyColumns: string[];
-  toggles?: boolean;
 }) {
-  if (count === 0) return null;
+  const [columns, setColumns] = useState<string[]>([]);
+  const list = usePages(
+    (page, pageSize) =>
+      rowViewSection(kind, false, null, page, pageSize).then((data) => {
+        setColumns(data.columns);
+        return data.rows!;
+      }),
+    [kind],
+  );
+
   return (
-    <Expando title={title} count={count}>
-      <SectionBody kind={kind} toggles={toggles} keyColumns={keyColumns} />
-    </Expando>
+    <LinesVirtualTable
+      keyColumns={keyColumns}
+      columns={columns}
+      list={list}
+      showLabel={kind === "moved"}
+    />
   );
 }
 
-function SectionBody({ kind, toggles, keyColumns }: { kind: string; toggles: boolean; keyColumns: string[] }) {
-  const [allColumns, setAllColumns] = useState(false);
-  const [page, setPage] = useState(0);
-  const [data, setData] = useState<RowViewData | null>(null);
-
-  useEffect(() => {
-    rowViewSection(kind, allColumns, page, PAGE_SIZE).then(setData, () => {});
-  }, [kind, allColumns, page]);
-
-  if (!data) return null;
-
-  return (
-    <div>
-      {toggles && (
-        <Toggle
-          off="changed columns"
-          on="all columns"
-          checked={allColumns}
-          onChange={(value) => {
-            setAllColumns(value);
-            setPage(0);
-          }}
-        />
-      )}
-      {data.rows && (
-        <>
-          <LinesTable
-            data={data}
-            lines={data.rows.items}
-            keyColumns={keyColumns}
-            showLabel={kind !== "added" && kind !== "dropped"}
-          />
-          <Pager
-            page={data.rows.page}
-            pageSize={data.rows.page_size}
-            total={data.rows.total}
-            onPage={setPage}
-          />
-        </>
-      )}
-      {data.edited && (
-        <>
-          {data.edited.items.map((group, index) => {
-            // The group *is* its shared changed-column set, so the columns
-            // are the title; the expando's count is the number of rows.
-            const columns = data.columns
-              .filter((_, i) => group.changed[i])
-              .join(", ");
-            return (
-              <Expando key={index} title={columns} count={group.rows.length}>
-                <LinesTable data={data} lines={group.lines} keyColumns={keyColumns} />
-              </Expando>
-            );
-          })}
-          <Pager
-            page={data.edited.page}
-            pageSize={data.edited.page_size}
-            total={data.edited.total}
-            onPage={setPage}
-          />
-        </>
-      )}
-      {data.groups && (
-        <>
-          {data.groups.items.map((group, index) => (
-            <Expando
-              key={index}
-              title={`${group.old_row}`}
-              count={group.new_rows.length}
-            >
-              <LinesTable data={data} lines={group.lines} keyColumns={keyColumns} />
-            </Expando>
-          ))}
-          <Pager
-            page={data.groups.page}
-            pageSize={data.groups.page_size}
-            total={data.groups.total}
-            onPage={setPage}
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-function LinesTable({
-  data,
-  lines,
+function LinesVirtualTable({
   keyColumns,
-  showLabel = true,
+  columns,
+  list,
+  showLabel,
 }: {
-  data: RowViewData;
-  lines: import("../types").RowLine[];
   keyColumns: string[];
-  showLabel?: boolean;
+  columns: string[];
+  list: ReturnType<typeof usePages<RowLine>>;
+  showLabel: boolean;
 }) {
+  const colSpan = (showLabel ? 1 : 0) + keyColumns.length + columns.length;
   return (
-    <PagedTable>
-      <thead>
+    <VirtualTable
+      total={list.total}
+      colSpan={colSpan}
+      ensure={list.ensure}
+      version={list.version}
+      head={
         <tr>
           {showLabel && <th />}
           {keyColumns.map((name, i) => (
             <FrozenTh index={i}>{name}</FrozenTh>
           ))}
-          {data.columns.map((column) => (
+          {columns.map((column) => (
             <th>{column}</th>
           ))}
         </tr>
-      </thead>
-      <tbody>
-        {lines.map((line, index) => (
+      }
+      renderRow={(index) => {
+        const line = list.item(index);
+        if (!line) {
+          return (
+            <tr key={index} class="pending">
+              <td colSpan={colSpan} />
+            </tr>
+          );
+        }
+        return (
           <tr
             key={index}
             class={
@@ -177,8 +129,89 @@ function LinesTable({
               </td>
             ))}
           </tr>
-        ))}
-      </tbody>
-    </PagedTable>
+        );
+      }}
+    />
+  );
+}
+
+/**
+ * The fanout groups, each an aligned table — the old row on top, each new
+ * row below, changed cells highlighted. Groups are few and unevenly sized,
+ * so this view appends on scroll rather than windowing.
+ */
+export function FanoutView({ keyColumns }: { keyColumns: string[] }) {
+  const [groups, setGroups] = useState<FanoutGroup[]>([]);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const nextPage = useRef(0);
+  const loading = useRef(false);
+
+  const loadMore = () => {
+    if (loading.current || (total !== null && groups.length >= total)) return;
+    loading.current = true;
+    rowViewSection("fanout", false, null, nextPage.current, 20).then((data) => {
+      const page = data.groups!;
+      nextPage.current += 1;
+      loading.current = false;
+      setColumns(data.columns);
+      setTotal(page.total);
+      setGroups((current) => [...current, ...page.items]);
+    }, () => {
+      loading.current = false;
+    });
+  };
+
+  useEffect(loadMore, []);
+
+  return (
+    <div
+      class="fanout-view"
+      onScroll={(event) => {
+        const el = event.target as HTMLDivElement;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) loadMore();
+      }}
+    >
+      {groups.map((group, index) => (
+        <section class="fanout-group" key={index}>
+          <h3>
+            old row {group.old_row} → {group.new_rows.length} rows
+          </h3>
+          <PagedTable>
+            <thead>
+              <tr>
+                <th />
+                {keyColumns.map((name, i) => (
+                  <FrozenTh index={i}>{name}</FrozenTh>
+                ))}
+                {columns.map((column) => (
+                  <th>{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {group.lines.map((line, lineIndex) => (
+                <tr
+                  key={lineIndex}
+                  class={line.label.startsWith("new") ? "new-line" : "old-line"}
+                >
+                  <td class="line-label">{line.label}</td>
+                  {line.key.map((value, i) => (
+                    <FrozenTd index={i}>
+                      <ValueText value={value} />
+                    </FrozenTd>
+                  ))}
+                  {line.values.map((value, i) => (
+                    <td class={line.changed[i] ? "changed" : ""}>
+                      <ValueText value={value} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </PagedTable>
+        </section>
+      ))}
+    </div>
   );
 }

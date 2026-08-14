@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use data_diff::{Diff, Side};
 
 use crate::dto::{
-    self, CellRowDto, ColumnCellDto, ColumnHeaderDto, ColumnRowDto, ColumnViewDto, EditedGroupDto,
-    FanoutGroupDto, PageDto, RowLineDto, RowViewDto, SchemaRowDto, SessionSummaryDto, ValueDto,
+    self, CellRowDto, ColumnCellDto, ColumnHeaderDto, ColumnRowDto, ColumnViewDto,
+    EditedGroupSummaryDto, EditedGroupsDto, FanoutGroupDto, PageDto, RowLineDto, RowViewDto,
+    SchemaRowDto, SessionSummaryDto, ValueDto,
 };
 use crate::session::Session;
 
@@ -50,26 +51,29 @@ fn key_positions(diff: &Diff, side: Side) -> Vec<usize> {
         .collect()
 }
 
-/// The key values of one row, or the row's own position when the key is
-/// positional — a positional key's identity is the position.
-fn key_values(session: &Session, side: Side, row: usize) -> Vec<ValueDto> {
+/// The key values of one row as values, or the row's own position when the
+/// key is positional — a positional key's identity is the position.
+fn raw_key_values(session: &Session, side: Side, row: usize) -> Vec<data_diff::Value> {
     let positions = key_positions(&session.diff, side);
     if positions.is_empty() {
-        return vec![ValueDto {
-            kind: "int64".to_owned(),
-            text: (row + 1).to_string(),
-        }];
+        return vec![data_diff::Value::Int64(row as i64 + 1)];
     }
     positions
         .iter()
         .map(|&column| {
-            dto::value(
-                &session
-                    .lookup()
-                    .value(side, row as u32 + 1, column as u32 + 1)
-                    .expect("model positions are in range"),
-            )
+            session
+                .lookup()
+                .value(side, row as u32 + 1, column as u32 + 1)
+                .expect("model positions are in range")
         })
+        .collect()
+}
+
+/// The key values of one row, as the frontend renders them.
+fn key_values(session: &Session, side: Side, row: usize) -> Vec<ValueDto> {
+    raw_key_values(session, side, row)
+        .iter()
+        .map(dto::value)
         .collect()
 }
 
@@ -206,13 +210,49 @@ pub fn session_summary(session: &Session) -> SessionSummaryDto {
     }
 }
 
-/// A deterministic order for key values, for the cell view's key sort:
-/// kind first, then the text form.
-fn value_order(values: &[ValueDto]) -> Vec<(String, String)> {
-    values
-        .iter()
-        .map(|value| (value.kind.clone(), value.text.clone()))
-        .collect()
+/// Compare two key values as values, for the cell view's key sort:
+/// numerically where both are numeric — so 9 sorts before 10 — and by
+/// kind then display text across variants, which a type-changed key
+/// column can produce.
+fn value_cmp(a: &data_diff::Value, b: &data_diff::Value) -> std::cmp::Ordering {
+    use data_diff::Value;
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+        (Value::Int64(x), Value::Int64(y)) => x.cmp(y),
+        (Value::Double(x), Value::Double(y)) => x.total_cmp(y),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Timestamp { value: x, .. }, Value::Timestamp { value: y, .. }) => x.cmp(y),
+        (Value::Date32(x), Value::Date32(y)) => x.cmp(y),
+        (Value::Date64(x), Value::Date64(y)) => x.cmp(y),
+        (
+            Value::Decimal128 {
+                value: x,
+                scale: sx,
+                ..
+            },
+            Value::Decimal128 {
+                value: y,
+                scale: sy,
+                ..
+            },
+        ) if sx == sy => x.cmp(y),
+        (Value::Opaque(x), Value::Opaque(y)) => x.cmp(y),
+        _ => {
+            let (a, b) = (dto::value(a), dto::value(b));
+            a.kind.cmp(&b.kind).then_with(|| a.text.cmp(&b.text))
+        }
+    }
+}
+
+/// Lexicographic order over compound keys.
+fn key_cmp(a: &[data_diff::Value], b: &[data_diff::Value]) -> std::cmp::Ordering {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| value_cmp(x, y))
+        .find(|&order| order != std::cmp::Ordering::Equal)
+        .unwrap_or_else(|| a.len().cmp(&b.len()))
 }
 
 /// The flat evidence table, one page: exactly `Diff::cells`, ordered by the
@@ -235,13 +275,13 @@ pub fn cells_page(
         // By the row's key values, then the column, so a row's cells stay
         // together under its identity.
         _ => {
-            let mut keys: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
+            let mut keys: BTreeMap<usize, Vec<data_diff::Value>> = BTreeMap::new();
             for &((new_row, _), _) in &entries {
                 keys.entry(new_row)
-                    .or_insert_with(|| value_order(&key_values(session, Side::New, new_row)));
+                    .or_insert_with(|| raw_key_values(session, Side::New, new_row));
             }
             entries.sort_by(|((row_a, col_a), _), ((row_b, col_b), _)| {
-                keys[row_a].cmp(&keys[row_b]).then(col_a.cmp(col_b))
+                key_cmp(&keys[row_a], &keys[row_b]).then(col_a.cmp(col_b))
             });
         }
     }
@@ -435,10 +475,67 @@ fn section_columns(
     }
 }
 
+/// One edited-row group: rows sharing one changed-column set.
+struct EditedGroup {
+    /// The shared changed columns, one-based new-side positions, as the
+    /// model's `RowEdit` states them.
+    columns: Vec<usize>,
+    /// The group's rows, zero-based new-side and ascending.
+    rows: Vec<usize>,
+}
+
+/// The edited-row grouping the sidebar's sub-entries and the edited view
+/// both read, so their counts cannot disagree: the cover's row edits
+/// ordered by new-side position, and rows with identical changed-column
+/// sets collapsed into one group each — the summary's grouped `row_edit()`
+/// line. Groups are ordered by where their first row occurs.
+fn edited_grouping(session: &Session) -> (Vec<usize>, Vec<EditedGroup>) {
+    let diff = &session.diff;
+    let mut edits: Vec<&data_diff::RowEdit> = diff.summary.rows.iter().collect();
+    edits.sort_by_key(|edit| edit.row.positions().1);
+    let mut order = Vec::new();
+    let mut groups: Vec<EditedGroup> = Vec::new();
+    let mut by_columns: BTreeMap<&[usize], usize> = BTreeMap::new();
+    for edit in edits {
+        let new_row = edit.row.positions().1 - 1;
+        order.push(new_row);
+        let index = *by_columns.entry(&edit.columns).or_insert_with(|| {
+            groups.push(EditedGroup {
+                columns: edit.columns.clone(),
+                rows: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        groups[index].rows.push(new_row);
+    }
+    (order, groups)
+}
+
+/// The sidebar's "rows edited" sub-entries: one per group, titled by the
+/// shared changed columns' names and counted in rows. Cheap — no values
+/// are looked up, the grouping being a pure fact of the summary.
+pub fn edited_groups(session: &Session) -> EditedGroupsDto {
+    let (_, groups) = edited_grouping(session);
+    EditedGroupsDto {
+        groups: groups
+            .into_iter()
+            .map(|group| EditedGroupSummaryDto {
+                columns: group
+                    .columns
+                    .iter()
+                    .map(|&column| session.diff.schemas.new[column - 1].name.clone())
+                    .collect(),
+                rows: group.rows.len(),
+            })
+            .collect(),
+    }
+}
+
 pub fn row_view_section(
     session: &Session,
     kind: &str,
     all_columns: bool,
+    group: Option<usize>,
     page: usize,
     page_size: usize,
 ) -> RowViewDto {
@@ -451,78 +548,83 @@ pub fn row_view_section(
             // The cover's row edits only: a row whose changes are all covered
             // by a `col_edit()` is the column view's story, and each event is
             // shown in exactly one place.
-            let mut edits: Vec<&data_diff::RowEdit> = diff.summary.rows.iter().collect();
-            edits.sort_by_key(|edit| edit.row.positions().1);
-            let row_set: BTreeSet<usize> = edits
-                .iter()
-                .map(|edit| edit.row.positions().1 - 1)
-                .collect();
-            let columns = section_columns(session, &row_set, all_columns);
+            let (order, groups) = edited_grouping(session);
+            // The sidebar's sub-entries select one group by its index in the
+            // shared grouping; the parent entry shows every edited row.
+            let rows: &[usize] = match group {
+                Some(index) => groups.get(index).map_or(&[], |group| &group.rows),
+                None => &order,
+            };
+            let columns: Vec<(usize, String)> = if all_columns {
+                identities(diff)
+                    .into_iter()
+                    .map(|pair| (pair.new, diff.schemas.new[pair.new].name.clone()))
+                    .collect()
+            } else if let Some(index) = group {
+                groups
+                    .get(index)
+                    .map(|group| {
+                        group
+                            .columns
+                            .iter()
+                            .map(|&column| (column - 1, diff.schemas.new[column - 1].name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                section_columns(session, &rows.iter().copied().collect(), false)
+            };
             // New-side column position to its identity pair, for the old line.
             let by_new: BTreeMap<usize, Pair> = identities(diff)
                 .into_iter()
                 .map(|pair| (pair.new, pair))
                 .collect();
 
-            // Rows with identical changed-column sets collapse into one
-            // group each, the row view's rendering of the summary's grouped
-            // `row_edit()` line; pagination then counts groups, so a
-            // rectangle is one expando and one page unit. Groups are ordered
-            // by where their first row occurs, rows within a group ascending.
-            let mut groups: Vec<EditedGroupDto> = Vec::new();
-            let mut by_columns: BTreeMap<&[usize], usize> = BTreeMap::new();
-            for edit in edits {
-                let new_row = edit.row.positions().1 - 1;
-                let old_row = matched[&new_row];
-                let key = key_values(session, Side::New, new_row);
-                let mut old_line = RowLineDto {
-                    label: "old".to_owned(),
-                    key: key.clone(),
-                    values: Vec::new(),
-                    changed: Vec::new(),
-                };
-                let mut new_line = RowLineDto {
-                    label: "new".to_owned(),
-                    key,
-                    values: Vec::new(),
-                    changed: Vec::new(),
-                };
-                for &(col, _) in &columns {
-                    let pair = by_new[&col];
-                    old_line
-                        .values
-                        .push(value_at(session, Side::Old, old_row, pair.old));
-                    new_line
-                        .values
-                        .push(value_at(session, Side::New, new_row, pair.new));
-                    let changed = cells.contains_key(&(new_row, col));
-                    old_line.changed.push(changed);
-                    new_line.changed.push(changed);
-                }
-                let mask = new_line.changed.clone();
-                let index = *by_columns.entry(&edit.columns).or_insert_with(|| {
-                    groups.push(EditedGroupDto {
-                        rows: Vec::new(),
-                        key: old_line.key.clone(),
-                        changed: mask,
-                        lines: Vec::new(),
-                    });
-                    groups.len() - 1
-                });
-                groups[index].rows.push(new_row as u32 + 1);
-                groups[index].lines.extend([old_line, new_line]);
-            }
-            let total = groups.len();
-            let items = groups
-                .into_iter()
-                .skip(page * page_size)
-                .take(page_size)
+            // The table is the stacked old/new lines, two per edited row,
+            // paginated by line so the windowed frontend sees one flat list.
+            // Values are looked up only for the page's lines.
+            let total = rows.len() * 2;
+            let items = (page * page_size).min(total)..(page * page_size + page_size).min(total);
+            let items = items
+                .map(|line| {
+                    let new_row = rows[line / 2];
+                    let old_row = matched[&new_row];
+                    let key = key_values(session, Side::New, new_row);
+                    let changed: Vec<bool> = columns
+                        .iter()
+                        .map(|&(col, _)| cells.contains_key(&(new_row, col)))
+                        .collect();
+                    if line % 2 == 0 {
+                        RowLineDto {
+                            label: "old".to_owned(),
+                            key,
+                            values: columns
+                                .iter()
+                                .map(|&(col, _)| {
+                                    value_at(session, Side::Old, old_row, by_new[&col].old)
+                                })
+                                .collect(),
+                            changed,
+                        }
+                    } else {
+                        RowLineDto {
+                            label: "new".to_owned(),
+                            key,
+                            values: columns
+                                .iter()
+                                .map(|&(col, _)| {
+                                    value_at(session, Side::New, new_row, by_new[&col].new)
+                                })
+                                .collect(),
+                            changed,
+                        }
+                    }
+                })
                 .collect();
             RowViewDto {
                 columns: columns.into_iter().map(|(_, name)| name).collect(),
-                rows: None,
+                rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
-                edited: Some(dto::page(items, total, page, page_size)),
             }
         }
         "added" | "dropped" => {
@@ -560,7 +662,6 @@ pub fn row_view_section(
                     .collect(),
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
-                edited: None,
             }
         }
         "moved" => {
@@ -589,7 +690,6 @@ pub fn row_view_section(
                 columns: vec!["old position".to_owned(), "new position".to_owned()],
                 rows: Some(dto::page(items, total, page, page_size)),
                 groups: None,
-                edited: None,
             }
         }
         "fanout" => {
@@ -654,7 +754,6 @@ pub fn row_view_section(
                 columns,
                 rows: None,
                 groups: Some(dto::page(groups, total, page, page_size)),
-                edited: None,
             }
         }
         _ => panic!("unknown row view section {kind:?}"),
