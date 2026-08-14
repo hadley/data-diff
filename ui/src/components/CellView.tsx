@@ -4,27 +4,33 @@ import { FrozenTd, FrozenTh } from "./PagedTable";
 import { ValueText } from "./ValueText";
 import { usePages, VirtualTable } from "./VirtualTable";
 
-/** The flat evidence table: exactly Diff::cells, no more, no less. */
+/**
+ * The flat evidence table: exactly Diff::cells, no more, no less — unless
+ * `addedDropped` asks every non-key cell of each added and dropped row to
+ * join, one side of the line then staying absent.
+ */
 export function CellView({
   total,
   keyColumns,
   byColumn,
+  addedDropped,
 }: {
   total: number;
   keyColumns: string[];
   byColumn: boolean;
+  addedDropped: boolean;
 }) {
   const [hasDelta, setHasDelta] = useState(false);
   const list = usePages(
     (page, pageSize) =>
-      cellsPage(byColumn ? "column" : "key", page, pageSize).then((data) => {
+      cellsPage(byColumn ? "column" : "key", addedDropped, page, pageSize).then((data) => {
         if (data.items.some((item) => item.delta != null)) setHasDelta(true);
         return data;
       }),
-    [byColumn],
+    [byColumn, addedDropped],
   );
 
-  useEffect(() => setHasDelta(false), [byColumn]);
+  useEffect(() => setHasDelta(false), [byColumn, addedDropped]);
 
   const colSpan = keyColumns.length + 3 + (hasDelta ? 1 : 0);
 
@@ -62,8 +68,14 @@ export function CellView({
               </FrozenTd>
             ))}
             <td class="col-name">{item.column}</td>
-            <td><ValueText value={item.old} /></td>
-            <td class="changed"><ValueText value={item.new} /></td>
+            {/* A one-sided line (an added or dropped row's cell) marks the
+                side the row exists on and leaves the other absent. */}
+            <td class={item.old ? (item.new ? "" : "deleted") : "absent"}>
+              {item.old ? <ValueText value={item.old} /> : "—"}
+            </td>
+            <td class={item.new ? (item.old ? "changed" : "added") : "absent"}>
+              {item.new ? <ValueText value={item.new} /> : "—"}
+            </td>
             {hasDelta && (
               <td class="delta">{item.delta && <ValueText value={item.delta} />}</td>
             )}

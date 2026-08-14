@@ -28,6 +28,8 @@ export function App() {
   });
   const [editedAllColumns, setEditedAllColumns] = useState(false);
   const [cellByColumn, setCellByColumn] = useState(false);
+  // The cell view is the evidence layer, so added/dropped rows are opt-in.
+  const [cellAddedDropped, setCellAddedDropped] = useState(false);
   // The old/new side the two-sided views show, shared so it survives view
   // switches.
   const [side, setSide] = useState<Side>("old");
@@ -118,7 +120,15 @@ export function App() {
           />
         )}
         {selection.view === "cells" && (
-          <Toggle off="by key" on="by column" checked={cellByColumn} onChange={setCellByColumn} />
+          <>
+            <Toggle off="by key" on="by column" checked={cellByColumn} onChange={setCellByColumn} />
+            <Toggle
+              off="without added/dropped"
+              on="+ added/dropped"
+              checked={cellAddedDropped}
+              onChange={setCellAddedDropped}
+            />
+          </>
         )}
       </div>
       <div class="app-body">
@@ -149,7 +159,12 @@ export function App() {
             )}
             {selection.view === "fanout" && <FanoutView keyColumns={summary.key_columns} />}
             {selection.view === "cells" && (
-              <CellView total={summary.cells} keyColumns={summary.key_columns} byColumn={cellByColumn} />
+              <CellView
+                total={summary.cells}
+                keyColumns={summary.key_columns}
+                byColumn={cellByColumn}
+                addedDropped={cellAddedDropped}
+              />
             )}
           </div>
         </section>
