@@ -41,6 +41,10 @@ pub(crate) struct SummaryColumn {
     pub type_changed: bool,
     /// Changed cells in this column, over the one-to-one matched rows.
     pub changes: usize,
+    /// The changed matched rows, as ascending zero-based (old, new) position
+    /// pairs — the same cover-independent fact as `changes`, which is its
+    /// length, transposed from `SummaryRow::columns`.
+    pub rows: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +106,7 @@ pub(crate) fn summarize(
             new: column.new,
             type_changed: column.type_changed,
             changes: column.rows.len(),
+            rows: column.rows.clone(),
         })
         .collect::<Vec<_>>();
     let residual_columns = changes
@@ -170,6 +175,7 @@ pub(crate) fn summarize(
             new: column.new,
             type_changed: false,
             changes: column.rows.len(),
+            rows: column.rows.clone(),
         });
     }
     columns.sort_by_key(|column| (column.old, column.new));
@@ -771,7 +777,17 @@ mod tests {
 
         let summary = summarize(&changes);
 
-        assert_eq!(summary.columns, [summary_column(1, 1, false, 499)]);
+        assert_eq!(
+            summary.columns,
+            [summary_column(
+                1,
+                1,
+                false,
+                &(0..499)
+                    .map(|index| (index * 20, index * 20))
+                    .collect::<Vec<_>>()
+            )]
+        );
         assert!(summary.rows.is_empty());
     }
 
@@ -809,7 +825,10 @@ mod tests {
             summarize(&changes),
             super::SummaryChanges {
                 optimal: true,
-                columns: vec![summary_column(0, 1, true, 2), summary_column(3, 3, true, 0),],
+                columns: vec![
+                    summary_column(0, 1, true, &[(0, 1), (1, 0)]),
+                    summary_column(3, 3, true, &[]),
+                ],
                 rows: vec![summary_row(0, 1, &[0, 1])],
             }
         );
@@ -846,9 +865,9 @@ mod tests {
         assert_eq!(
             forced.columns,
             [
-                summary_column(1, 1, false, 2),
-                summary_column(2, 2, false, 1),
-                summary_column(3, 3, false, 1),
+                summary_column(1, 1, false, &[(0, 0), (1, 1)]),
+                summary_column(2, 2, false, &[(0, 0)]),
+                summary_column(3, 3, false, &[(1, 1)]),
             ]
         );
         assert!(forced.rows.is_empty());
@@ -877,7 +896,10 @@ mod tests {
         // partition: each is a fact about its own row or column, which is what
         // makes it checkable against the data and keeps it independent of which
         // minimum cover was chosen.
-        assert_eq!(summary.columns, [summary_column(2, 2, false, 3)]);
+        assert_eq!(
+            summary.columns,
+            [summary_column(2, 2, false, &[(0, 0), (1, 1), (2, 2)])]
+        );
         assert_eq!(summary.rows, [summary_row(0, 0, &[0, 1, 2])]);
     }
 
@@ -898,7 +920,10 @@ mod tests {
         // Row 0 is reported for the one cell left to cover, and counts two:
         // the cell in the hinted column is still a changed cell in that row. A
         // hint moves which events are reported, not what is true of a row.
-        assert_eq!(forced.columns, [summary_column(1, 1, false, 2)]);
+        assert_eq!(
+            forced.columns,
+            [summary_column(1, 1, false, &[(0, 0), (1, 1)])]
+        );
         assert_eq!(forced.rows, [summary_row(0, 0, &[1, 2])]);
     }
 
@@ -918,7 +943,7 @@ mod tests {
 
         assert_eq!(
             summarize(&column_dominant).columns,
-            [summary_column(2, 0, false, 2)]
+            [summary_column(2, 0, false, &[(0, 2), (1, 0)])]
         );
         assert_eq!(summarize(&row_dominant).rows, [summary_row(0, 2, &[1, 2])]);
     }
@@ -953,8 +978,8 @@ mod tests {
         assert_eq!(
             capped.columns,
             [
-                summary_column(1, 1, false, 2),
-                summary_column(2, 2, false, 2)
+                summary_column(1, 1, false, &[(0, 0), (1, 1)]),
+                summary_column(2, 2, false, &[(0, 0), (1, 1)])
             ]
         );
     }
@@ -978,7 +1003,10 @@ mod tests {
         // The first component's lighter side is its one column, the second's
         // its one row, and each event still counts every cell incident to it.
         assert!(!capped.optimal);
-        assert_eq!(capped.columns, [summary_column(1, 1, false, 3)]);
+        assert_eq!(
+            capped.columns,
+            [summary_column(1, 1, false, &[(0, 0), (1, 1), (2, 2)])]
+        );
         assert_eq!(capped.rows, [summary_row(5, 5, &[2, 3, 4])]);
     }
 
@@ -1006,7 +1034,7 @@ mod tests {
         };
         let tied = super::summarize(&one_edge, &[], 0, ROWS, ROWS);
         assert!(tied.rows.is_empty());
-        assert_eq!(tied.columns, [summary_column(0, 0, false, 1)]);
+        assert_eq!(tied.columns, [summary_column(0, 0, false, &[(0, 0)])]);
     }
 
     fn changed_column(
@@ -1023,12 +1051,18 @@ mod tests {
         }
     }
 
-    fn summary_column(old: usize, new: usize, type_changed: bool, changes: usize) -> SummaryColumn {
+    fn summary_column(
+        old: usize,
+        new: usize,
+        type_changed: bool,
+        rows: &[(usize, usize)],
+    ) -> SummaryColumn {
         SummaryColumn {
             old,
             new,
             type_changed,
-            changes,
+            changes: rows.len(),
+            rows: rows.to_vec(),
         }
     }
 

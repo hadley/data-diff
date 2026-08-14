@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use data_diff::{Diff, Side};
 
 use crate::dto::{
-    self, CellRowDto, ColumnCellDto, ColumnHeaderDto, ColumnRowDto, ColumnViewDto,
-    EditedGroupSummaryDto, EditedGroupsDto, FanoutGroupDto, PageDto, RowLineDto, RowViewDto,
-    SchemaRowDto, SessionSummaryDto, ValueDto,
+    self, CellRowDto, ColumnCellDto, ColumnGroupSummaryDto, ColumnGroupsDto, ColumnHeaderDto,
+    ColumnRowDto, ColumnViewDto, EditedGroupSummaryDto, EditedGroupsDto, FanoutGroupDto, PageDto,
+    RowLineDto, RowViewDto, SchemaRowDto, SessionSummaryDto, ValueDto,
 };
 use crate::session::Session;
 
@@ -177,18 +177,6 @@ pub fn session_summary(session: &Session) -> SessionSummaryDto {
         new_path: session.new_path.display().to_string(),
         cells: diff.cells.len(),
         optimal: diff.summary.optimal,
-        edited_columns: diff
-            .cells
-            .iter()
-            .map(|cell| cell.positions().1[1])
-            .collect::<BTreeSet<_>>()
-            .len(),
-        edited_rows: diff
-            .cells
-            .iter()
-            .map(|cell| cell.positions().1[0])
-            .collect::<BTreeSet<_>>()
-            .len(),
         cover_columns: diff.summary.columns.len(),
         cover_rows: diff.summary.rows.len(),
         key_columns: {
@@ -318,6 +306,7 @@ pub fn column_view(
     all_columns: bool,
     all_rows: bool,
     include_added_dropped: bool,
+    group: Option<usize>,
     page: usize,
     page_size: usize,
 ) -> ColumnViewDto {
@@ -328,12 +317,20 @@ pub fn column_view(
     // The column view shows the cover's column edits, not every changed
     // column: a column the summary covers by its rows (a rectangle's r1–r5)
     // is the row view's story, and showing it here too would tell it twice.
-    let edited: BTreeSet<usize> = diff
-        .summary
-        .columns
-        .iter()
-        .map(|edit| edit.column.positions().1 - 1)
-        .collect();
+    // The sidebar's sub-entries narrow that set to one group of the shared
+    // grouping; the parent entry shows every edited column.
+    let edited: BTreeSet<usize> = match group {
+        Some(index) => column_grouping(session)
+            .get(index)
+            .map(|group| group.columns.iter().copied().collect())
+            .unwrap_or_default(),
+        None => diff
+            .summary
+            .columns
+            .iter()
+            .map(|edit| edit.column.positions().1 - 1)
+            .collect(),
+    };
 
     // Headers: edited identities as old/new pairs, unchanged identities and
     // added/dropped columns joining as singles, each group in schema order.
@@ -509,6 +506,68 @@ fn edited_grouping(session: &Session) -> (Vec<usize>, Vec<EditedGroup>) {
         groups[index].rows.push(new_row);
     }
     (order, groups)
+}
+
+/// One edited-column group: columns sharing one changed-row set.
+struct ColumnGroup {
+    /// The member columns, zero-based new-side and ascending.
+    columns: Vec<usize>,
+    /// The shared changed rows, one-based new-side as the model's
+    /// `ColumnEdit` states them.
+    rows: Vec<usize>,
+}
+
+/// The edited-column grouping the sidebar's sub-entries and the column view
+/// both read, so their counts cannot disagree: the cover's value edits
+/// ordered by new-side position, and columns with identical changed-row
+/// sets collapsed into one group each — the summary's grouped `col_edit()`
+/// line. Only multi-column groups are kept, a singleton being the column
+/// itself, and groups are ordered by where their first column occurs.
+fn column_grouping(session: &Session) -> Vec<ColumnGroup> {
+    let diff = &session.diff;
+    let mut edits: Vec<&data_diff::ColumnEdit> = diff
+        .summary
+        .columns
+        .iter()
+        .filter(|edit| edit.changes > 0)
+        .collect();
+    edits.sort_by_key(|edit| edit.column.positions().1);
+    let mut groups: Vec<ColumnGroup> = Vec::new();
+    let mut by_rows: BTreeMap<&[usize], usize> = BTreeMap::new();
+    for edit in edits {
+        let index = *by_rows.entry(&edit.rows).or_insert_with(|| {
+            groups.push(ColumnGroup {
+                columns: Vec::new(),
+                rows: edit.rows.clone(),
+            });
+            groups.len() - 1
+        });
+        groups[index].columns.push(edit.column.positions().1 - 1);
+    }
+    groups
+        .into_iter()
+        .filter(|group| group.columns.len() > 1)
+        .collect()
+}
+
+/// The sidebar's "columns" sub-entries: one per multi-column group, titled
+/// by the member columns' names and counted in the shared changed rows.
+/// Cheap — no values are looked up, the grouping being a pure fact of the
+/// summary.
+pub fn edited_column_groups(session: &Session) -> ColumnGroupsDto {
+    ColumnGroupsDto {
+        groups: column_grouping(session)
+            .into_iter()
+            .map(|group| ColumnGroupSummaryDto {
+                columns: group
+                    .columns
+                    .iter()
+                    .map(|&column| session.diff.schemas.new[column].name.clone())
+                    .collect(),
+                rows: group.rows.len(),
+            })
+            .collect(),
+    }
 }
 
 /// The sidebar's "rows edited" sub-entries: one per group, titled by the

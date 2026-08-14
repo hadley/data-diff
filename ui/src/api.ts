@@ -1,6 +1,7 @@
 import type {
   CellRow,
   ColumnViewData,
+  ColumnGroupSummary,
   EditedGroupSummary,
   Page,
   RowViewData,
@@ -72,6 +73,7 @@ export function columnView(
   allColumns: boolean,
   allRows: boolean,
   includeAddedDropped: boolean,
+  group: number | null,
   page: number,
   pageSize: number,
 ): Promise<ColumnViewData> {
@@ -80,6 +82,7 @@ export function columnView(
       all_columns: allColumns,
       all_rows: allRows,
       added_dropped: includeAddedDropped,
+      group,
       page,
       page_size: pageSize,
     })}`,
@@ -89,6 +92,11 @@ export function columnView(
 /** The sidebar's "rows edited" sub-entries: one per shared changed-column set. */
 export function editedGroups(): Promise<{ groups: EditedGroupSummary[] }> {
   return request("/api/edited-groups");
+}
+
+/** The sidebar's "columns" sub-entries: one per shared changed-row set. */
+export function columnGroups(): Promise<{ groups: ColumnGroupSummary[] }> {
+  return request("/api/column-groups");
 }
 
 export function rowViewSection(

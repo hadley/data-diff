@@ -103,38 +103,84 @@ pub fn write_human(mut writer: impl Write, diff: &Diff) -> io::Result<()> {
     // its type alone. The model underneath holds everything regardless.
     let regenerated = diff.regeneration.is_some();
 
-    // A count is every changed cell in the column, so a row edit crossing it
-    // counts the cell they share too. The two numbers describe their own row and
-    // their own column rather than dividing the change between them, which is
-    // what makes each of them checkable against the data.
+    // A column edit's type and value aspects print as separate lines: they
+    // are independent facts in the model, and dividing them is what lets the
+    // value lines group below without a line ever stating one type for two
+    // columns. A column with both aspects appears by name on each line, and
+    // each line is true of its own aspect — the same counts-overlap
+    // philosophy as a row edit and a column edit counting the cell they
+    // share. A type line has nothing to count and says nothing: `changes: 0`
+    // would be a zero to interpret where an absence can be read past.
     //
-    // A type-only edit has nothing to count and says nothing: `changes: 0` would
-    // be a zero to interpret where an absence can be read past.
-    for edit in &diff.summary.columns {
-        if regenerated && !edit.type_changed {
-            continue;
-        }
+    // Both kinds of line group like the row edits below: type lines by
+    // identical type pair, value lines by identical changed-row set, each
+    // group ordered by where its first column occurs and a singleton keeping
+    // the one-column shape. A grouped line names every member and states the
+    // shared detail once.
+    let mut edits = diff.summary.columns.iter().collect::<Vec<_>>();
+    edits.sort_by_key(|edit| edit.column.positions().1);
+
+    let mut type_groups: Vec<Vec<&crate::ColumnEdit>> = Vec::new();
+    let mut by_types: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for edit in edits.iter().copied().filter(|edit| edit.type_changed) {
         let (old, new) = edit.column.positions();
-        let mut details = Vec::new();
-        if edit.type_changed {
-            details.push(format!(
-                "type: {} -> {}",
-                column_type(&diff.schemas.old, old),
-                column_type(&diff.schemas.new, new)
-            ));
-        }
-        if edit.changes > 0 && !regenerated {
-            details.push(format!("changes: {}", edit.changes));
-        }
-        let suffix = if details.is_empty() {
-            String::new()
-        } else {
-            format!(", {}", details.join(", "))
-        };
+        let key = (
+            column_type(&diff.schemas.old, old),
+            column_type(&diff.schemas.new, new),
+        );
+        let index = *by_types.entry(key).or_insert_with(|| {
+            type_groups.push(Vec::new());
+            type_groups.len() - 1
+        });
+        type_groups[index].push(edit);
+    }
+    for group in &type_groups {
+        let names = group
+            .iter()
+            .map(|edit| column_name(&diff.schemas.new, edit.column.positions().1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (old, new) = group[0].column.positions();
         operations.push(format!(
-            "col_edit({}{suffix})",
-            column_name(&diff.schemas.new, new)
+            "col_edit({names}, type: {} -> {})",
+            column_type(&diff.schemas.old, old),
+            column_type(&diff.schemas.new, new)
         ));
+    }
+
+    // Value lines are conditional on the row story, which a regenerated
+    // table withholds; the type lines above are schema facts and stay.
+    if !regenerated {
+        let mut value_groups: Vec<Vec<&crate::ColumnEdit>> = Vec::new();
+        let mut by_rows: std::collections::BTreeMap<&[usize], usize> =
+            std::collections::BTreeMap::new();
+        for edit in edits.iter().copied().filter(|edit| edit.changes > 0) {
+            let index = *by_rows.entry(&edit.rows).or_insert_with(|| {
+                value_groups.push(Vec::new());
+                value_groups.len() - 1
+            });
+            value_groups[index].push(edit);
+        }
+        for group in &value_groups {
+            let names = group
+                .iter()
+                .map(|edit| column_name(&diff.schemas.new, edit.column.positions().1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if group.len() == 1 {
+                operations.push(format!("col_edit({names}, changes: {})", group[0].changes));
+            } else {
+                // Every member shares the changed-row set, so each member's
+                // count is the shared `rows` and `changes` is their total —
+                // checkable against the data either way.
+                operations.push(format!(
+                    "col_edit({names}, rows: {}, changes: {})",
+                    group[0].rows.len(),
+                    group.iter().map(|edit| edit.changes).sum::<usize>()
+                ));
+            }
+        }
     }
 
     if regenerated {
@@ -391,6 +437,11 @@ fn hint_claim(claim: &HintClaim) -> String {
     let names = match &claim.names {
         HintNames::Single(name) => value(name),
         HintNames::Pair(old, new) => format!("{} -> {}", value(old), value(new)),
+        HintNames::List(names) => names
+            .iter()
+            .map(|name| value(name))
+            .collect::<Vec<_>>()
+            .join(", "),
     };
     format!("{}({names})", claim.kind.name())
 }
@@ -655,7 +706,8 @@ mod tests {
         col_drop(drop)
         col_add(add)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, changes: 2)
+        col_edit(value, type: Int32 -> Int64)
+        col_edit(value, changes: 2)
         row_drop(rows: 1)
         row_add(rows: 1)
         row_order(2 -> 1)
@@ -837,7 +889,8 @@ mod tests {
         col_drop(gone)
         col_add(fresh)
         col_order(value, 3 -> 1)
-        col_edit(value, type: Int32 -> Int64, changes: 1)
+        col_edit(value, type: Int32 -> Int64)
+        col_edit(value, changes: 1)
         ");
     }
 
@@ -1015,6 +1068,81 @@ mod tests {
             "table_key([id], basis: declared)\n\
              row_edit(rows: 3, changes: 6, columns: [a, b])\n\
              row_edit(rows: 1, changes: 1, columns: [c])"
+        );
+    }
+
+    #[test]
+    fn columns_with_identical_row_sets_group_into_one_line() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "a" => [10, 20, 30],
+            "b" => [40, 50, 60],
+            "c" => [70, 80, 90],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "a" => [11, 22, 30],
+            "b" => [41, 52, 60],
+            "c" => [70, 80, 91],
+        };
+
+        // "a" and "b" changed in exactly the same rows, "c" in a row of its
+        // own. Forced to column edits, the shared set collapses into one line
+        // naming both columns and stating the rectangle, while the singleton
+        // keeps the one-column shape.
+        assert_eq!(
+            render_hinted(&old, &new, &["col_edit(a)", "col_edit(b)", "col_edit(c)"]),
+            "table_key([id], basis: declared)\n\
+             col_edit(a, b, rows: 2, changes: 4)\n\
+             col_edit(c, changes: 1)"
+        );
+    }
+
+    #[test]
+    fn type_changes_group_by_their_type_pair() {
+        let old = table! {
+            "id" => [1, 2],
+            "a" => i32[1, 2],
+            "b" => i32[3, 4],
+            "c" => [5, 6],
+        };
+        let new = table! {
+            "id" => [1, 2],
+            "a" => [1, 2],
+            "b" => [3, 4],
+            "c" => i32[5, 6],
+        };
+
+        // "a" and "b" were retyped the same way and share one type line; "c"
+        // went the other direction and keeps its own. Every value compares
+        // equal, so no value line appears.
+        assert_eq!(
+            render(&old, &new),
+            "table_key([id], basis: declared)\n\
+             col_edit(a, b, type: Int32 -> Int64)\n\
+             col_edit(c, type: Int64 -> Int32)"
+        );
+    }
+
+    #[test]
+    fn a_type_and_value_edit_of_one_column_print_as_two_lines() {
+        let old = table! {
+            "id" => [1, 2, 3],
+            "value" => i32[10, 20, 30],
+        };
+        let new = table! {
+            "id" => [1, 2, 3],
+            "value" => [10, 21, 30],
+        };
+
+        // The aspects are independent facts and print independently: the type
+        // line carries no count, and the value line says nothing about the
+        // type. The column appears on each, each line true of its own aspect.
+        assert_eq!(
+            render(&old, &new),
+            "table_key([id], basis: declared)\n\
+             col_edit(value, type: Int32 -> Int64)\n\
+             col_edit(value, changes: 1)"
         );
     }
 

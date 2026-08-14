@@ -19,19 +19,21 @@ export interface ColumnOptions {
 export function ColumnView({
   keyColumns,
   options,
+  group,
 }: {
   keyColumns: string[];
   options: ColumnOptions;
+  group: number | null;
 }) {
   const { allColumns, allRows, addedDropped } = options;
   const [columns, setColumns] = useState<ColumnHeader[]>([]);
   const list = usePages(
     (page, pageSize) =>
-      columnView(allColumns, allRows, addedDropped, page, pageSize).then((data) => {
+      columnView(allColumns, allRows, addedDropped, group, page, pageSize).then((data) => {
         setColumns(data.columns);
         return data.rows;
       }),
-    [allColumns, allRows, addedDropped],
+    [allColumns, allRows, addedDropped, group],
   );
 
   const colSpan =

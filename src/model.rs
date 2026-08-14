@@ -474,12 +474,17 @@ pub struct Schemas {
 /// `changes` counts every changed cell in the column, over the one-to-one
 /// matched rows. It is positive exactly when the values changed, which is why
 /// it carries what a `values_changed` flag used to: the flag was this number
-/// with its magnitude thrown away.
+/// with its magnitude thrown away. `rows` names them: the changed matched
+/// rows as ascending one-based new-side positions, the same convention as
+/// `RowEdit::columns` transposed, and the same cover-independent fact as
+/// `changes`, which is its length. A type-only edit has no changed cells, so
+/// its `rows` is empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnEdit {
     pub column: Coordinate,
     pub type_changed: bool,
     pub changes: usize,
+    pub rows: Vec<usize>,
 }
 
 /// Evidence that a matched row changed.
@@ -762,11 +767,15 @@ pub struct HintClaim {
 /// As written rather than as resolved, so that reporting a hint back to its
 /// author shows them what they typed. `col_drop(a)` has one name and
 /// `col_rename(a -> b)` has two, and `col_edit` takes either form, so the shape
-/// is the hint's own rather than something its kind determines.
+/// is the hint's own rather than something its kind determines. `col_edit`
+/// alone takes a third: several names, one claim attaching to each, which is
+/// the shape a grouped `col_edit(a, b, ...)` line prints and therefore the
+/// shape that line must read back as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HintNames {
     Single(String),
     Pair(String, String),
+    List(Vec<String>),
 }
 
 /// The kind of claim a hint makes against column identity.

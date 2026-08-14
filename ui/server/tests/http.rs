@@ -126,7 +126,7 @@ fn every_route_serves_an_open_session() {
     let (status, summary) = get(address, "/api/session");
     assert_eq!(status, 200);
     assert_eq!(summary["cells"], 3);
-    assert_eq!(summary["edited_rows"], 3);
+    assert_eq!(summary["cover_columns"], 1);
     assert_eq!(summary["added_rows"], 1);
     assert_eq!(summary["dropped_rows"], 1);
     assert!(summary["schema"].as_array().unwrap().len() >= 3);

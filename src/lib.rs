@@ -171,6 +171,7 @@ pub fn diff_tables(
                     column: Coordinate::from_zero_based(column.old, column.new),
                     type_changed: column.type_changed,
                     changes: column.rows.len(),
+                    rows: one_based_rows(&column.rows),
                 })
                 .collect(),
         },
@@ -254,6 +255,7 @@ pub fn diff_tables(
                     column: Coordinate::from_zero_based(column.old, column.new),
                     type_changed: column.type_changed,
                     changes: column.changes,
+                    rows: one_based_rows(&column.rows),
                 })
                 .collect(),
             rows: pass
@@ -358,4 +360,13 @@ fn run_pass(
 
 fn one_based(indices: &[usize]) -> Vec<usize> {
     indices.iter().map(|index| index + 1).collect()
+}
+
+/// The new-side positions of changed (old, new) row pairs, one-based and
+/// ascending: the pairs ascend by old row, which says nothing about the new
+/// side under a reorder.
+fn one_based_rows(rows: &[(usize, usize)]) -> Vec<usize> {
+    let mut positions = rows.iter().map(|&(_, new)| new + 1).collect::<Vec<_>>();
+    positions.sort_unstable();
+    positions
 }

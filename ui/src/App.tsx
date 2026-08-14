@@ -110,7 +110,11 @@ export function App() {
           <div class="view-body">
             {selection.view === "schema" && <SchemaPanel summary={summary} all={schemaAll} />}
             {selection.view === "columns" && (
-              <ColumnView keyColumns={summary.key_columns} options={columnOptions} />
+              <ColumnView
+                keyColumns={summary.key_columns}
+                options={columnOptions}
+                group={selection.group}
+              />
             )}
             {selection.view === "edited" && (
               <EditedView
