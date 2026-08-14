@@ -56,6 +56,22 @@
     color-mix(in oklab, var(--accent1-hue) 10%, white),
     color-mix(in oklab, var(--accent1-hue) 10%, var(--paper)));
   --focus-ring: color-mix(in oklab, var(--accent1-hue) 20%, transparent);
+  /* The selection's own surfaces, shared by the sidebar's active entry and
+     the segmented controls' chosen segment so the two read as one system.
+     In light the selection is the card white against tan paper — a shift in
+     hue as well as lightness. In dark there is no such hue cue, and `--card`
+     is already the main panel's fill, so a selection wearing it sits flat
+     against the panel beside it. There the selection climbs clear instead:
+     the track lifts off the page and the chosen surface lifts further. */
+  --segment-track: light-dark(var(--rule), #252c33);
+  --selected-surface: light-dark(var(--card), #39424d);
+  --selected-edge: light-dark(var(--rule), #4b5666);
+  /* Blue still marks the selection, lightened for dark so an 11px label
+     holds WCAG AA on the lifted surface: 4.9:1, where the base accent on
+     that surface would reach only 3.8:1. */
+  --selected-label: light-dark(
+    var(--accent1),
+    color-mix(in oklab, var(--accent1-hue) 60%, white));
   --shadow-near: light-dark(rgba(28, 36, 48, 0.06), rgba(0, 0, 0, 0.35));
   --shadow-far: light-dark(rgba(28, 36, 48, 0.25), rgba(0, 0, 0, 0.5));
 
@@ -223,16 +239,15 @@ h1, h2, h3 { margin: 0; }
   display: flex;
 }
 
-/* The sidebar reads as a stack of folder tabs: the selected entry wears
-   the main panel's background and meets its left edge, so tab and panel
-   read as one surface. There is deliberately no rule between sidebar and
-   panel — the background contrast separates them, and a rule would draw a
-   line across the selected tab's right edge. */
+/* The sidebar reads as a list of entries, the selected one marked by a card
+   of its own that stands clear of the main panel on every side. There is
+   deliberately no rule between sidebar and panel: the background contrast
+   alone separates them. */
 .sidebar {
   flex: none;
   width: 220px;
   overflow-y: auto;
-  padding: 10px 0 10px 8px;
+  padding: 10px 8px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -246,29 +261,21 @@ h1, h2, h3 { margin: 0; }
   width: 100%;
   border: 1px solid transparent;
   background: none;
-  border-radius: 7px 0 0 7px;
+  border-radius: 7px;
   padding: 5px 9px;
   font-size: 12.5px;
   text-align: left;
 }
 .sidebar .entry:hover { background: var(--hover-row); }
-/* The selected tab pops forward: a little taller than its neighbours, no
-   right border, and a drop shadow lifting it off the stack. */
+/* The selected entry: a flat white rounded rectangle, bordered on all four
+   sides and sharing its neighbours' box, so selection moves down the list
+   without shifting it. */
 .sidebar .entry.active {
-  position: relative;
-  z-index: 1;
-  /* Taller than its neighbours and shadowed: the tab sits in front. */
-  margin: -1px 0;
-  padding: 8px 9px;
-  background: var(--card);
-  border-color: var(--rule);
-  border-right: none;
-  color: var(--accent1);
-  box-shadow:
-    -2px 2px 4px var(--shadow-near),
-    -4px 6px 14px -6px var(--shadow-far);
+  background: var(--selected-surface);
+  border-color: var(--selected-edge);
+  color: var(--selected-label);
 }
-.sidebar .entry.active .count { color: var(--accent1); }
+.sidebar .entry.active .count { color: var(--selected-label); }
 
 /* The edited-group sub-entries: the shared changed-column set as the title. */
 .sidebar .entry.sub {
@@ -362,26 +369,52 @@ select, input {
 }
 input::placeholder { color: var(--ink-faint); }
 
-/* The changed/all control: two paired buttons reading as one switch. */
+/* The changed/all control: a segmented control. The group is one recessed
+   track holding both segments, and the chosen one is raised out of it as a
+   card — so the selection reads from the surface, not from a border. */
 .paired-toggle {
   display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--segment-track);
+  border-radius: 999px;
 }
 .paired-toggle button {
-  border-radius: 0;
-  padding: 3px 9px;
+  border: 1px solid transparent;
+  /* Fully round: larger than any height the segment can take, so the ends
+     stay semicircular whatever the label's line box comes to. */
+  border-radius: 999px;
+  padding: 2px 12px;
   font-size: 11px;
-  color: var(--ink-soft);
+  background: none;
+  color: var(--ink);
 }
-.paired-toggle button:first-child {
-  border-radius: 6px 0 0 6px;
+/* The unchosen segment lifts only part-way on hover, so the raised segment
+   stays the one that reads as chosen. */
+.paired-toggle button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: transparent;
+  background: color-mix(in oklab, var(--selected-surface) 45%, transparent);
 }
-.paired-toggle button:last-child {
-  border-radius: 0 6px 6px 0;
+/* The chosen segment. Its rim matches the track in light, where it is
+   invisible and the white fill carries the shape on its own; in dark it is
+   the crisp edge that keeps the lifted surface from smudging into the
+   track. */
+.paired-toggle button.on,
+.paired-toggle button.on:hover:not(:disabled) {
+  color: var(--selected-label);
+  background: var(--selected-surface);
+  border-color: var(--selected-edge);
+  box-shadow: 0 1px 2px var(--shadow-near);
 }
-.paired-toggle button.on {
-  color: var(--accent1);
-  background: var(--accent1-soft);
-  position: relative;
+/* The focus ring outranks the flat segment's border and rides along with the
+   raised segment's shadow, which would otherwise replace it. */
+.paired-toggle button:focus-visible {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.paired-toggle button.on:focus-visible {
+  box-shadow: 0 1px 2px var(--shadow-near), 0 0 0 3px var(--focus-ring);
 }
 
 /* ---- schema panel ----------------------------------------------------------- */
