@@ -40,7 +40,7 @@ describe("Swatch", () => {
 });
 
 describe("Toggle", () => {
-  it("renders both states as paired buttons and reports clicks", () => {
+  it("renders both states as segments and reports clicks", () => {
     const clicks: boolean[] = [];
     const { rerender } = render(
       <Toggle off="changed rows" on="all rows" checked={false} onChange={(v) => clicks.push(v)} />,
@@ -48,6 +48,9 @@ describe("Toggle", () => {
     const [changed, all] = screen.getAllByRole("button");
     expect(changed.className).toBe("on");
     expect(all.className).toBe("");
+    // The raised segment is the pressed one, for readers that cannot see it.
+    expect(changed.getAttribute("aria-pressed")).toBe("true");
+    expect(all.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(all);
     expect(clicks).toEqual([true]);
@@ -55,7 +58,10 @@ describe("Toggle", () => {
     rerender(
       <Toggle off="changed rows" on="all rows" checked={true} onChange={(v) => clicks.push(v)} />,
     );
-    expect(screen.getAllByRole("button")[1].className).toBe("on");
+    const segments = screen.getAllByRole("button");
+    expect(segments[1].className).toBe("on");
+    expect(segments[1].getAttribute("aria-pressed")).toBe("true");
+    expect(segments[0].getAttribute("aria-pressed")).toBe("false");
   });
 });
 
