@@ -1,18 +1,17 @@
 import { useEffect, useState } from "preact/hooks";
 import { schemaPanel } from "../api";
-import type { SchemaRow, SessionSummary, Side } from "../types";
+import type { SchemaRow, SessionSummary } from "../types";
 import { Swatch } from "./Swatch";
 
 interface SchemaPanelProps {
   summary: SessionSummary;
   /** The toolbar's changed-only/all-columns toggle. */
   all: boolean;
-  /** The toolbar's old/new toggle: which file's position and name show. */
-  side: Side;
 }
 
-/** The schema alignment: identities, additions, and drops, one side at a time. */
-export function SchemaPanel({ summary, all, side }: SchemaPanelProps) {
+/** The schema alignment: identities, additions, and drops, with both files'
+    positions and names side by side. */
+export function SchemaPanel({ summary, all }: SchemaPanelProps) {
   const [rows, setRows] = useState<SchemaRow[]>(summary.schema);
 
   useEffect(() => {
@@ -33,7 +32,9 @@ export function SchemaPanel({ summary, all, side }: SchemaPanelProps) {
             <th class="marker" />
             <th aria-label="key" />
             <th>#</th>
-            <th>{side}</th>
+            <th>old</th>
+            <th>#</th>
+            <th>new</th>
             <th>type</th>
             <th />
           </tr>
@@ -54,9 +55,11 @@ export function SchemaPanel({ summary, all, side }: SchemaPanelProps) {
               </td>
               <td>{row.key && <span class="key-badge">PK</span>}</td>
               {/* A one-sided row has a position and name only on its own
-                  side; an identity shows the chosen side. */}
-              <td>{(side === "old" ? row.old_pos : row.new_pos) ?? ""}</td>
-              <td>{(side === "old" ? row.old_name : row.new_name) ?? ""}</td>
+                  side; the other side's cells stay empty. */}
+              <td>{row.old_pos ?? ""}</td>
+              <td>{row.old_name ?? ""}</td>
+              <td>{row.new_pos ?? ""}</td>
+              <td>{row.new_name ?? ""}</td>
               <td class="type">
                 {row.type_change ? (
                   <span class="type-change">

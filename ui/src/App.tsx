@@ -73,12 +73,11 @@ export function App() {
           with the main panel's edge. It stays visible even when the active
           view has no controls, so the layout never shifts. */}
       <div class="toolbar">
-        {/* The two-sided views show one file at a time; the cell view keeps
-            both sides as the evidence layer, and added/dropped/moved rows
-            and the fanout are one-sided already. */}
-        {(selection.view === "schema" ||
-          selection.view === "columns" ||
-          selection.view === "edited") && (
+        {/* The two-sided views show one file at a time; the schema view keeps
+            explicit old and new columns, the cell view keeps both sides as the
+            evidence layer, and added/dropped/moved rows and the fanout are
+            one-sided already. */}
+        {(selection.view === "columns" || selection.view === "edited") && (
           <Toggle
             off="old"
             on="new"
@@ -136,7 +135,7 @@ export function App() {
         <section class="main-panel">
           <div class="view-body">
             {selection.view === "schema" && (
-              <SchemaPanel summary={summary} all={schemaAll} side={side} />
+              <SchemaPanel summary={summary} all={schemaAll} />
             )}
             {selection.view === "columns" && (
               <ColumnView
