@@ -11,7 +11,7 @@ interface SidebarProps {
 /**
  * The component list: every category of change with its count, empty
  * categories hidden. "Rows edited" expands to one sub-entry per edited
- * group — the shared changed-column sets — and "Columns" to one per
+ * group — the shared changed-column sets — and "Columns edited" to one per
  * multi-column group of a shared changed-row set, the CLI's granularity.
  */
 export function Sidebar({ summary, selection, onSelect }: SidebarProps) {
@@ -44,7 +44,7 @@ export function Sidebar({ summary, selection, onSelect }: SidebarProps) {
       {summary.cover_columns > 0 && (
         <>
           <Entry
-            label="Columns"
+            label="Columns edited"
             count={summary.cover_columns}
             active={selection.view === "columns" && selection.group === null}
             onClick={() => onSelect({ view: "columns", group: null })}
@@ -115,7 +115,7 @@ export function Sidebar({ summary, selection, onSelect }: SidebarProps) {
       )}
       {summary.cells > 0 && (
         <Entry
-          label="Cells"
+          label="Cells edited"
           count={summary.cells}
           active={selection.view === "cells"}
           onClick={() => onSelect({ view: "cells" })}
