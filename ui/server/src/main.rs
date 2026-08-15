@@ -53,7 +53,18 @@ fn main() {
     println!("data-diff-ui serving on {url}");
     open_browser(&url);
 
-    let server = Server::new(initial, dist());
+    let dist = dist();
+    // Development builds rebuild the frontend on change and reload the
+    // browser; release binaries serve the built frontend as-is.
+    let _watcher = if cfg!(debug_assertions) {
+        data_diff_ui::dev::spawn_frontend_watch(&dist)
+    } else {
+        None
+    };
+    let mut server = Server::new(initial, dist);
+    if _watcher.is_some() {
+        server = server.with_live_reload();
+    }
     server.listen(&address).unwrap_or_else(|error| {
         eprintln!("data-diff-ui: cannot serve {address}: {error}");
         std::process::exit(1);

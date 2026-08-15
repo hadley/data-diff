@@ -24,11 +24,10 @@ cargo run -p data-diff-ui -- old.parquet new.parquet --key id
 
 The server prints its address (default http://127.0.0.1:9471, `--port` to change) and opens it in your browser. Launched without paths, the app opens on a form asking for them. The server finds the built frontend at `ui/dist` under the working directory or next to a `target/`-built executable; set `DATA_DIFF_UI_DIST` to point elsewhere.
 
-For frontend development with hot reload, run the API server and the Vite dev server side by side — Vite proxies `/api` to the server:
+For frontend development, just run the server in a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
 
 ```
 cargo run -p data-diff-ui -- old.parquet new.parquet
-npm run dev   # http://localhost:1420
 ```
 
 ## Launching with paths

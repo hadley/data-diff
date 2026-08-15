@@ -16,6 +16,7 @@ use crate::session::Session;
 pub struct Server {
     session: Mutex<Option<Session>>,
     dist: PathBuf,
+    live_reload: bool,
 }
 
 impl Server {
@@ -23,7 +24,15 @@ impl Server {
         Self {
             session: Mutex::new(initial),
             dist,
+            live_reload: false,
         }
+    }
+
+    /// Serve `/api/reload` and inject the reload script into HTML — the
+    /// development mode `main` switches on alongside the watch build.
+    pub fn with_live_reload(mut self) -> Self {
+        self.live_reload = true;
+        self
     }
 
     /// Serve until the process ends.
@@ -74,6 +83,11 @@ impl Server {
             .unwrap_or((request.target.as_str(), ""));
         let query = Query(query);
         match (request.method.as_str(), path) {
+            ("GET", "/api/reload") if self.live_reload => (
+                200,
+                "text/plain",
+                crate::dev::dist_stamp(&self.dist).to_string().into_bytes(),
+            ),
             ("GET", "/api/session") => self.json(|| Ok(self.summary())),
             ("POST", "/api/open") => self.json(|| {
                 let body: OpenRequest =
@@ -199,13 +213,24 @@ impl Server {
         }
         let file = self.dist.join(path.trim_start_matches('/'));
         match std::fs::read(&file) {
-            Ok(body) => (200, content_type(&file), body),
+            Ok(body) => (200, content_type(&file), self.inject(body, &file)),
             // A client-side route or a missing file gets the app shell.
             Err(_) if !path.contains('.') => match std::fs::read(self.dist.join("index.html")) {
-                Ok(body) => (200, "text/html", body),
+                Ok(body) => (200, "text/html", self.inject(body, &file)),
                 Err(_) => (404, "text/plain", b"frontend not built".to_vec()),
             },
             Err(_) => (404, "text/plain", b"not found".to_vec()),
+        }
+    }
+
+    /// Append the reload script to HTML pages while live reload is on.
+    fn inject(&self, body: Vec<u8>, file: &Path) -> Vec<u8> {
+        if self.live_reload && file.extension().and_then(|ext| ext.to_str()) == Some("html") {
+            let mut body = body;
+            body.extend_from_slice(crate::dev::RELOAD_SCRIPT.as_bytes());
+            body
+        } else {
+            body
         }
     }
 }

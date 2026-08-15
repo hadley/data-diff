@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:watch": "vite build --watch",
     "test": "vitest run",
     "serve": "cargo run -p data-diff-ui --"
   },
