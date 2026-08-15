@@ -1,35 +1,22 @@
 # Agent instructions for data-diff
 
-## Planning documents
+## Design document
 
-* `plan.md` — the detailed plan for the single step currently in flight, with a checklist tracked to completion.
-* `plan-next.md` — the ordered queue of future steps. Each item becomes its own `plan.md` and its own dedicated branch from `main`.
-* `design.md` — the durable design; plans must preserve its central invariants: deterministic reconciliation, no inferred event without underlying evidence, and continued access to the complete cell-level diff.
+* `design.md` — the durable design; all work must preserve its central invariants: deterministic reconciliation, no inferred event without underlying evidence, and continued access to the complete cell-level diff.
 
 ## Repository layout
 
 * `src/` — the `data-diff` CLI and comparison library.
 * `ui/` — `data-diff-ui`, an interactive browser UI: a Preact frontend (`ui/src`, built to `ui/dist` with Vite/npm) served by a small dependency-free Rust server (`ui/server`, cargo package `data-diff-ui`). Run with `cargo run -p data-diff-ui -- old.parquet new.parquet --key id` after `npm install && npm run build` in `ui/`. Demo data comes from `cargo run --example generate_ui_demo`. See `ui/README.md`.
 
-## "Next problem" workflow
-
-When the owner says "next problem" (or otherwise asks for the next plan):
-
-1. Confirm the current `plan.md` is complete: every checklist box checked and the work committed to `main` by the owner. If not, stop and say what is outstanding.
-2. Create a dedicated branch from `main` for the new step, named after it. Both the plan and its implementation live on this branch.
-3. Take the **first** item from `plan-next.md`.
-4. Survey the relevant code, then rewrite `plan.md` from scratch as a detailed plan for that item alone, keeping the established format: frontmatter title, a `# Todo` checklist, a `# Goal`, a `# Scope` (including what is explicitly deferred), design or verification sections as needed, and a `# Definition of done`. The plan describes the step itself; the execution rules below apply to every step and are not restated in `plan.md`.
-5. Remove the item from `plan-next.md` and renumber the remaining items.
-6. Leave both files uncommitted on the branch for owner review. Do not start implementing until the owner has reviewed the plan.
-
 ## Execution rules
 
 Development proceeds at a slow, review-first pace:
 
-* All work for a step — plan and implementation — happens on its dedicated branch from `main`; never develop directly on `main`.
-* Each plan is one separate PR-sized change.
-* Present the finished branch for careful review with its changes left uncommitted; the owner alone decides when to commit. Do not begin the next item until that review is done.
-* Every step gets isolated fixtures, integration coverage, and determinism checks; repeated runs must produce byte-identical output.
+* Each large piece of work happens on its dedicated branch from `main`; never develop directly on `main`. Multiple efforts may be in flight on separate branches at once. The user asking for a plan is a strong sign that you should use a branch.
+* Each branch is one separate PR-sized change.
+* Present the finished branch for careful review with its changes left uncommitted; the owner alone decides when to commit.
+* Every change gets isolated fixtures, integration coverage, and determinism checks; repeated runs must produce byte-identical output.
 * Before presenting work, run the full test suite, strict Clippy, formatting, and diff checks.
 
 ## Settled conventions
