@@ -213,19 +213,31 @@ impl Server {
         }
         let file = self.dist.join(path.trim_start_matches('/'));
         match std::fs::read(&file) {
-            Ok(body) => (200, content_type(&file), self.inject(body, &file)),
-            // A client-side route or a missing file gets the app shell.
-            Err(_) if !path.contains('.') => match std::fs::read(self.dist.join("index.html")) {
-                Ok(body) => (200, "text/html", self.inject(body, &file)),
-                Err(_) => (404, "text/plain", b"frontend not built".to_vec()),
+            Ok(body) => (200, content_type(path), self.inject(body, path)),
+            // The on-disk build wins; the bundled copy is the fallback for
+            // installed binaries with no `dist` beside them.
+            Err(_) => match crate::embedded::get(path) {
+                Some(body) => (200, content_type(path), self.inject(body.to_vec(), path)),
+                // A client-side route or a missing file gets the app shell.
+                None if !path.contains('.') => self.app_shell(),
+                None => (404, "text/plain", b"not found".to_vec()),
             },
-            Err(_) => (404, "text/plain", b"not found".to_vec()),
+        }
+    }
+
+    fn app_shell(&self) -> (u16, &'static str, Vec<u8>) {
+        if let Ok(body) = std::fs::read(self.dist.join("index.html")) {
+            return (200, "text/html", self.inject(body, "/index.html"));
+        }
+        match crate::embedded::get("/index.html") {
+            Some(body) => (200, "text/html", self.inject(body.to_vec(), "/index.html")),
+            None => (404, "text/plain", b"frontend not built".to_vec()),
         }
     }
 
     /// Append the reload script to HTML pages while live reload is on.
-    fn inject(&self, body: Vec<u8>, file: &Path) -> Vec<u8> {
-        if self.live_reload && file.extension().and_then(|ext| ext.to_str()) == Some("html") {
+    fn inject(&self, body: Vec<u8>, path: &str) -> Vec<u8> {
+        if self.live_reload && path.ends_with(".html") {
             let mut body = body;
             body.extend_from_slice(crate::dev::RELOAD_SCRIPT.as_bytes());
             body
@@ -250,8 +262,8 @@ struct ErrorBody {
     error: String,
 }
 
-fn content_type(file: &Path) -> &'static str {
-    match file.extension().and_then(|ext| ext.to_str()) {
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
         Some("html") => "text/html",
         Some("js") => "text/javascript",
         Some("css") => "text/css",

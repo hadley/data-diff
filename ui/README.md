@@ -24,6 +24,17 @@ cargo run -p data-diff-ui -- old.parquet new.parquet --key id
 
 The server prints its address (default http://127.0.0.1:9471, `--port` to change) and opens it in your browser. Launched without paths, the app opens on a form asking for them. The server finds the built frontend at `ui/dist` under the working directory or next to a `target/`-built executable; set `DATA_DIFF_UI_DIST` to point elsewhere.
 
+## Installing
+
+The build bundles the frontend into the binary, so an installed `data-diff-ui` stands alone — just build the frontend first:
+
+```
+cd ui && npm install && npm run build && cd ..
+cargo install --path ui/server
+```
+
+An on-disk `ui/dist` still wins when present, so development rebuilds are picked up without reinstalling; the bundled copy is the fallback.
+
 For frontend development, just run the server in a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
 
 ```

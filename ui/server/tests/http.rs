@@ -255,6 +255,26 @@ fn static_routes_and_unknown_apis_behave() {
 }
 
 #[test]
+fn missing_dist_falls_back_to_the_bundled_frontend() {
+    // The bundle is empty when the frontend was not built before cargo ran;
+    // there is nothing to assert then.
+    let Some(index) = data_diff_ui::embedded::get("/index.html") else {
+        return;
+    };
+    let address = start(Some(session()), PathBuf::from("/nonexistent"));
+
+    let (status, body) = request(address, "GET", "/", None);
+    assert_eq!(status, 200);
+    assert_eq!(body.as_bytes(), index);
+    // Client-side routes get the same bundled shell.
+    let (status, body) = request(address, "GET", "/client/route", None);
+    assert_eq!(status, 200);
+    assert_eq!(body.as_bytes(), index);
+    let (status, _) = request(address, "GET", "/missing.png", None);
+    assert_eq!(status, 404);
+}
+
+#[test]
 fn malformed_requests_get_errors_not_crashes() {
     let address = start(Some(session()), PathBuf::from("/nonexistent"));
 
