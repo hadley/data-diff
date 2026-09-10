@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use data_diff::{diff_tables, DiffOptions};
-use data_diff_ui::commands;
-use data_diff_ui::session::Session;
+use data_diff::ui::commands;
+use data_diff::ui::session::Session;
+use data_diff::{DiffOptions, diff_tables};
 use test_support::table;
 
 /// A session over in-memory tables; the paths are display strings here,
@@ -56,9 +56,10 @@ fn schema_panel_marks_keys_renames_types_and_events() {
     let all = commands::schema_panel(&session, false);
     // The toggle fills in the unchanged identities: id joins the changed rows.
     assert!(all.len() > changed.len());
-    assert!(all
-        .iter()
-        .any(|row| row.old_name.as_deref() == Some("id") && row.key));
+    assert!(
+        all.iter()
+            .any(|row| row.old_name.as_deref() == Some("id") && row.key)
+    );
 }
 
 #[test]
@@ -108,9 +109,11 @@ fn cells_page_joins_added_and_dropped_rows_on_request() {
         .filter(|item| item.old.is_none())
         .collect();
     assert_eq!(added.len(), 3);
-    assert!(added
-        .iter()
-        .all(|item| item.key[0].text == "5" && item.new.is_some() && item.delta.is_none()));
+    assert!(
+        added
+            .iter()
+            .all(|item| item.key[0].text == "5" && item.new.is_some() && item.delta.is_none())
+    );
 
     let dropped: Vec<_> = joined
         .items
@@ -118,9 +121,11 @@ fn cells_page_joins_added_and_dropped_rows_on_request() {
         .filter(|item| item.new.is_none())
         .collect();
     assert_eq!(dropped.len(), 3);
-    assert!(dropped
-        .iter()
-        .all(|item| item.key[0].text == "6" && item.old.is_some() && item.delta.is_none()));
+    assert!(
+        dropped
+            .iter()
+            .all(|item| item.key[0].text == "6" && item.old.is_some() && item.delta.is_none())
+    );
 
     // The changed lines keep both sides and interleave in key order: the
     // added row's lines follow id 4's edits, the dropped row's close out.
@@ -188,19 +193,22 @@ fn column_view_aligns_edits_and_joins_context() {
     insta::assert_json_snapshot!(view);
     // Every edited column is a pair; changed rows only.
     assert!(view.columns.iter().all(|column| column.span == "pair"));
-    assert!(view
-        .rows
-        .items
-        .iter()
-        .any(|row| row.cells.iter().any(|cell| cell.changed)));
+    assert!(
+        view.rows
+            .items
+            .iter()
+            .any(|row| row.cells.iter().any(|cell| cell.changed))
+    );
 
     let everything = commands::column_view(&session, true, true, true, None, 0, 50);
     // Unchanged identities and the added/dropped columns join as singles —
     // except the key, which is already frozen at the left edge of every row.
-    assert!(everything
-        .columns
-        .iter()
-        .any(|column| column.span == "single"));
+    assert!(
+        everything
+            .columns
+            .iter()
+            .any(|column| column.span == "single")
+    );
     assert!(everything.columns.iter().all(|column| column.name != "id"));
     assert!(everything.rows.total > view.rows.total);
 }

@@ -523,23 +523,10 @@ dependencies = [
  "criterion",
  "insta",
  "parquet",
- "serde_json",
- "test-support",
- "xxhash-rust",
-]
-
-[[package]]
-name = "data-diff-ui"
-version = "0.0.1"
-dependencies = [
- "arrow-array",
- "clap",
- "data-diff",
- "insta",
- "parquet",
  "serde",
  "serde_json",
  "test-support",
+ "xxhash-rust",
 ]
 
 [[package]]

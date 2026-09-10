@@ -7,14 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use data_diff::{Diff, Side};
+use crate::{Diff, Side};
 
-use crate::dto::{
+use crate::ui::dto::{
     self, CellRowDto, ColumnCellDto, ColumnGroupSummaryDto, ColumnGroupsDto, ColumnHeaderDto,
     ColumnRowDto, ColumnViewDto, EditedGroupSummaryDto, EditedGroupsDto, FanoutGroupDto, PageDto,
     RowLineDto, RowViewDto, SchemaRowDto, SessionSummaryDto, ValueDto,
 };
-use crate::session::Session;
+use crate::ui::session::Session;
 
 /// One identity pair, zero-based positions converted once.
 #[derive(Clone, Copy)]
@@ -53,10 +53,10 @@ fn key_positions(diff: &Diff, side: Side) -> Vec<usize> {
 
 /// The key values of one row as values, or the row's own position when the
 /// key is positional — a positional key's identity is the position.
-fn raw_key_values(session: &Session, side: Side, row: usize) -> Vec<data_diff::Value> {
+fn raw_key_values(session: &Session, side: Side, row: usize) -> Vec<crate::Value> {
     let positions = key_positions(&session.diff, side);
     if positions.is_empty() {
-        return vec![data_diff::Value::Int64(row as i64 + 1)];
+        return vec![crate::Value::Int64(row as i64 + 1)];
     }
     positions
         .iter()
@@ -202,8 +202,8 @@ pub fn session_summary(session: &Session) -> SessionSummaryDto {
 /// numerically where both are numeric — so 9 sorts before 10 — and by
 /// kind then display text across variants, which a type-changed key
 /// column can produce.
-fn value_cmp(a: &data_diff::Value, b: &data_diff::Value) -> std::cmp::Ordering {
-    use data_diff::Value;
+fn value_cmp(a: &crate::Value, b: &crate::Value) -> std::cmp::Ordering {
+    use crate::Value;
     use std::cmp::Ordering;
     match (a, b) {
         (Value::Null, Value::Null) => Ordering::Equal,
@@ -235,7 +235,7 @@ fn value_cmp(a: &data_diff::Value, b: &data_diff::Value) -> std::cmp::Ordering {
 }
 
 /// Lexicographic order over compound keys.
-fn key_cmp(a: &[data_diff::Value], b: &[data_diff::Value]) -> std::cmp::Ordering {
+fn key_cmp(a: &[crate::Value], b: &[crate::Value]) -> std::cmp::Ordering {
     a.iter()
         .zip(b)
         .map(|(x, y)| value_cmp(x, y))
@@ -274,7 +274,7 @@ impl CellEntry {
     }
 
     /// The row's key values, from the side the row exists on.
-    fn key(&self, session: &Session) -> Vec<data_diff::Value> {
+    fn key(&self, session: &Session) -> Vec<crate::Value> {
         match *self {
             CellEntry::Changed((row, _), _) | CellEntry::Added(row, _) => {
                 raw_key_values(session, Side::New, row)
@@ -323,7 +323,7 @@ pub fn cells_page(
             // By the row's key values, then the column, so a row's cells
             // stay together under its identity.
             _ => {
-                let mut keys: BTreeMap<usize, Vec<data_diff::Value>> = BTreeMap::new();
+                let mut keys: BTreeMap<usize, Vec<crate::Value>> = BTreeMap::new();
                 for &((new_row, _), _) in &entries {
                     keys.entry(new_row)
                         .or_insert_with(|| raw_key_values(session, Side::New, new_row));
@@ -373,7 +373,7 @@ pub fn cells_page(
     // Keys and column names computed once per entry: the mixed set has no
     // shared column index to sort on, a dropped row's columns having no
     // new-side positions, so the display name stands in for it.
-    let mut keyed: Vec<(String, Vec<data_diff::Value>, CellEntry)> = entries
+    let mut keyed: Vec<(String, Vec<crate::Value>, CellEntry)> = entries
         .into_iter()
         .map(|entry| (entry.column(session), entry.key(session), entry))
         .collect();
@@ -628,7 +628,7 @@ struct EditedGroup {
 /// line. Groups are ordered by where their first row occurs.
 fn edited_grouping(session: &Session) -> (Vec<usize>, Vec<EditedGroup>) {
     let diff = &session.diff;
-    let mut edits: Vec<&data_diff::RowEdit> = diff.summary.rows.iter().collect();
+    let mut edits: Vec<&crate::RowEdit> = diff.summary.rows.iter().collect();
     edits.sort_by_key(|edit| edit.row.positions().1);
     let mut order = Vec::new();
     let mut groups: Vec<EditedGroup> = Vec::new();
@@ -665,7 +665,7 @@ struct ColumnGroup {
 /// itself, and groups are ordered by where their first column occurs.
 fn column_grouping(session: &Session) -> Vec<ColumnGroup> {
     let diff = &session.diff;
-    let mut edits: Vec<&data_diff::ColumnEdit> = diff
+    let mut edits: Vec<&crate::ColumnEdit> = diff
         .summary
         .columns
         .iter()

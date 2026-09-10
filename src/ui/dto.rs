@@ -5,7 +5,7 @@
 //! and decimals serialize as strings, JSON numbers being `f64` and unable to
 //! hold every `i64` exactly.
 
-use data_diff::Value;
+use crate::Value;
 use serde::Serialize;
 
 /// A value as the frontend renders it: a kind for styling (null, NaN, and
@@ -315,8 +315,8 @@ mod tests {
 
     #[test]
     fn deltas_cover_numeric_pairs_and_skip_the_rest() {
-        use super::{delta, Value};
-        use crate::dto::value;
+        use super::{Value, delta};
+        use crate::ui::dto::value;
 
         assert_eq!(
             delta(&Value::Int64(14), &Value::Double(16.5)),

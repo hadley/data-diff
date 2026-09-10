@@ -10,7 +10,7 @@ use std::time::SystemTime;
 /// `dist`). `None` — with a warning — when npm is missing.
 pub fn spawn_frontend_watch(dist: &Path) -> Option<Watcher> {
     let Some(ui) = dist.parent() else {
-        eprintln!("data-diff-ui: cannot locate the frontend directory; live reload off");
+        eprintln!("data-diff: cannot locate the frontend directory; live reload off");
         return None;
     };
     match std::process::Command::new("npm")
@@ -19,11 +19,11 @@ pub fn spawn_frontend_watch(dist: &Path) -> Option<Watcher> {
         .spawn()
     {
         Ok(child) => {
-            println!("data-diff-ui: watching {} for changes", ui.display());
+            println!("data-diff: watching {} for changes", ui.display());
             Some(Watcher(child))
         }
         Err(error) => {
-            eprintln!("data-diff-ui: cannot start npm ({error}); live reload off");
+            eprintln!("data-diff: cannot start npm ({error}); live reload off");
             None
         }
     }
@@ -45,10 +45,10 @@ pub fn dist_stamp(dist: &Path) -> u128 {
     let mut count = 0_u128;
     visit(dist, &mut |path| {
         count += 1;
-        if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) {
-            if let Ok(since) = modified.duration_since(SystemTime::UNIX_EPOCH) {
-                newest = newest.max(since.as_nanos());
-            }
+        if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified())
+            && let Ok(since) = modified.duration_since(SystemTime::UNIX_EPOCH)
+        {
+            newest = newest.max(since.as_nanos());
         }
     });
     newest + count

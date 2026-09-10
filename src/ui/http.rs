@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::commands;
-use crate::session::Session;
+use crate::ui::commands;
+use crate::ui::session::Session;
 
 pub struct Server {
     session: Mutex<Option<Session>>,
@@ -50,7 +50,7 @@ impl Server {
                     let server = Arc::clone(&server);
                     std::thread::spawn(move || server.handle(stream));
                 }
-                Err(error) => eprintln!("data-diff-ui: connection failed: {error}"),
+                Err(error) => eprintln!("data-diff: connection failed: {error}"),
             }
         }
         Ok(())
@@ -58,7 +58,7 @@ impl Server {
 
     fn handle(&self, mut stream: std::net::TcpStream) {
         if let Err(error) = self.respond(&mut stream) {
-            eprintln!("data-diff-ui: request failed: {error}");
+            eprintln!("data-diff: request failed: {error}");
         }
     }
 
@@ -86,7 +86,9 @@ impl Server {
             ("GET", "/api/reload") if self.live_reload => (
                 200,
                 "text/plain",
-                crate::dev::dist_stamp(&self.dist).to_string().into_bytes(),
+                crate::ui::dev::dist_stamp(&self.dist)
+                    .to_string()
+                    .into_bytes(),
             ),
             ("GET", "/api/session") => self.json(|| Ok(self.summary())),
             ("POST", "/api/open") => self.json(|| {
@@ -144,8 +146,8 @@ impl Server {
                         query.flag("all_columns", false),
                         query.number("group").map(|group| group as usize),
                         match query.text("side", "") {
-                            "old" => Some(data_diff::Side::Old),
-                            "new" => Some(data_diff::Side::New),
+                            "old" => Some(crate::Side::Old),
+                            "new" => Some(crate::Side::New),
                             _ => None,
                         },
                         query.number("page").unwrap_or(0) as usize,
@@ -168,7 +170,7 @@ impl Server {
         }
     }
 
-    fn summary(&self) -> Option<crate::dto::SessionSummaryDto> {
+    fn summary(&self) -> Option<crate::ui::dto::SessionSummaryDto> {
         self.session
             .lock()
             .ok()
@@ -216,7 +218,7 @@ impl Server {
             Ok(body) => (200, content_type(path), self.inject(body, path)),
             // The on-disk build wins; the bundled copy is the fallback for
             // installed binaries with no `dist` beside them.
-            Err(_) => match crate::embedded::get(path) {
+            Err(_) => match crate::ui::embedded::get(path) {
                 Some(body) => (200, content_type(path), self.inject(body.to_vec(), path)),
                 // A client-side route or a missing file gets the app shell.
                 None if !path.contains('.') => self.app_shell(),
@@ -229,7 +231,7 @@ impl Server {
         if let Ok(body) = std::fs::read(self.dist.join("index.html")) {
             return (200, "text/html", self.inject(body, "/index.html"));
         }
-        match crate::embedded::get("/index.html") {
+        match crate::ui::embedded::get("/index.html") {
             Some(body) => (200, "text/html", self.inject(body.to_vec(), "/index.html")),
             None => (404, "text/plain", b"frontend not built".to_vec()),
         }
@@ -239,7 +241,7 @@ impl Server {
     fn inject(&self, body: Vec<u8>, path: &str) -> Vec<u8> {
         if self.live_reload && path.ends_with(".html") {
             let mut body = body;
-            body.extend_from_slice(crate::dev::RELOAD_SCRIPT.as_bytes());
+            body.extend_from_slice(crate::ui::dev::RELOAD_SCRIPT.as_bytes());
             body
         } else {
             body

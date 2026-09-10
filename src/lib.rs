@@ -17,6 +17,8 @@ mod rows;
 mod schema;
 mod summary;
 mod swap;
+#[cfg(feature = "ui")]
+pub mod ui;
 mod value;
 
 use arrow_array::RecordBatch;

@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::{Diff, DiffError, DiffOptions, Lookup, diff_tables, read_parquet};
 use arrow_array::RecordBatch;
-use data_diff::{diff_tables, read_parquet, Diff, DiffError, DiffOptions, Lookup};
 
 pub struct Session {
     pub old_path: PathBuf,
