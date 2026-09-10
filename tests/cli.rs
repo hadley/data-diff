@@ -28,6 +28,8 @@ fn help_describes_the_initial_interface() {
           --key <KEY>      Comma-separated key columns, each a shared name or an old/new pair; :row matches rows by position; when omitted, a single-column key is guessed
           --hint <HINT>    A hint, written as the output prints it, such as 'col_rename(old -> new)'; repeatable
           --hints <HINTS>  A file of hints, one per line, skipping blank lines and those starting with #
+          --ui             Serve the diff as an interactive UI in the browser instead of printing text
+          --port <PORT>    The port to serve the UI on; only meaningful with --ui [default: 9471]
       -h, --help           Print help
       -V, --version        Print version
     ");
@@ -858,6 +860,15 @@ fn contradictory_one_sided_instructions_are_refused() {
         .unwrap();
     assert!(!hinted.status.success());
     insta::assert_snapshot!(String::from_utf8(hinted.stderr).unwrap(), @r##"hints cannot apply when one side is ":missing""##);
+
+    let ui = Command::new(env!("CARGO_BIN_EXE_data-diff"))
+        .arg(":missing")
+        .arg(path.as_os_str())
+        .arg("--ui")
+        .output()
+        .unwrap();
+    assert!(!ui.status.success());
+    insta::assert_snapshot!(String::from_utf8(ui.stderr).unwrap(), @r##"--ui needs both files; a one-sided summary of ":missing" is text-only"##);
 }
 
 // Windows forbids `:` in file names, so the collision this escape hatch

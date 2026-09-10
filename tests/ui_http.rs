@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow_array::RecordBatch;
-use data_diff::{diff_tables, DiffOptions};
-use data_diff_ui::http::Server;
-use data_diff_ui::session::Session;
+use data_diff::ui::http::Server;
+use data_diff::ui::session::Session;
+use data_diff::{DiffOptions, diff_tables};
 use parquet::arrow::ArrowWriter;
 use test_support::table;
 
@@ -258,7 +258,7 @@ fn static_routes_and_unknown_apis_behave() {
 fn missing_dist_falls_back_to_the_bundled_frontend() {
     // The bundle is empty when the frontend was not built before cargo ran;
     // there is nothing to assert then.
-    let Some(index) = data_diff_ui::embedded::get("/index.html") else {
+    let Some(index) = data_diff::ui::embedded::get("/index.html") else {
         return;
     };
     let address = start(Some(session()), PathBuf::from("/nonexistent"));

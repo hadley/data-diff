@@ -23,6 +23,14 @@ struct Cli {
     /// A file of hints, one per line, skipping blank lines and those starting with #.
     #[arg(long)]
     hints: Option<PathBuf>,
+    /// Serve the diff as an interactive UI in the browser instead of printing text.
+    #[cfg(feature = "ui")]
+    #[arg(long)]
+    ui: bool,
+    /// The port to serve the UI on; only meaningful with --ui.
+    #[cfg(feature = "ui")]
+    #[arg(long, default_value_t = 9471)]
+    port: u16,
 }
 
 fn main() -> ExitCode {
@@ -44,8 +52,6 @@ fn run(cli: Cli) -> Result<(), String> {
         return run_one_sided(cli, old_missing, new_missing);
     }
 
-    let old = read_parquet(&cli.old).map_err(|error| error.to_string())?;
-    let new = read_parquet(&cli.new).map_err(|error| error.to_string())?;
     // File hints first, then inline ones, so a repeated hint reports at the
     // position a reader would look for it. Order decides nothing else: the
     // library collapses duplicates and rejects contradictions as a group.
@@ -54,6 +60,14 @@ fn run(cli: Cli) -> Result<(), String> {
         None => Vec::new(),
     };
     hints.extend(cli.hint);
+
+    #[cfg(feature = "ui")]
+    if cli.ui {
+        return data_diff::ui::serve::run(cli.old, cli.new, cli.key, hints, cli.port);
+    }
+
+    let old = read_parquet(&cli.old).map_err(|error| error.to_string())?;
+    let new = read_parquet(&cli.new).map_err(|error| error.to_string())?;
 
     let diff = diff_tables(
         &old,
@@ -83,6 +97,12 @@ fn run_one_sided(cli: Cli, old_missing: bool, new_missing: bool) -> Result<(), S
     if old_missing && new_missing {
         return Err(format!(
             "both sides are {MISSING_FILE:?}, so there is nothing to compare"
+        ));
+    }
+    #[cfg(feature = "ui")]
+    if cli.ui {
+        return Err(format!(
+            "--ui needs both files; a one-sided summary of {MISSING_FILE:?} is text-only"
         ));
     }
     if !cli.key.is_empty() {

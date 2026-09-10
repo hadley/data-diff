@@ -5,7 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [workspace]
-members = ["test-support", "ui/server"]
+members = ["test-support"]
+
+[features]
+# The interactive UI (`--ui`): the HTTP server under `src/ui`, the only code
+# needing serde. Default on so `cargo install` serves the app; off, the
+# library stays free of serde (decision of 2026-08-10, preserved).
+default = ["ui"]
+ui = ["dep:serde"]
 
 [dependencies]
 arrow-array = "54"
@@ -23,12 +30,13 @@ parquet = { version = "54", default-features = false, features = [
     "zstd",
     "brotli",
 ] }
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 criterion = "0.5"
-insta = "1"
+insta = { version = "1", features = ["json"] }
 test-support = { path = "test-support" }
 
 [[bench]]

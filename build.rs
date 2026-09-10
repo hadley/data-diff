@@ -1,5 +1,5 @@
 //! Bundle the built frontend (`ui/dist`) into the binary, so a
-//! `cargo install`ed `data-diff-ui` serves the app with no files on disk.
+//! `cargo install`ed `data-diff --ui` serves the app with no files on disk.
 //! The server still prefers the on-disk `dist` when it exists, so the
 //! development watch build keeps working. With no `dist` present the
 //! embedded table is empty and the server reports "frontend not built".
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dist = manifest.join("../dist");
+    let dist = manifest.join("ui/dist");
     let dist = dist.canonicalize().unwrap_or(dist);
     println!("cargo:rerun-if-changed={}", dist.display());
 

@@ -7,7 +7,7 @@
 ## Repository layout
 
 * `src/` — the `data-diff` CLI and comparison library.
-* `ui/` — `data-diff-ui`, an interactive browser UI: a Preact frontend (`ui/src`, built to `ui/dist` with Vite/npm) served by a small dependency-free Rust server (`ui/server`, cargo package `data-diff-ui`). Run with `cargo run -p data-diff-ui -- old.parquet new.parquet --key id` after `npm install && npm run build` in `ui/`. Demo data comes from `cargo run --example generate_ui_demo`. See `ui/README.md`.
+* `ui/` — the interactive browser UI's Preact frontend (`ui/src`, built to `ui/dist` with Vite/npm). It is served by a small dependency-free HTTP server in `src/ui/` (part of the `data-diff` crate, behind the default `ui` cargo feature; `--no-default-features` keeps the library serde-free). Run with `cargo run -- old.parquet new.parquet --key id --ui` after `npm install && npm run build` in `ui/`. Demo data comes from `cargo run --example generate_ui_demo`. See `ui/README.md`.
 
 ## Execution rules
 
