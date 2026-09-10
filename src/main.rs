@@ -24,11 +24,9 @@ struct Cli {
     #[arg(long)]
     hints: Option<PathBuf>,
     /// Serve the diff as an interactive UI in the browser instead of printing text.
-    #[cfg(feature = "ui")]
     #[arg(long)]
     ui: bool,
     /// The port to serve the UI on; only meaningful with --ui.
-    #[cfg(feature = "ui")]
     #[arg(long, default_value_t = 9471)]
     port: u16,
 }
@@ -61,7 +59,6 @@ fn run(cli: Cli) -> Result<(), String> {
     };
     hints.extend(cli.hint);
 
-    #[cfg(feature = "ui")]
     if cli.ui {
         return data_diff::ui::serve::run(cli.old, cli.new, cli.key, hints, cli.port);
     }
@@ -99,7 +96,6 @@ fn run_one_sided(cli: Cli, old_missing: bool, new_missing: bool) -> Result<(), S
             "both sides are {MISSING_FILE:?}, so there is nothing to compare"
         ));
     }
-    #[cfg(feature = "ui")]
     if cli.ui {
         return Err(format!(
             "--ui needs both files; a one-sided summary of {MISSING_FILE:?} is text-only"

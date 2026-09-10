@@ -1,6 +1,6 @@
 # data-diff --ui
 
-The interactive UI for data-diff: a sidebar listing every component of the diff — schema, columns, rows edited (per changed-column group), added, dropped, moved, fanout, cells — with the selected component's table filling the main panel, scrolling in both directions with keys and column names pinned, and loading rows lazily from the input tables as you scroll. A small dependency-free HTTP server (`src/ui`, behind the default `ui` cargo feature) holds the session and serves the Preact frontend (`ui/src`, built to `ui/dist`) straight to the browser. Everything is one binary: `data-diff` prints the text diff, and `data-diff --ui` serves the app.
+The interactive UI for data-diff: a sidebar listing every component of the diff — schema, columns, rows edited (per changed-column group), added, dropped, moved, fanout, cells — with the selected component's table filling the main panel, scrolling in both directions with keys and column names pinned, and loading rows lazily from the input tables as you scroll. A small dependency-free HTTP server (`src/ui`) holds the session and serves the Preact frontend (`ui/src`, built to `ui/dist`) straight to the browser. Everything is one binary: `data-diff` prints the text diff, and `data-diff --ui` serves the app.
 
 ## Demo data
 
