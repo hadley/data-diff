@@ -15,6 +15,15 @@ fn main() {
     let mut files = Vec::new();
     visit(&dist, &mut files);
     files.sort();
+    // A release binary has no watch build to recreate `dist` (debug
+    // `cargo run` does), so an empty embedded frontend is only a problem
+    // there — e.g. `cargo install --path .` from a fresh checkout.
+    if files.is_empty() && std::env::var("PROFILE").as_deref() == Ok("release") {
+        println!(
+            "cargo:warning=ui/dist is missing; --ui will report \"frontend not built\". \
+             Build the frontend first with `(cd ui && npm install && npm run build)`."
+        );
+    }
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded_dist.rs");
     let mut source = String::from("pub static EMBEDDED_DIST: &[(&str, &[u8])] = &[\n");

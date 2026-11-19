@@ -233,7 +233,11 @@ impl Server {
         }
         match crate::ui::embedded::get("/index.html") {
             Some(body) => (200, "text/html", self.inject(body.to_vec(), "/index.html")),
-            None => (404, "text/plain", b"frontend not built".to_vec()),
+            None => (
+                404,
+                "text/plain",
+                b"frontend not built; run `npm install && npm run build` in ui/".to_vec(),
+            ),
         }
     }
 

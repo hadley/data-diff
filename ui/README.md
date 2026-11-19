@@ -13,7 +13,15 @@ data-dict ui/demo-old.parquet ui/demo-new.parquet --key id --ui
 
 ## Frontend development
 
-Run the server from a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
+Build the frontend first — `npm install` once, then `npm run build` to produce `ui/dist`:
+
+```console
+cd ui
+npm install
+npm run build
+```
+
+Then run the server from a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
 
 ```console
 cargo run -- old.parquet new.parquet --key id --ui

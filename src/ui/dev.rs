@@ -29,6 +29,17 @@ pub fn spawn_frontend_watch(dist: &Path) -> Option<Watcher> {
     }
 }
 
+/// Block until the watch build has produced `dist/index.html`, so the first
+/// page load after `cargo run -- --ui` doesn't 404 while vite is still
+/// building. Returns immediately when the frontend is already built; gives
+/// up after `timeout` so a broken build can't hang the server.
+pub fn wait_for_frontend(dist: &Path, timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while !dist.join("index.html").exists() && start.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Keeps the watch build alive for exactly as long as the server runs.
 pub struct Watcher(std::process::Child);
 
@@ -91,5 +102,28 @@ mod tests {
     #[test]
     fn missing_dist_stamps_to_zero() {
         assert_eq!(dist_stamp(Path::new("/no/such/dir")), 0);
+    }
+
+    #[test]
+    fn wait_returns_immediately_when_index_exists() {
+        let dir = std::env::temp_dir().join(format!("data-diff-ui-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), b"html").unwrap();
+        let start = std::time::Instant::now();
+        wait_for_frontend(&dir, std::time::Duration::from_secs(30));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn wait_gives_up_after_timeout() {
+        let start = std::time::Instant::now();
+        wait_for_frontend(
+            Path::new("/no/such/dir"),
+            std::time::Duration::from_millis(300),
+        );
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(300));
+        assert!(elapsed < std::time::Duration::from_secs(2));
     }
 }

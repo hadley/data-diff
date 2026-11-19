@@ -18,17 +18,23 @@ pub fn run(
 
     let address = format!("127.0.0.1:{port}");
     let url = format!("http://{address}");
-    println!("data-diff serving the UI on {url}");
-    open_browser(&url);
 
     let dist = dist();
     // Development builds rebuild the frontend on change and reload the
-    // browser; release binaries serve the built frontend as-is.
+    // browser; release binaries serve the built frontend as-is. A fresh
+    // checkout has no `dist` until the watch build finishes, so wait for
+    // it before opening the browser.
     let _watcher = if cfg!(debug_assertions) {
-        crate::ui::dev::spawn_frontend_watch(&dist)
+        let watcher = crate::ui::dev::spawn_frontend_watch(&dist);
+        if watcher.is_some() {
+            crate::ui::dev::wait_for_frontend(&dist, std::time::Duration::from_secs(30));
+        }
+        watcher
     } else {
         None
     };
+    println!("data-diff serving the UI on {url}");
+    open_browser(&url);
     let mut server = Server::new(Some(session), dist);
     if _watcher.is_some() {
         server = server.with_live_reload();

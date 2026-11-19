@@ -51,6 +51,7 @@ Pre-built binaries are coming soon. For now, you'll need to clone the repo then:
 ```console
 git clone https://github.com/hadley/data-diff
 cd data-diff/
+(cd ui && npm install && npm run build)
 cargo build
 ```
 
