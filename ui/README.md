@@ -1,6 +1,6 @@
 # data-diff --ui
 
-The interactive UI for data-diff: a sidebar listing every component of the diff — schema, columns, rows edited (per changed-column group), added, dropped, moved, fanout, cells — with the selected component's table filling the main panel, scrolling in both directions with keys and column names pinned, and loading rows lazily from the input tables as you scroll. A small dependency-free HTTP server (`src/ui`, behind the default `ui` cargo feature) holds the session and serves the Preact frontend (`ui/src`, built to `ui/dist`) straight to the browser. Everything is one binary: `data-diff` prints the text diff, and `data-diff --ui` serves the app.
+The interactive UI for data-diff: a sidebar listing every component of the diff — schema, columns, rows edited (per changed-column group), added, dropped, moved, fanout, cells — with the selected component's table filling the main panel, scrolling in both directions with keys and column names pinned, and loading rows lazily from the input tables as you scroll. A small dependency-free HTTP server (`src/ui`) holds the session and serves the Preact frontend (`ui/src`, built to `ui/dist`) straight to the browser. Everything is one binary: `data-diff` prints the text diff, and `data-diff --ui` serves the app.
 
 ## Demo data
 
@@ -13,7 +13,15 @@ data-dict ui/demo-old.parquet ui/demo-new.parquet --key id --ui
 
 ## Frontend development
 
-Run the server from a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
+Build the frontend first — `npm install` once, then `npm run build` to produce `ui/dist`:
+
+```console
+cd ui
+npm install
+npm run build
+```
+
+Then run the server from a debug build — it starts `npm run build:watch` itself and reloads the browser whenever the rebuilt `ui/dist` changes:
 
 ```console
 cargo run -- old.parquet new.parquet --key id --ui
